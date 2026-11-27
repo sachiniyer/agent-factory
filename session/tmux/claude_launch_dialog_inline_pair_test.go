@@ -632,11 +632,18 @@ func TestCheckAndHandleTrustPrompt_InlinePairTopCutTailOverFooterStartHolds(t *t
 // over a footer PREFIX (a footer still being painted from its start). A footer
 // FRAGMENT that is not a prefix — "Esc to", "Esc to exit" (the footer's tail
 // from the middle) — is no footer start claudeLaunchDialogFooterPainting reads,
-// and a bare "Yes" is a PREFIX of the squashed pair "YesNo", not a SUFFIX, so
-// claudeLaunchDialogLabelTail declines it. None of those holds. The settled
-// whole-footer frames are backstopped by the remnant reader
-// (claudeLaunchDialogUnderGuideOf) and already hold, so they are included
-// here as a control: the fix changes only the partial-footer intersection.
+// and stays clear. The settled whole-footer frames are backstopped by the
+// remnant reader (claudeLaunchDialogUnderGuideOf) and already hold, so they
+// are included here as a control: the fix changes only the partial-footer
+// intersection.
+//
+// #7866 moved one row of the boundary: a bare "Yes" over the footer start now
+// holds. It is a PREFIX of the squashed pair "YesNo", not a suffix, so the
+// label-tail clause still declines it — but it is what a narrow or short pane
+// leaves of the option block, and under-guide reads that remnant over any
+// footer prefix that begins a row exactly as it does over the whole footer:
+// the pane's whole-footer twin ("Yes" over "Enter to confirm · Esc to exit")
+// already held on master, so the property requires the same of the prefix.
 func TestCheckAndHandleTrustPrompt_InlinePairTopCutTailOverFooterFragmentStaysClear(t *testing.T) {
 	for _, tt := range []struct {
 		name    string
@@ -648,8 +655,10 @@ func TestCheckAndHandleTrustPrompt_InlinePairTopCutTailOverFooterFragmentStaysCl
 		{"the pair tail over a footer fragment 'Esc to exit'", "es  No\n\nEsc to exit", false},
 		{"the pair tail over a footer fragment 'confirm · Esc to exit'", "es  No\n\nconfirm · Esc to exit", false},
 		// A bare "Yes" is a prefix of "YesNo", not a suffix, so the label-tail
-		// clause declines it; no whole label matches it either.
-		{"a bare 'Yes' over the footer start", "Yes\n\nEnter to", false},
+		// clause declines it and no whole label matches it — but it is the
+		// option block's remnant, and #7866's under-guide clause reads the
+		// remnant over a footer prefix exactly as over the whole footer.
+		{"a bare 'Yes' over the footer start", "Yes\n\nEnter to", true},
 		// Control: the same tails over the WHOLE footer hold via the remnant
 		// reader, with or without the fix.
 		{"the plain pair tail 'es  No' over the whole footer", "es  No\n\nEnter to confirm · Esc to exit", true},

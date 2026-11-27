@@ -37,7 +37,8 @@ type claudeLaunchDialogRemnantKind int
 const (
 	claudeLaunchDialogRemnantNone claudeLaunchDialogRemnantKind = iota
 	// claudeLaunchDialogRemnantUnderGuide: the dialog's guide row, what a
-	// narrow or short pane leaves of its option rows, and its whole footer.
+	// narrow or short pane leaves of its option rows, and its footer, whole
+	// or only begun.
 	claudeLaunchDialogRemnantUnderGuide
 	// claudeLaunchDialogRemnantPendingExit: the dialog with its footer row
 	// reading "Press Ctrl-C again to exit".
@@ -146,7 +147,10 @@ func claudeLaunchDialogLegacyFooterLast(pane claudeLaunchDialogPane) bool {
 //	            columns of a row side by side ("2N" over ".o"), and never
 //	            adds any; a short pane paints only the cursor's row
 //	footer      a whole folder-trust footer, beginning a row, the last
-//	            content, and no ❯ row
+//	            content, and no ❯ row — or a proper prefix of one that
+//	            begins a row and ends the pane's text: the footer still
+//	            painting, which the whole-footer pane also is until the
+//	            frame lands whole (#7866, #7390's premise here)
 //
 // The guide row may be missing, or cut by the top of the pane, only when
 // nothing is above it: the 2.0.25 dialog at five columns paints a character a
@@ -155,12 +159,12 @@ func claudeLaunchDialogLegacyFooterLast(pane claudeLaunchDialogPane) bool {
 // (claudeLaunchDialogGuideRowsWhole), if any of it shows, the option
 // characters, and the footer.
 //
-// Both ends are the dialog's own rows, whole, and nothing between them is
-// anything else, so a transcript that only mentions "Security guide" does not
-// read this way. A working agent's composer cannot leave it either: the
-// composer is the last thing in its pane, so a dialog quoted above one has the
-// composer's rows after its footer, and a plain rule from the guide row down,
-// which only a composer draws, keeps the pane clear.
+// Both ends are the dialog's own rows — the footer whole or only begun — and
+// nothing between them is anything else, so a transcript that only mentions
+// "Security guide" does not read this way. A working agent's composer cannot
+// leave it either: the composer is the last thing in its pane, so a dialog
+// quoted above one has the composer's rows after its footer, and a plain rule
+// from the guide row down, which only a composer draws, keeps the pane clear.
 //
 // guided is whether the dialog's guide row, or the end of it, is on the pane.
 // Only the folder-trust dialog paints that row.
@@ -177,9 +181,39 @@ func claudeLaunchDialogUnderGuideOf(pane claudeLaunchDialogPane) (held, guided b
 			end = len(pane.text) - len(footer)
 		}
 	}
-	if end <= 0 {
-		return false, false
+	if end > 0 {
+		if held, guided := claudeLaunchDialogUnderGuideOver(pane, end); held {
+			return held, guided
+		}
 	}
+	// The footer may still be painting: the pane's last content is a proper
+	// prefix of a footer that begins a row. The pane holds over the footer
+	// whole, so it holds over every such prefix of it — #7390's premise —
+	// read the same way: the same rows above it, the same guards (#7866). Each
+	// content row a footer could start on is tried, from the bottom up, the
+	// way claudeLaunchDialogFooterPainting tries them; an empty start — a
+	// bare ❯ row, which holds no text — is no prefix.
+	for content := len(pane.starts) - 1; content > 0; content-- {
+		start := pane.text[pane.starts[content]:]
+		for _, footer := range claudeLaunchDialogFooters {
+			if start == "" || len(start) >= len(footer) || !strings.HasPrefix(footer, start) {
+				continue
+			}
+			if held, guided := claudeLaunchDialogUnderGuideOver(pane, pane.starts[content]); held {
+				return held, guided
+			}
+			break
+		}
+	}
+	return false, false
+}
+
+// claudeLaunchDialogUnderGuideOver reads the pane's head — the guide row, if
+// any, and the option characters — above a footer that begins on a row at
+// offset end and ends the pane's text, whether the footer is whole or only
+// begun. The guards are the whole-footer pane's, unchanged: no ❯ row from the
+// footer's row down, and the footer sits inside no box that closes under it.
+func claudeLaunchDialogUnderGuideOver(pane claudeLaunchDialogPane, end int) (held, guided bool) {
 	footerRow, ok := pane.rowStart(end)
 	if !ok || claudeLaunchDialogAnySelected(pane, footerRow, len(pane.starts)) ||
 		claudeLaunchDialogFooterInClosedBox(pane, footerRow) {
