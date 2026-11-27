@@ -656,14 +656,15 @@ func (s *localAgentServer) Kill(trustLiveGeneration bool) error {
 	for _, br := range brokers {
 		br.close()
 	}
-	// Kill never retires the durable swap record (#7897): the record is the
-	// session ROW's, and every signal-driven path that lands here — a host
-	// reboot's SIGTERM through shutdownWorkspace, a restart's pre-launch
-	// stopUnadoptedServer on a never-launched server — leaves the daemon's
-	// row alive, so the record must survive for the reattach's restart to
-	// rehydrate in this same session dir. Retirement happens only where the
-	// row is removed: the explicit Kill RPC handler calls
+	// Kill never retires the durable swap record (#7897): retirement happens
+	// only at the explicit Kill RPC, whose handler calls
 	// Instance.RetireDurableAccountSwapRecord itself after this kill succeeds
-	// (the mktemp reap's rm -rf covers the SIGTERM-then-reap case).
+	// (row-removal kills AND archive teardown both call it — archive keeping
+	// its row is safe because archive refuses a session with an in-flight
+	// swap). Every signal-driven path that lands here — a host reboot's
+	// SIGTERM through shutdownWorkspace, a restart's pre-launch
+	// stopUnadoptedServer on a never-launched server — keeps the record for
+	// the reattach's restart to rehydrate in this same session dir; the
+	// mktemp reap's own rm -rf covers the SIGTERM-then-reap case.
 	return s.inst.currentBackend().Kill(s.inst, trustLiveGeneration)
 }

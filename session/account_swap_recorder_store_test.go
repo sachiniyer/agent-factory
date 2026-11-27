@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"syscall"
 	"testing"
 
 	"github.com/sachiniyer/agent-factory/session/git"
@@ -772,8 +773,8 @@ func TestACorruptSwapRecordStartsTheRecorderEmptyAndReconcilesAsMasterWould(t *t
 			masterFail: "the load accepts the file, the rehydrated verdict has no reconcile arm, and the row fences forever"},
 		{name: "none carrying an id", contents: `{"outcome":"none","id":"test-swap-1"}`,
 			masterFail: "the load accepts the file, the rehydrated none-with-id matches the swap's id, and the outcome has no settle arm — the row fences forever"},
-		{name: "anonymous verdict", contents: `{"outcome":"committed","id":""}`,
-			masterFail: "the load accepts the file — an id-less verdict is no state run or the discard persist ever writes"},
+		{name: "bare none", contents: `{"outcome":"none"}`,
+			masterFail: "the load accepts the file — none is a status answer, never a persisted state, so the file stays in place forever re-readable"},
 	}
 
 	for _, row := range rows {
@@ -850,14 +851,14 @@ func TestACorruptSwapRecordStartsTheRecorderEmptyAndReconcilesAsMasterWould(t *t
 	}
 }
 
-// The record belongs to the session ROW, not the server process (#7897): a
-// restart within the generation rehydrates it, a signal-driven Kill — the
-// path a host reboot's SIGTERM and a restart's pre-launch stopUnadoptedServer
-// take through shutdownWorkspace — keeps it because the daemon's row
-// survives, and only the explicit Kill RPC's own retire removes it. A session
-// re-created on the same (repo, title) key then inherits nothing a dead
-// generation reached. On master the signal-driven Kill retires the record —
-// the host-reboot case the issue names.
+// The record is retired at the explicit Kill RPC and nowhere else (#7897): a
+// restart within the generation rehydrates it, and a signal-driven Kill — the
+// path a host reboot's SIGTERM and a restart's pre-launch
+// stopUnadoptedServer take through shutdownWorkspace — keeps it, because the
+// reattach restarts the server in this same session dir and must find it.
+// A record that still outlives its row sits in a per-generation mktemp dir no
+// later generation reuses. On master the signal-driven Kill retires the
+// record — the host-reboot case the issue names.
 func TestSwapRecordRetiresWithTheSessionRowNotTheServerProcess(t *testing.T) {
 	dir := t.TempDir()
 	key := RebuildTeardownKey("/repo", "title")
@@ -891,11 +892,11 @@ func TestSwapRecordRetiresWithTheSessionRowNotTheServerProcess(t *testing.T) {
 	// alive, so the record survives with it: the reattach restarts the server
 	// in this same session dir and rehydrates.
 	require.NoError(t, las2.Kill(false))
-	assert.FileExists(t, path, "a signal-driven Kill keeps the record — the session row survives (master: it retires here)")
+	assert.FileExists(t, path, "a signal-driven Kill keeps the record — the reattach rehydrates it (master: it retires here)")
 
-	// The explicit Kill RPC is the row's removal, and its own retire ends the
-	// record's life (the daemon test pins the handler's call; here the call
-	// itself).
+	// The explicit Kill RPC's own retire ends the record's life — the af
+	// sessions kill case, which removes the row (the daemon test pins the
+	// handler's call; here the call itself).
 	second.RetireDurableAccountSwapRecord()
 	assert.NoFileExists(t, path, "the Kill RPC's retire removes the record")
 
@@ -970,13 +971,18 @@ func TestSwapRecordSurvivesAWorkspacePreservingShutdown(t *testing.T) {
 	assert.Equal(t, "swap-1", id)
 }
 
-// Only bytes that were read and then failed to decode or validate are moved
-// aside (#7897): a READ error (EIO, EACCES, EMFILE) never examined the file,
-// so a transient fault must not permanently set aside a record that may be
-// fine — the recorder starts empty and the file stays put. On master the
-// install refused the error entirely (pre-#7894) or moved the unexamined file
-// aside (post-#7894): either way the FileExists below fails there.
+// Only a non-regular entry or bytes that were read and then failed to decode
+// or validate are moved aside (#7897): a READ error (EIO, EACCES, EMFILE)
+// never examined the file, so a transient fault must not permanently set
+// aside a record that may be fine — the recorder starts empty and the file
+// stays put (surviving only until the recorder's next write, whose atomic
+// rename replaces it). On master the install moved the unexamined file aside:
+// the FileExists below fails there. Root reads through a chmod-000, so the
+// test skips there (the repo convention).
 func TestAnUnreadableSwapRecordStartsEmptyButIsLeftInPlace(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root reads through a chmod-000 file")
+	}
 	dir := t.TempDir()
 	key := RebuildTeardownKey("/repo", "title")
 	path := filepath.Join(dir, accountSwapRecordMarkerName(key))
@@ -1027,4 +1033,155 @@ func TestACorruptSwapRecordQuarantineNeverClobbersEarlierEvidence(t *testing.T) 
 	}
 	assert.True(t, seen[`{"outcome":"bogus-1"`], "the first corruption's bytes survive")
 	assert.True(t, seen[`{"outcome":"bogus-2"`], "the second corruption's bytes survive")
+}
+
+// The validator and the writer agree (#7897 review): every state a real run,
+// discardStaged or noteStagedDiscarded can persist — including the id-less
+// states an unmarked shared-scope sweep (discardStaged with "") and a
+// pre-identity daemon's swap (run with "") produce on routine paths — loads
+// cleanly on the next install: no corrupt warning, nothing moved aside, and
+// the rehydrated recorder holds exactly what the writer persisted. The
+// id-less rows fail on efea00bc6, whose validator rejected every id-less
+// state and quarantined this build's own writes — a regression from master.
+func TestEveryStateTheRecorderPersistsLoadsCleanly(t *testing.T) {
+	key := RebuildTeardownKey("/repo", "title")
+	ok := func() (string, error) { return "claude", nil }
+	boom := func() (string, error) { return "", errors.New("rotation failed") }
+	indeterminate := func() (string, error) { return "", errors.New(accountScopeIndeterminate) }
+
+	rows := []struct {
+		name  string
+		drive func(t *testing.T, r *accountSwapRecorder, s *accountSwapStore)
+		want  accountSwapRecordData
+	}{
+		{"run commits under a named swap", func(t *testing.T, r *accountSwapRecorder, _ *accountSwapStore) {
+			_, err := r.run("swap-1", ok)
+			require.NoError(t, err)
+		}, accountSwapRecordData{Outcome: swapOutcomeCommitted, Program: "claude", ID: "swap-1"}},
+
+		{"run's pending checkpoint, read mid-swap", func(t *testing.T, r *accountSwapRecorder, s *accountSwapStore) {
+			_, err := r.run("swap-1", func() (string, error) {
+				// The pre-rotation checkpoint is on disk right now — it must
+				// load cleanly too, or a crash here leaves a "corrupt" record.
+				d, lerr := s.load()
+				require.NoError(t, lerr)
+				assert.Equal(t, accountSwapRecordData{Outcome: swapOutcomePending, ID: "swap-1"}, d)
+				return "claude", nil
+			})
+			require.NoError(t, err)
+		}, accountSwapRecordData{Outcome: swapOutcomeCommitted, Program: "claude", ID: "swap-1"}},
+
+		{"run commits for a pre-identity daemon", func(t *testing.T, r *accountSwapRecorder, _ *accountSwapStore) {
+			_, err := r.run("", ok)
+			require.NoError(t, err)
+		}, accountSwapRecordData{Outcome: swapOutcomeCommitted, Program: "claude"}},
+
+		{"run rolls back under a named swap", func(t *testing.T, r *accountSwapRecorder, _ *accountSwapStore) {
+			_, err := r.run("swap-1", boom)
+			require.Error(t, err)
+		}, accountSwapRecordData{Outcome: swapOutcomeRolledBack, ID: "swap-1"}},
+
+		{"run rolls back for a pre-identity daemon", func(t *testing.T, r *accountSwapRecorder, _ *accountSwapStore) {
+			_, err := r.run("", boom)
+			require.Error(t, err)
+		}, accountSwapRecordData{Outcome: swapOutcomeRolledBack}},
+
+		{"run turns indeterminate under a named swap", func(t *testing.T, r *accountSwapRecorder, _ *accountSwapStore) {
+			_, err := r.run("swap-1", indeterminate)
+			require.Error(t, err)
+		}, accountSwapRecordData{Outcome: swapOutcomeUnknown, ID: "swap-1"}},
+
+		{"discardStaged claims a named slot", func(t *testing.T, r *accountSwapRecorder, _ *accountSwapStore) {
+			r.discardStaged("swap-1")
+		}, accountSwapRecordData{Outcome: swapOutcomeRolledBack, ID: "swap-1", Cancelled: "swap-1"}},
+
+		{"discardStaged anonymous on a fresh recorder", func(t *testing.T, r *accountSwapRecorder, _ *accountSwapStore) {
+			r.discardStaged("")
+		}, accountSwapRecordData{}},
+
+		{"noteStagedDiscarded claims a named slot", func(t *testing.T, r *accountSwapRecorder, _ *accountSwapStore) {
+			r.noteStagedDiscarded("swap-1")
+		}, accountSwapRecordData{Outcome: swapOutcomeRolledBack, ID: "swap-1"}},
+
+		{"noteStagedDiscarded anonymous", func(t *testing.T, r *accountSwapRecorder, _ *accountSwapStore) {
+			r.noteStagedDiscarded("")
+		}, accountSwapRecordData{Outcome: swapOutcomeRolledBack}},
+	}
+
+	for _, row := range rows {
+		t.Run(row.name, func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, accountSwapRecordMarkerName(key))
+			store := newAccountSwapStore(path)
+			rec := &accountSwapRecorder{store: store}
+			row.drive(t, rec, store)
+
+			d, err := store.load()
+			require.NoError(t, err, "a state this build's writer persisted must load, not read corrupt")
+			assert.Equal(t, row.want, d)
+
+			// End-to-end through the install the way RunAgentServer loads it:
+			// no corrupt warning, nothing quarantined, and the rehydrated
+			// record is exactly what the writer persisted.
+			inst := &Instance{Title: "title"}
+			require.NoError(t, inst.InstallDurableAccountSwapRecord(dir, key))
+			assert.Equal(t, row.want, inst.durableAccountSwapRecord)
+			assert.FileExists(t, path, "a persisted state is never moved aside")
+			asides, err := filepath.Glob(path + ".corrupt-*")
+			require.NoError(t, err)
+			assert.Empty(t, asides, "no quarantine ran on a state the writer persists")
+		})
+	}
+}
+
+// A non-regular entry at the record path is corrupt and moved aside, never
+// opened (#7897 review): a directory's ReadFile is EISDIR (pre-fix: left in
+// place, so every later run refused "could not checkpoint the swap record"),
+// a FIFO's ReadFile blocks forever (pre-fix: hangs startup — pre-existing
+// since #7862), and a symlink is the link, not the bytes. Lstat decides
+// before anything opens the entry. On efea00bc6 every case leaves the entry
+// in place — and the FIFO hangs the ReadFile — so only the directory and
+// symlink rows can demonstrate the failure there.
+func TestANonRegularSwapRecordEntryIsMovedAsideWithoutBeingOpened(t *testing.T) {
+	key := RebuildTeardownKey("/repo", "title")
+	rows := []struct {
+		name  string
+		plant func(t *testing.T, path string)
+	}{
+		{"directory", func(t *testing.T, path string) {
+			require.NoError(t, os.Mkdir(path, 0o700))
+		}},
+		{"fifo", func(t *testing.T, path string) {
+			require.NoError(t, syscall.Mkfifo(path, 0o600))
+		}},
+		{"symlink", func(t *testing.T, path string) {
+			require.NoError(t, os.Symlink(filepath.Join(t.TempDir(), "the-real-record"), path))
+		}},
+	}
+
+	for _, row := range rows {
+		t.Run(row.name, func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, accountSwapRecordMarkerName(key))
+			row.plant(t, path)
+
+			inst := &Instance{Title: "title"}
+			require.NoError(t, inst.InstallDurableAccountSwapRecord(dir, key),
+				"a non-regular entry is corrupt, not an open — the install returns")
+			las, ok := inst.AgentServer().(*localAgentServer)
+			require.True(t, ok)
+			o, _, id := las.acctSwap.status()
+			assert.Equal(t, swapOutcomeNone, o)
+			assert.Empty(t, id)
+
+			_, err := os.Lstat(path)
+			assert.True(t, os.IsNotExist(err), "the non-regular entry was moved aside")
+			asides, err := filepath.Glob(path + ".corrupt-*")
+			require.NoError(t, err)
+			require.Len(t, asides, 1, "one uniquely-named quarantine sibling")
+			info, err := os.Lstat(asides[0])
+			require.NoError(t, err)
+			assert.False(t, info.Mode().IsRegular(), "the entry itself moved aside, unopened")
+		})
+	}
 }

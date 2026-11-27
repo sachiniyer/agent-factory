@@ -36,24 +36,27 @@ import (
 // recorder that survives its own restart answers the recorded id's own verdict,
 // so the re-reconcile reaches the same verdict the prior process did.
 //
-// Two edges bound the file's life (#7883, #7897). At the START, a record whose
-// bytes fail to decode or validate can vouch for nothing: the install moves it
-// aside under a uniquely-named *.corrupt-* sibling (earlier evidence is never
-// renamed over) and the recorder starts empty — anonymous "none", the same
-// answer a missing record gives — rather than refusing to start and wedging
-// the session until the file is deleted by hand. A READ error never examined
-// the bytes, so the file stays put: a transient fault must not permanently
-// set aside a record that may be fine. At the END, the record belongs to one
-// session generation — the daemon's session ROW — so the explicit Kill RPC
-// (af sessions kill, archive teardown, create-cleanup — the handler in
-// daemon/agentserver_headless.go) retires it with the row: a session
-// re-created on the same (repo, title) key never inherits a verdict a dead
-// generation reached. Every other path that ends the process keeps it: a
-// crashed server never ran Kill at all, and a signal-driven kill — a host
-// reboot's SIGTERM, a restart's pre-launch stopUnadoptedServer — leaves the
-// daemon's row alive, so the reattach restarts the server in this session
-// dir and rehydrates it (#7862). The mktemp reap's own rm -rf covers the
-// SIGTERM-then-reap case.
+// Two edges bound the file's life (#7883, #7897). At the START, an entry that
+// is not a regular file, or whose bytes fail to decode or validate, can vouch
+// for nothing: the install moves it aside under a uniquely-named *.corrupt-*
+// sibling (earlier evidence is never renamed over) and the recorder starts
+// empty — anonymous "none", the same answer a missing record gives — rather
+// than refusing to start and wedging the session until the file is deleted by
+// hand. A READ error on a regular file never examined the bytes, so the file
+// stays put: a transient fault must not permanently set aside a record that
+// may be fine. It survives only until the recorder's next write, whose atomic
+// rename replaces it. At the END, the record is retired at the explicit Kill
+// RPC — the handler in daemon/agentserver_headless.go (#7897). Row-removal
+// kills (af sessions kill, create-cleanup) and archive teardown both call it;
+// archive keeping its row is safe because archive refuses a session with an
+// in-flight swap (daemon/archive.go). Every other path that ends the process
+// keeps it: a crashed server never ran Kill at all, and a signal-driven kill
+// — a host reboot's SIGTERM, a restart's pre-launch stopUnadoptedServer —
+// survives for the reattach's restart to rehydrate in this same dir (#7862);
+// the mktemp reap's own rm -rf covers the SIGTERM-then-reap case. A record
+// can also outlive its row — af reset, or a kill a dead server never answered
+// — which is harmless: it sits in a per-generation mktemp dir no later
+// generation reuses, so nothing loads it into a new generation's recorder.
 
 const accountSwapRecordPrefix = "account-swap-record-"
 
@@ -99,12 +102,24 @@ func (e *accountSwapRecordCorrupt) Unwrap() error { return e.err }
 // load rehydrates the recorder's durable state a previous process left behind.
 // A missing file is not an error: a fresh agent-server has recorded nothing,
 // and the recorder stays at its zero value — answering swapOutcomeNone exactly
-// as a recorder with no store does. A file that cannot be read is a plain
-// error (the caller starts the recorder empty and leaves it in place); a file
-// that reads but fails to decode or validate is an *accountSwapRecordCorrupt
-// (the caller moves it aside under a uniquely-named sibling) — either way the
-// recorder starts empty rather than refusing to start (#7883, #7897).
+// as a recorder with no store does. A non-regular entry is corrupt — never
+// opened, so a FIFO cannot hang the startup that reads it — and moved aside;
+// a regular file that cannot be READ is a plain error (the caller starts the
+// recorder empty and leaves it in place); one that reads but fails to decode
+// or validate is an *accountSwapRecordCorrupt (the caller moves it aside under
+// a uniquely-named sibling) — either way the recorder starts empty rather
+// than refusing to start (#7883, #7897).
 func (s *accountSwapStore) load() (accountSwapRecordData, error) {
+	fi, err := os.Lstat(s.path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return accountSwapRecordData{}, nil
+		}
+		return accountSwapRecordData{}, fmt.Errorf("stat account swap record %s: %w", s.path, err)
+	}
+	if !fi.Mode().IsRegular() {
+		return accountSwapRecordData{}, &accountSwapRecordCorrupt{fmt.Errorf("account swap record %s is not a regular file (mode %s)", s.path, fi.Mode().Type())}
+	}
 	b, err := os.ReadFile(s.path)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -123,18 +138,22 @@ func (s *accountSwapStore) load() (accountSwapRecordData, error) {
 }
 
 // validAccountSwapRecordData reports whether a decoded record names a state
-// the recorder itself could have persisted — exactly the states `run` and the
-// discard persist (#7897): `pending` is run's pre-rotation checkpoint and the
-// three verdicts are terminal, and every write carries the swap's own id, so
-// `none` (status reports it; no write produces it), an empty id, and any
-// verdict this build cannot interpret are all corrupt for vouching purposes.
-// The strictness matters: a "none" carrying an id would rehydrate into the
-// reconcile's matching-id default arm and fence a proven row forever — the
-// same wedge class an uninterpretable verdict sits in (#7883).
+// the recorder itself could have persisted — the validator and the writer
+// must agree (#7897 review): `pending` is run's pre-rotation checkpoint, the
+// three verdicts are terminal, and "" is what a discardStaged on a fresh
+// recorder persists. The id is unchecked: an unmarked shared-scope sweep
+// discards with id "" and a pre-identity daemon's swap omits swap_id, so the
+// writer persists id-less "" / verdict / checkpoint states on routine paths —
+// rejecting them would quarantine this build's own writes (a regression from
+// master, which loads them). `none` is the one outcome the writer never
+// persists — status reports it; no write produces it — so a file naming it,
+// id or not, is corrupt: a "none" carrying an id would rehydrate into the
+// reconcile's matching-id arm with no settle arm and fence a proven row
+// forever — the same wedge class an uninterpretable verdict sits in (#7883).
 func validAccountSwapRecordData(d accountSwapRecordData) bool {
 	switch d.Outcome {
-	case swapOutcomePending, swapOutcomeCommitted, swapOutcomeRolledBack, swapOutcomeUnknown:
-		return d.ID != ""
+	case "", swapOutcomePending, swapOutcomeCommitted, swapOutcomeRolledBack, swapOutcomeUnknown:
+		return true
 	}
 	return false
 }
@@ -143,11 +162,14 @@ func validAccountSwapRecordData(d accountSwapRecordData) bool {
 // unique <name>.corrupt-* sibling — rather than deleting it: the evidence of
 // what the file held survives for inspection, and under its new name no load
 // ever reads it again, so every later start rehydrates nothing (#7883). The
-// name is claimed atomically BEFORE the rename (CreateTemp's O_EXCL), so a
-// second corruption can never rename over the evidence an earlier one left
-// (#7897). The directory is synced so the rename survives a crash of the
-// process that follows. Best-effort: a failure only logs at the caller — the
-// recorder still starts empty and the file stays put.
+// name is claimed atomically BEFORE the rename (CreateTemp's O_EXCL) and this
+// function is the only producer of *.corrupt-* siblings, so a second
+// corruption can never rename over the evidence an earlier one left (#7897).
+// The placeholder is released before the rename because rename(2) cannot move
+// a non-regular entry — a directory, a FIFO — over an existing file. The
+// directory is synced so the rename survives a crash of the process that
+// follows. Best-effort: a failure only logs at the caller — the recorder
+// still starts empty and the entry stays put.
 func (s *accountSwapStore) quarantineCorrupt() error {
 	aside, err := os.CreateTemp(filepath.Dir(s.path), filepath.Base(s.path)+".corrupt-*")
 	if err != nil {
@@ -158,10 +180,10 @@ func (s *accountSwapStore) quarantineCorrupt() error {
 		_ = os.Remove(asidePath)
 		return fmt.Errorf("prepare a name to move the corrupt account swap record %s aside: %w", s.path, err)
 	}
-	// The rename replaces the placeholder WE just created — unique and ours —
-	// never another quarantine's evidence.
+	if err := os.Remove(asidePath); err != nil {
+		return fmt.Errorf("release the claimed name to move the corrupt account swap record %s aside: %w", s.path, err)
+	}
 	if err := os.Rename(s.path, asidePath); err != nil {
-		_ = os.Remove(asidePath)
 		return fmt.Errorf("move the corrupt account swap record %s aside: %w", s.path, err)
 	}
 	return syncDir(filepath.Dir(s.path))
@@ -256,11 +278,12 @@ func (i *Instance) InstallDurableAccountSwapRecord(dir, key string) error {
 		// record cannot prove AND fences every reconcile it meets, the #7858
 		// forever-fence in a new shape. Refusing to start here wedged the
 		// sandbox session — the only way out was deleting the file by hand.
-		// Only bytes that were read and then failed to decode or validate are
-		// moved aside (uniquely-named, never clobbering earlier evidence); a
-		// READ error never examined the file, so it stays in place — a
-		// transient fault must not permanently set aside a record that may be
-		// fine (#7897).
+		// Only a non-regular entry or bytes that were read and then failed to
+		// decode or validate are moved aside (uniquely-named, never clobbering
+		// earlier evidence); a READ error never examined the file, so it stays
+		// in place — a transient fault must not permanently set aside a record
+		// that may be fine. It survives only until the recorder's next write,
+		// whose atomic rename replaces it (#7897).
 		var corrupt *accountSwapRecordCorrupt
 		if errors.As(err, &corrupt) {
 			log.WarningLog.Printf("%v; the recorder starts with nothing it can vouch for, and the record is moved aside", err)
@@ -279,20 +302,19 @@ func (i *Instance) InstallDurableAccountSwapRecord(dir, key string) error {
 	return nil
 }
 
-// RetireDurableAccountSwapRecord removes the recorder's durable record when
-// the session ROW it serves is removed (#7897): the record belongs to one
-// session generation — the row's workspace lifetime — so it leaves with the
-// row rather than outliving it for a session re-created on the same
-// (repo, title) key to inherit a verdict a dead generation reached. The
-// agent-server's explicit Kill RPC is the only caller — af sessions kill,
-// archive teardown, and create-cleanup all land in the handler in
-// daemon/agentserver_headless.go. Every signal-driven path into the same
-// backend kill — a host reboot's SIGTERM, a restart's pre-launch
-// stopUnadoptedServer — leaves the daemon's row alive, and the reattach
-// restarts the server in this same session dir, which must rehydrate the
-// record (#7862); the mktemp reap's own rm -rf covers the SIGTERM-then-reap
-// case. A missing store or file is a no-op, and a removal failure is only
-// logged: the teardown stands.
+// RetireDurableAccountSwapRecord removes the recorder's durable record at the
+// explicit Kill RPC — the handler in daemon/agentserver_headless.go is the
+// only caller (#7897): af sessions kill and create-cleanup remove the session
+// row there, and archive teardown retires on a row it keeps — safe because
+// archive refuses a session with an in-flight swap (daemon/archive.go). Every
+// signal-driven path into the same backend kill — a host reboot's SIGTERM, a
+// restart's pre-launch stopUnadoptedServer — keeps the record: the reattach
+// restarts the server in this same session dir and rehydrates it (#7862), and
+// the mktemp reap's own rm -rf covers the SIGTERM-then-reap case. A record
+// that still outlives its row — af reset, a kill a dead server never answered
+// — sits in a per-generation mktemp dir no later generation reuses, so it can
+// never be loaded into a new generation's recorder. A missing store or file
+// is a no-op, and a removal failure is only logged: the teardown stands.
 func (i *Instance) RetireDurableAccountSwapRecord() {
 	i.mu.RLock()
 	store := i.durableAccountSwapStore

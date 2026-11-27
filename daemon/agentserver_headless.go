@@ -819,15 +819,17 @@ func (hs *headlessServer) Kill(_ struct{}, resp *agentOKResponse) error {
 	if err := hs.as.Kill(false); err != nil {
 		return err
 	}
-	// This RPC is the session row's removal (#7897): af sessions kill, archive
-	// teardown, and create-cleanup all land here, so the generation's durable
-	// swap record retires with the row — a session re-created on the same
-	// (repo, title) key must never inherit a verdict a dead generation
-	// reached. Signal-driven kills of the same backend — a host reboot's
-	// SIGTERM, a restart's pre-launch stopUnadoptedServer — never reach this
-	// handler, so the record survives exactly as long as the daemon's row
-	// does: the reattach restarts the server in this session dir and
-	// rehydrates it.
+	// This RPC retires the generation's durable swap record (#7897): af
+	// sessions kill and create-cleanup remove the session's row here, and
+	// archive teardown retires it on a row it keeps — safe because archive
+	// refuses a session with an in-flight swap (daemon/archive.go). Signal-
+	// driven kills of the same backend — a host reboot's SIGTERM through
+	// shutdownWorkspace, a restart's pre-launch stopUnadoptedServer — never
+	// reach this handler, so the record survives for the reattach's restart
+	// to rehydrate in this session dir. A record can also outlive its row —
+	// af reset, or a kill a dead server never answered — which is harmless:
+	// it sits in a mktemp session dir no later generation reuses, so nothing
+	// ever loads it into a new generation's recorder.
 	if hs.inst != nil {
 		hs.inst.RetireDurableAccountSwapRecord()
 	}

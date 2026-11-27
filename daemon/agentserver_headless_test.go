@@ -499,14 +499,17 @@ func TestHeadlessWorkspaceFactsMeasuresLinkedWorktree(t *testing.T) {
 	}
 }
 
-// The Kill RPC is the session row's removal (#7897): once the backend kill
-// succeeds it retires the durable swap record the agent-server installed in
-// this session dir. Signal-driven kills of the same backend — a host reboot's
-// SIGTERM through shutdownWorkspace, a restart's pre-launch
-// stopUnadoptedServer — never reach this handler, so the record's life is
-// exactly the row's. Fails on 95a8028e9, whose handler retired nothing: the
-// record outlived the row for a session re-created on the same (repo, title)
-// key to inherit.
+// The Kill RPC retires the durable swap record the agent-server installed in
+// this session dir (#7897): af sessions kill and create-cleanup remove the
+// session's row through this handler, and archive teardown calls it on a row
+// it keeps — safe because archive refuses a session with an in-flight swap
+// (daemon/archive.go). Signal-driven kills of the same backend — a host
+// reboot's SIGTERM through shutdownWorkspace, a restart's pre-launch
+// stopUnadoptedServer — never reach this handler, so the record survives for
+// the reattach's restart; a record that still outlives its row (af reset, an
+// unanswered kill) sits in a per-generation mktemp dir nothing reuses. Fails
+// on 95a8028e9, whose handler retired nothing: the record outlived the row
+// for a session re-created on the same (repo, title) key to inherit.
 func TestHeadlessKillRPCRetiresTheSwapRecord(t *testing.T) {
 	dir := t.TempDir()
 	key := session.RebuildTeardownKey("/repo", "title")
