@@ -62,7 +62,7 @@ func TestAccountDockerRunArgs_RefusesSharedRoutingNamesPerAgent(t *testing.T) {
 				continue
 			}
 			t.Run(agent+"/"+name, func(t *testing.T) {
-				err := validateAccountDockerRunArgs([]string{"-e", name + "=https://attacker.example"}, agent)
+				err := validateAccountDockerRunArgs([]string{"-e", name + "=https://attacker.example"}, agent, nil)
 				require.Errorf(t, err, "agent %q: a shared routing name %q was accepted on the account path", agent, name)
 				require.Contains(t, err.Error(), "docker.run_args")
 				require.Contains(t, err.Error(), name, "the refusal must name the variable the operator has to remove")
@@ -88,7 +88,7 @@ func TestAccountDockerRunArgs_RefusesPerAgentRoutingNames(t *testing.T) {
 		{tmux.ProgramCodex, "CODEX_CA_CERTIFICATE"},
 	} {
 		t.Run(tt.agent+"/"+tt.name, func(t *testing.T) {
-			err := validateAccountDockerRunArgs([]string{"-e", tt.name + "=https://attacker.example"}, tt.agent)
+			err := validateAccountDockerRunArgs([]string{"-e", tt.name + "=https://attacker.example"}, tt.agent, nil)
 			require.Errorf(t, err, "agent %q: a per-agent routing name %q was accepted on the account path", tt.agent, tt.name)
 			require.Contains(t, err.Error(), "docker.run_args")
 			require.Contains(t, err.Error(), tt.name)
@@ -109,7 +109,7 @@ func TestAccountDockerRunArgs_ConfigRootNamesAccepted(t *testing.T) {
 	for _, agent := range accountRoutingAgents {
 		for _, name := range []string{"GNUPGHOME", "XDG_RUNTIME_DIR", "GIT_CONFIG_NOSYSTEM"} {
 			t.Run(agent+"/"+name, func(t *testing.T) {
-				err := validateAccountDockerRunArgs([]string{"-e", name + "=/repo/controlled"}, agent)
+				err := validateAccountDockerRunArgs([]string{"-e", name + "=/repo/controlled"}, agent, nil)
 				require.NoErrorf(t, err, "agent %q: config-root name %q must not be refused on the account path", agent, name)
 			})
 		}
@@ -167,7 +167,7 @@ func TestAccountDockerRunArgs_RoutingRemedyNamesTheMountForPathValues(t *testing
 		{tmux.ProgramClaude, "DBUS_SESSION_BUS_ADDRESS"},
 	} {
 		t.Run(tt.agent+"/"+tt.name, func(t *testing.T) {
-			err := validateAccountDockerRunArgs([]string{"-e", tt.name + "=/workspace/.ca.pem"}, tt.agent)
+			err := validateAccountDockerRunArgs([]string{"-e", tt.name + "=/workspace/.ca.pem"}, tt.agent, nil)
 			require.Error(t, err)
 			require.Contains(t, err.Error(), "drop the entry", "a path-valued routing name must offer dropping the entry")
 			require.Contains(t, err.Error(), "mount the file or directory at the same container path",
@@ -184,7 +184,7 @@ func TestAccountDockerRunArgs_RoutingRemedyNamesTheMountForPathValues(t *testing
 		{tmux.ProgramCodex, "HTTPS_PROXY"},
 	} {
 		t.Run(tt.agent+"/"+tt.name, func(t *testing.T) {
-			err := validateAccountDockerRunArgs([]string{"-e", tt.name + "=https://evil.example"}, tt.agent)
+			err := validateAccountDockerRunArgs([]string{"-e", tt.name + "=https://evil.example"}, tt.agent, nil)
 			require.Error(t, err)
 			require.Contains(t, err.Error(), "session_env_passthrough")
 			require.NotContains(t, err.Error(), "mount the file",
@@ -212,7 +212,7 @@ func TestAccountDockerRunArgs_RoutingRefusalEveryArgSpelling(t *testing.T) {
 		{label: "name reads host value (no =)", args: []string{"-e", name}},
 	} {
 		t.Run(tt.label, func(t *testing.T) {
-			err := validateAccountDockerRunArgs(tt.args, tmux.ProgramClaude)
+			err := validateAccountDockerRunArgs(tt.args, tmux.ProgramClaude, nil)
 			require.Errorf(t, err, "repo run_args setting %s must be refused: %v", name, tt.args)
 			require.Contains(t, err.Error(), "docker.run_args")
 			require.Contains(t, err.Error(), name, "the refusal must name the variable the operator has to remove")
@@ -237,7 +237,7 @@ func TestAccountDockerRunArgs_RoutingRefusedInCombinedShortOptions(t *testing.T)
 		{name: "cluster with an equals value", args: []string{"-te=NODE_EXTRA_CA_CERTS=/workspace/.ca.pem"}, wantErr: "NODE_EXTRA_CA_CERTS"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			err := validateAccountDockerRunArgs(tt.args, tmux.ProgramClaude)
+			err := validateAccountDockerRunArgs(tt.args, tmux.ProgramClaude, nil)
 			require.Errorf(t, err, "a combined short option set a routing name: %v", tt.args)
 			require.Contains(t, err.Error(), tt.wantErr)
 			require.Contains(t, err.Error(), "session_env_passthrough")
@@ -277,7 +277,7 @@ func TestAccountDockerRunArgs_NoRegression_IdentityNamesStillRefused(t *testing.
 		{tmux.ProgramClaude, "CLAUDE_CONFIG_DIR"},
 	} {
 		t.Run(tt.agent+"/"+tt.name, func(t *testing.T) {
-			err := validateAccountDockerRunArgs([]string{"-e", tt.name + "=repo"}, tt.agent)
+			err := validateAccountDockerRunArgs([]string{"-e", tt.name + "=repo"}, tt.agent, nil)
 			require.Error(t, err)
 			require.Contains(t, err.Error(), "override the selected identity",
 				"identity names must keep their identity remedy, not the routing remedy")
@@ -293,7 +293,7 @@ func TestAccountDockerRunArgs_NoRegression_IdentityNamesStillRefused(t *testing.
 // program-choice remedy takes precedence.
 func TestAccountDockerRunArgs_NoRegression_ProgramChoiceNamesStillRefused(t *testing.T) {
 	for _, name := range []string{"PATH", "SHELL", "LD_PRELOAD", "LD_LIBRARY_PATH"} {
-		err := validateAccountDockerRunArgs([]string{"-e", name + "=/workspace/.x"}, tmux.ProgramCodex)
+		err := validateAccountDockerRunArgs([]string{"-e", name + "=/workspace/.x"}, tmux.ProgramCodex, nil)
 		require.Error(t, err)
 		require.NotContains(t, err.Error(), "where the agent sends the account credential",
 			"program-choice name %q must not get the routing because-clause", name)
@@ -309,7 +309,7 @@ func TestAccountDockerRunArgs_NoRegression_GeminiKeepIfSetProxyKeepsRemedy(t *te
 		if !isGeminiKeepIfSetName(name) {
 			continue
 		}
-		err := validateAccountDockerRunArgs([]string{"-e", name + "=http://evil:8080"}, tmux.ProgramGemini)
+		err := validateAccountDockerRunArgs([]string{"-e", name + "=http://evil:8080"}, tmux.ProgramGemini, nil)
 		require.Error(t, err)
 		require.Contains(t, err.Error(), "defined-empty",
 			"gemini proxy name %q must keep the keep-if-set remedy, not the routing remedy", name)
@@ -328,7 +328,7 @@ func TestAccountDockerRunArgs_NoRegression_GitConfigForClaudeCodex(t *testing.T)
 			{"-e", "GIT_CONFIG_KEY_0=safe.directory"},
 			{"-e", "GIT_CONFIG_VALUE_0=/work"},
 		} {
-			err := validateAccountDockerRunArgs(args, agent)
+			err := validateAccountDockerRunArgs(args, agent, nil)
 			require.NoErrorf(t, err, "%s: %v must stay allowed (safe.directory workaround)", agent, args)
 		}
 	}
@@ -339,11 +339,11 @@ func TestAccountDockerRunArgs_NoRegression_GitConfigForClaudeCodex(t *testing.T)
 // guard must leave it through.
 func TestAccountDockerRunArgs_NoRegression_HarmlessNames(t *testing.T) {
 	for _, name := range []string{"TZ", "LANG", "FOO_BAR"} {
-		err := validateAccountDockerRunArgs([]string{"-e", name + "=value"}, tmux.ProgramCodex)
+		err := validateAccountDockerRunArgs([]string{"-e", name + "=value"}, tmux.ProgramCodex, nil)
 		require.NoErrorf(t, err, "harmless env name %q was refused (over-refusal)", name)
 	}
 	// A harmless mount is still accepted on the account path.
-	err := validateAccountDockerRunArgs([]string{"--mount", "type=bind,src=/tmp/other,dst=/workspace/extra"}, tmux.ProgramCodex)
+	err := validateAccountDockerRunArgs([]string{"--mount", "type=bind,src=/tmp/other,dst=/workspace/extra"}, tmux.ProgramCodex, nil)
 	require.NoError(t, err)
 }
 
@@ -369,7 +369,7 @@ func TestAccountDockerRunArgs_AccountGuardCoversCredentialRoutingClass(t *testin
 				continue
 			}
 			t.Run(agent+"/"+name, func(t *testing.T) {
-				err := validateAccountDockerRunArgs([]string{"-e", name + "=attacker"}, agent)
+				err := validateAccountDockerRunArgs([]string{"-e", name + "=attacker"}, agent, nil)
 				require.Errorf(t, err, "agent %q: routing name %q (credentialMountDeniedReason: %q) must be refused on the account path", agent, name, reason)
 				require.Contains(t, err.Error(), name)
 			})
@@ -383,6 +383,11 @@ func TestAccountDockerRunArgs_AccountGuardCoversCredentialRoutingClass(t *testin
 // run, so the account's authenticated traffic is never delivered to a
 // repo-controlled server.
 func TestDockerAccountRunArgs_RefusesRoutingRedirectRunArgs(t *testing.T) {
+	// A real agent on the daemon's PATH resolves to a host-qualified
+	// executable the account proof refuses before run_args is even read, so
+	// the e2e fixes PATH to the system bins — the refusal being exercised is
+	// the validator's, not the provenance gate's.
+	t.Setenv("PATH", "/usr/bin:/bin")
 	for _, tt := range []struct {
 		agent string
 		name  string
@@ -413,6 +418,7 @@ func TestDockerAccountRunArgs_RefusesRoutingRedirectRunArgs(t *testing.T) {
 // end-to-end combined-short-option pin: a routing name hidden behind a -t in
 // a combined short option is refused before docker run.
 func TestDockerAccountRunArgs_RoutingRefusedInCombinedShortOptionsE2E(t *testing.T) {
+	t.Setenv("PATH", "/usr/bin:/bin") // see RefusesRoutingRedirectRunArgs
 	runCalled, err, _ := provisionDockerAccountImageEnv(t, tmux.ProgramClaude,
 		[]string{"-te", "ANTHROPIC_BASE_URL=https://api.evil.example"}, nil, nil)
 	require.Error(t, err)

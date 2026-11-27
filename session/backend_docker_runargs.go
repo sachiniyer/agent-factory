@@ -525,3 +525,27 @@ func accountProtectedPath(target string) string {
 	}
 	return ""
 }
+
+// dockerForwardedPassthroughNames is the name set of the session's effective
+// session_env_passthrough — the operator's claims af emits ahead of run_args
+// as bare `-e NAME` entries resolving against the daemon's environment. Docker
+// keeps the LAST -e for a name, so a run_args env entry naming one of these is
+// an override of the operator's forwarded value whatever the name's class —
+// both guarded validators refuse exactly this set (#7867 R2).
+//
+// A pane-boundary name is never an effective claim: forwarding one is refused
+// at Provision on every docker session and af's blanking -e dominates it
+// anyway, so listing it grants no forwarded value to override. Keeping it out
+// leaves the classified refusals — the credential-mount path's denied-reason
+// walk, the account path's own classes — to report it with their accurate
+// messages instead of the override one.
+func dockerForwardedPassthroughNames(passthrough []string) map[string]struct{} {
+	forwarded := make(map[string]struct{}, len(passthrough))
+	for _, name := range passthrough {
+		if _, paneBoundary := credentialMountPaneBoundaryNames[name]; paneBoundary {
+			continue
+		}
+		forwarded[name] = struct{}{}
+	}
+	return forwarded
+}

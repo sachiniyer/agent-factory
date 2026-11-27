@@ -299,9 +299,22 @@ func resolveAgentCredentialMounts(agent string, relabel bool) []string {
 // Every mountable agent has a non-empty set — the shared credential and
 // routing names alone guarantee it — so this guard is never a no-op on the
 // roster the way #4454's account-only table was for amp and opencode.
-func validateCredentialDockerRunArgs(args []string, agent string) error {
+func validateCredentialDockerRunArgs(args []string, agent string, passthrough []string) error {
+	// Every name the operator claims is checked first: af emits the forwarded
+	// names as bare -e entries ahead of run_args, and Docker keeps the last -e
+	// for a name, so a repo -e naming ANY of them — whatever class
+	// credentialMountDeniedReason would give it — is an override of the
+	// operator's forwarded value (#7867 R2). Running this first keeps the
+	// refusal honest: for a name the operator already forwards, "have the
+	// operator forward it" would be a remedy they already took.
+	forwarded := dockerForwardedPassthroughNames(passthrough)
 	checkEnv := func(value string) error {
 		name, _, _ := strings.Cut(value, "=")
+		if _, claimed := forwarded[name]; claimed {
+			return fmt.Errorf(
+				"backend=docker: docker.run_args cannot set %s for the credential-mount session's %s agent because the operator forwards that name through session_env_passthrough — a repo -e lands after af's forwarded -e entries and Docker keeps the last one for a name, so it would override the operator's forwarded value; drop the entry",
+				name, agent)
+		}
 		if reason, refused := credentialMountDeniedReason(agent, name); refused {
 			return fmt.Errorf(
 				"backend=docker: docker.run_args cannot set %s for the credential-mount session's %s agent because %s — drop the entry, or have the operator forward %s through the global session_env_passthrough",

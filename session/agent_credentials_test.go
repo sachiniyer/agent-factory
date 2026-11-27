@@ -223,7 +223,7 @@ func TestAgentCredentialMounts_PassTheAccountRunArgsGuard(t *testing.T) {
 	for _, relabel := range []bool{false, true} {
 		for agent := range agentCredentialFiles {
 			mounts := agentCredentialMounts(agent, "/home/tester", relabel, func(string) bool { return true })
-			if err := validateAccountDockerRunArgs(mounts, "codex"); err != nil {
+			if err := validateAccountDockerRunArgs(mounts, "codex", nil); err != nil {
 				t.Errorf("relabel=%v agent %q credential mounts were refused by the account guard: %v\nargs: %#v", relabel, agent, err, mounts)
 			}
 		}
@@ -235,7 +235,7 @@ func TestAgentCredentialMounts_PassTheAccountRunArgsGuard(t *testing.T) {
 		{"-tv", "/evil:" + dockerAccountHome + ":ro,z"},
 		{"--mount", "type=bind,src=/evil,dst=" + dockerAccountHome + ",readonly"},
 	} {
-		if err := validateAccountDockerRunArgs(args, "codex"); err == nil {
+		if err := validateAccountDockerRunArgs(args, "codex", nil); err == nil {
 			t.Errorf("a protected-path mount was ACCEPTED behind a relabel mode: %#v", args)
 		}
 	}

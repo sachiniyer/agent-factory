@@ -61,7 +61,7 @@ func TestDockerAccount_RefusesEnvBehindLongoptValue(t *testing.T) {
 	for _, opt := range dockerRunLongoptSwallowsEnv {
 		t.Run(opt, func(t *testing.T) {
 			args := []string{opt, "-e", "--env=CODEX_API_KEY=repo-identity"}
-			err := validateAccountDockerRunArgs(args, "codex")
+			err := validateAccountDockerRunArgs(args, "codex", nil)
 			require.Errorf(t, err, "env flag behind a consumed %s value was accepted: %v", opt, args)
 			require.Contains(t, err.Error(), "CODEX_API_KEY",
 				"the refusal must name the variable the operator has to remove, not the phantom --env")
@@ -79,7 +79,7 @@ func TestDockerAccount_RefusesMountBehindLongoptValue(t *testing.T) {
 			{opt, "--volume", "--mount=type=bind,source=/host,target=/af-account"},
 			{opt, "-e", "--volume=/host:/af-account"},
 		} {
-			err := validateAccountDockerRunArgs(args, "codex")
+			err := validateAccountDockerRunArgs(args, "codex", nil)
 			require.Errorf(t, err, "mount flag behind a consumed %s value was accepted: %v", opt, args)
 			require.Contains(t, err.Error(), "/af-account",
 				"the refusal must name the protected destination, not the swallowed token")
@@ -106,7 +106,7 @@ func TestDockerAccount_LongoptSwallowsEnvFlagSilently(t *testing.T) {
 		{"--label", "-e", "--env=TZ=UTC"},
 		{"--user", "-e", "-e", "TZ=UTC"},
 	} {
-		require.NoErrorf(t, validateAccountDockerRunArgs(args, "codex"),
+		require.NoErrorf(t, validateAccountDockerRunArgs(args, "codex", nil),
 			"a run_args Docker admits was refused: %v", args)
 	}
 }
@@ -119,7 +119,7 @@ func TestDockerCredential_RefusesEnvBehindLongoptValue(t *testing.T) {
 		dockerRunLongoptSwallowsCredential...) {
 		t.Run(opt, func(t *testing.T) {
 			args := []string{opt, "-e", "--env=GH_HOST=evil.example"}
-			err := validateCredentialDockerRunArgs(args, tmux.ProgramGemini)
+			err := validateCredentialDockerRunArgs(args, tmux.ProgramGemini, nil)
 			require.Errorf(t, err, "env flag behind a consumed %s value was accepted: %v", opt, args)
 			require.Contains(t, err.Error(), "GH_HOST",
 				"the refusal must name the variable the operator has to remove, not the phantom --env")
@@ -141,7 +141,7 @@ func TestDockerCredential_LongoptSwallowsEnvFlagSilently(t *testing.T) {
 			{"--label", "-e", "--env=TZ=UTC"},
 			{"--mount", "type=bind,source=/x,target=/y", "-e", "TZ=UTC"},
 		} {
-			require.NoErrorf(t, validateCredentialDockerRunArgs(args, agent),
+			require.NoErrorf(t, validateCredentialDockerRunArgs(args, agent, nil),
 				"agent %q: a run_args Docker admits was refused: %v", agent, args)
 		}
 	}
@@ -159,7 +159,7 @@ func TestDockerAccount_RefusesUnknownLongopt(t *testing.T) {
 		{"--log-level=debug"}, // a docker GLOBAL option `docker run` rejects
 		{"--config=/x"},
 	} {
-		err := validateAccountDockerRunArgs(args, "codex")
+		err := validateAccountDockerRunArgs(args, "codex", nil)
 		require.Errorf(t, err, "an option af cannot model was walked past: %v", args)
 		require.Contains(t, err.Error(), "docker.run_args")
 	}
@@ -175,7 +175,7 @@ func TestDockerAccount_RefusesUnknownBareShorthand(t *testing.T) {
 		{"-D", "-e", "TZ=UTC"},
 		{"-H", "unix:///sock"},
 	} {
-		err := validateAccountDockerRunArgs(args, "codex")
+		err := validateAccountDockerRunArgs(args, "codex", nil)
 		require.Errorf(t, err, "an unknown bare shorthand was walked past: %v", args)
 		require.Contains(t, err.Error(), "docker.run_args")
 	}
@@ -185,7 +185,7 @@ func TestDockerAccount_RefusesUnknownBareShorthand(t *testing.T) {
 // option parsing mid-argv, and af emits its own options and the image name
 // after run_args — every one of them would become container command words.
 func TestDockerAccount_RefusesDashDashTerminator(t *testing.T) {
-	err := validateAccountDockerRunArgs([]string{"--", "-e", "TZ=UTC"}, "codex")
+	err := validateAccountDockerRunArgs([]string{"--", "-e", "TZ=UTC"}, "codex", nil)
 	require.Errorf(t, err, "-- was walked past")
 	require.Contains(t, err.Error(), "--")
 }
@@ -201,7 +201,7 @@ func TestDockerCredential_RefusesUnknownOptions(t *testing.T) {
 		{"--", "-e", "GH_HOST=evil.example"},
 		{"--log-level=debug"},
 	} {
-		err := validateCredentialDockerRunArgs(args, tmux.ProgramGemini)
+		err := validateCredentialDockerRunArgs(args, tmux.ProgramGemini, nil)
 		require.Errorf(t, err, "an option af cannot model was walked past: %v", args)
 		require.Contains(t, err.Error(), "docker.run_args")
 	}
@@ -286,7 +286,7 @@ func TestDockerAccount_AdmitsCommonRunArgs(t *testing.T) {
 		{"--runtime=runc"},
 		{"--volume-driver=local"},
 	} {
-		require.NoErrorf(t, validateAccountDockerRunArgs(args, "codex"),
+		require.NoErrorf(t, validateAccountDockerRunArgs(args, "codex", nil),
 			"a run_args shape docker run accepts was refused: %v", args)
 	}
 }
@@ -307,7 +307,7 @@ func TestDockerAccount_RefusesPositionalTokens(t *testing.T) {
 		{""},
 		{"-it", "evil/img"},
 	} {
-		err := validateAccountDockerRunArgs(args, "codex")
+		err := validateAccountDockerRunArgs(args, "codex", nil)
 		require.Errorf(t, err, "a non-option argument was admitted: %v", args)
 		require.Contains(t, err.Error(), "docker.image",
 			"the refusal must name the config key that sets the image")
@@ -316,7 +316,7 @@ func TestDockerAccount_RefusesPositionalTokens(t *testing.T) {
 	// a positional: "evil/img" is --label's value, so docker's parsing
 	// continues and the real image is still af's configured one.
 	require.NoError(t, validateAccountDockerRunArgs(
-		[]string{"--label", "evil/img", "-e", "TZ=UTC"}, "codex"))
+		[]string{"--label", "evil/img", "-e", "TZ=UTC"}, "codex", nil))
 }
 
 // TestDockerCredential_AdmitsCommonRunArgs is the same pin on the credential
@@ -350,7 +350,7 @@ func TestDockerCredential_AdmitsCommonRunArgs(t *testing.T) {
 			{"--pull", "missing"},
 			{"--sig-proxy=false"},
 		} {
-			require.NoErrorf(t, validateCredentialDockerRunArgs(args, agent),
+			require.NoErrorf(t, validateCredentialDockerRunArgs(args, agent, nil),
 				"agent %q: a run_args shape docker run accepts was refused: %v", agent, args)
 		}
 	}
@@ -368,7 +368,7 @@ func TestDockerCredential_RefusesPositionalTokens(t *testing.T) {
 			{"-"},
 			{"-it", "evil/img"},
 		} {
-			err := validateCredentialDockerRunArgs(args, agent)
+			err := validateCredentialDockerRunArgs(args, agent, nil)
 			require.Errorf(t, err, "agent %q: a non-option argument was admitted: %v", agent, args)
 			require.Contains(t, err.Error(), "docker.image",
 				"agent %q: the refusal must name the config key that sets the image", agent)

@@ -73,7 +73,7 @@ func TestDockerCredentialRunArgs_RefusesConfigRootRedirectPerAgent(t *testing.T)
 			{label: "name reads host value (no =)", args: []string{"-e", name}},
 		} {
 			t.Run(agent+"/"+tt.label, func(t *testing.T) {
-				err := validateCredentialDockerRunArgs(tt.args, agent)
+				err := validateCredentialDockerRunArgs(tt.args, agent, nil)
 				require.Errorf(t, err, "repo run_args redirecting %s must be refused: %v", name, tt.args)
 				require.Contains(t, err.Error(), "docker.run_args")
 				require.Contains(t, err.Error(), name, "the refusal must name the variable the operator has to remove")
@@ -92,7 +92,7 @@ func TestDockerCredentialRunArgs_RefusesEveryDeniedNamePerAgent(t *testing.T) {
 		denied := credentialMountDeniedNames(agent)
 		require.NotEmpty(t, denied, "agent %q must have a non-empty denied set to guard", agent)
 		for name := range denied {
-			err := validateCredentialDockerRunArgs([]string{"-e", name + "=repo"}, agent)
+			err := validateCredentialDockerRunArgs([]string{"-e", name + "=repo"}, agent, nil)
 			require.Errorf(t, err, "agent %q: denied name %q was accepted", agent, name)
 			require.Contains(t, err.Error(), name)
 		}
@@ -115,7 +115,7 @@ func TestDockerCredentialRunArgs_DeniedSetCoversAccountGuard(t *testing.T) {
 			if _, refused := denied[harmless]; refused {
 				continue
 			}
-			require.NoErrorf(t, validateCredentialDockerRunArgs([]string{"-e", harmless + "=x"}, agent),
+			require.NoErrorf(t, validateCredentialDockerRunArgs([]string{"-e", harmless + "=x"}, agent, nil),
 				"agent %q: harmless name %q was refused (over-refusal)", agent, harmless)
 		}
 	}
@@ -132,7 +132,7 @@ func TestDockerCredentialRunArgs_RefusesEnvFile(t *testing.T) {
 			{"-env-file", "repo.env"},
 			{"--env-file=repo.env"},
 		} {
-			err := validateCredentialDockerRunArgs(args, agent)
+			err := validateCredentialDockerRunArgs(args, agent, nil)
 			require.Errorf(t, err, "agent %q: env-file passed: %v", agent, args)
 			require.Contains(t, err.Error(), "env-file")
 			require.Contains(t, err.Error(), "non-credential entries inline as -e",
@@ -158,7 +158,7 @@ func TestDockerCredentialRunArgs_RefusesIdentityInCombinedShortOptions(t *testin
 		{name: "cluster with an equals value", args: []string{"-te=CODEX_HOME=/nonexistent"}, wantErr: "CODEX_HOME"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			err := validateCredentialDockerRunArgs(tt.args, tmux.ProgramCodex)
+			err := validateCredentialDockerRunArgs(tt.args, tmux.ProgramCodex, nil)
 			require.Errorf(t, err, "a combined short option set the credential root: %v", tt.args)
 			require.Contains(t, err.Error(), tt.wantErr)
 		})
@@ -173,13 +173,13 @@ func TestDockerCredentialRunArgs_RefusesIdentityInCombinedShortOptions(t *testin
 // replace af's single-file credential mount.
 func TestDockerCredentialRunArgs_RefusesUnreadableCombinedShortOptions(t *testing.T) {
 	t.Run("unknown before env is refused", func(t *testing.T) {
-		err := validateCredentialDockerRunArgs([]string{"-Xe", "CODEX_HOME=/nonexistent"}, tmux.ProgramCodex)
+		err := validateCredentialDockerRunArgs([]string{"-Xe", "CODEX_HOME=/nonexistent"}, tmux.ProgramCodex, nil)
 		require.Error(t, err)
 		require.Contains(t, err.Error(), "combined short option")
 		require.Contains(t, err.Error(), "-Xe", "the refusal must name the argument the operator has to fix")
 	})
 	t.Run("unknown after a boolean before env is refused", func(t *testing.T) {
-		err := validateCredentialDockerRunArgs([]string{"-itYe", "CODEX_HOME=/nonexistent"}, tmux.ProgramCodex)
+		err := validateCredentialDockerRunArgs([]string{"-itYe", "CODEX_HOME=/nonexistent"}, tmux.ProgramCodex, nil)
 		require.Error(t, err)
 		require.Contains(t, err.Error(), "combined short option")
 	})
@@ -189,7 +189,7 @@ func TestDockerCredentialRunArgs_RefusesUnreadableCombinedShortOptions(t *testin
 		// rest of the cluster or the NEXT argument as its value, and docker
 		// rejects it outright either way, so #7726 refuses rather than
 		// walking past.
-		err := validateCredentialDockerRunArgs([]string{"-Xv", "/tmp/cache:/workspace"}, tmux.ProgramCodex)
+		err := validateCredentialDockerRunArgs([]string{"-Xv", "/tmp/cache:/workspace"}, tmux.ProgramCodex, nil)
 		require.Error(t, err)
 		require.Contains(t, err.Error(), "combined short option")
 	})
@@ -201,7 +201,7 @@ func TestDockerCredentialRunArgs_RefusesUnreadableCombinedShortOptions(t *testin
 			{"-tX", "-e", "GH_HOST=evil"},
 			{"-X"},
 		} {
-			err := validateCredentialDockerRunArgs(args, tmux.ProgramCodex)
+			err := validateCredentialDockerRunArgs(args, tmux.ProgramCodex, nil)
 			require.Errorf(t, err, "an unknown shorthand was walked past: %v", args)
 			require.Contains(t, err.Error(), "docker.run_args")
 		}
@@ -223,7 +223,7 @@ func TestDockerCredentialRunArgs_AllowsHarmlessCombinedShortOptions(t *testing.T
 		{"-p8080:80"},
 	} {
 		t.Run(strings.Join(args, " "), func(t *testing.T) {
-			require.NoErrorf(t, validateCredentialDockerRunArgs(args, tmux.ProgramCodex),
+			require.NoErrorf(t, validateCredentialDockerRunArgs(args, tmux.ProgramCodex, nil),
 				"a harmless combined short option was refused: %v", args)
 		})
 	}
@@ -240,7 +240,7 @@ func TestDockerCredentialRunArgs_ClusterScanDoesNotSkipALaterEnv(t *testing.T) {
 		{"-it", "-e", "CODEX_API_KEY=repo"},
 	} {
 		t.Run(strings.Join(args, " "), func(t *testing.T) {
-			err := validateCredentialDockerRunArgs(args, tmux.ProgramCodex)
+			err := validateCredentialDockerRunArgs(args, tmux.ProgramCodex, nil)
 			require.Errorf(t, err, "an identity env after a combined short option escaped validation: %v", args)
 		})
 	}
@@ -268,7 +268,7 @@ func TestDockerCredentialRunArgs_AllowsEveryMountInstallingOption(t *testing.T) 
 		{"-v", "/tmp/shadow/.codex:/root/.codex:ro"},  // parent dir does not shadow the file child
 	} {
 		t.Run(strings.Join(args, " "), func(t *testing.T) {
-			require.NoErrorf(t, validateCredentialDockerRunArgs(args, tmux.ProgramCodex),
+			require.NoErrorf(t, validateCredentialDockerRunArgs(args, tmux.ProgramCodex, nil),
 				"a mount/device option was refused on the credential path (over-refusal): %v", args)
 		})
 	}
@@ -281,7 +281,7 @@ func TestDockerCredentialRunArgs_AllowsEveryMountInstallingOption(t *testing.T) 
 // so they are refused in run_args — they live in the refused set, not here.
 func TestDockerCredentialRunArgs_AllowsHarmlessEnvNames(t *testing.T) {
 	for _, name := range []string{"TZ", "LANG", "FOO"} {
-		require.NoErrorf(t, validateCredentialDockerRunArgs([]string{"-e", name + "=value"}, tmux.ProgramCodex),
+		require.NoErrorf(t, validateCredentialDockerRunArgs([]string{"-e", name + "=value"}, tmux.ProgramCodex, nil),
 			"harmless env name %q was refused (over-refusal)", name)
 	}
 }
@@ -301,11 +301,11 @@ func TestDockerCredentialRunArgs_DevinGuardedBySharedNamesOnly(t *testing.T) {
 		denied := credentialMountDeniedNames(agent)
 		require.NotEmpty(t, denied,
 			"agent %q: the shared credential/routing names must make the mount denied set non-empty", agent)
-		require.NoErrorf(t, validateCredentialDockerRunArgs([]string{"-e", "DEVIN_API_KEY=repo"}, agent),
+		require.NoErrorf(t, validateCredentialDockerRunArgs([]string{"-e", "DEVIN_API_KEY=repo"}, agent, nil),
 			"agent %q: an env name its CLI never reads was refused (over-refusal)", agent)
-		require.Errorf(t, validateCredentialDockerRunArgs([]string{"-e", "HTTPS_PROXY=https://attacker.example"}, agent),
+		require.Errorf(t, validateCredentialDockerRunArgs([]string{"-e", "HTTPS_PROXY=https://attacker.example"}, agent, nil),
 			"agent %q: a proxy name that routes the mounted credential must be refused", agent)
-		require.Errorf(t, validateCredentialDockerRunArgs([]string{"--env-file", "repo.env"}, agent),
+		require.Errorf(t, validateCredentialDockerRunArgs([]string{"--env-file", "repo.env"}, agent, nil),
 			"agent %q: an env file can carry a classified name and must be refused", agent)
 	}
 }
@@ -349,7 +349,7 @@ func TestDockerCredentialRunArgs_RefusesCredentialSubstitutionForEmptyAccountSet
 				{label: "name reads host value (no =)", args: []string{"-e", name}},
 			} {
 				t.Run(agent+"/"+tt.label+"/"+name, func(t *testing.T) {
-					err := validateCredentialDockerRunArgs(tt.args, agent)
+					err := validateCredentialDockerRunArgs(tt.args, agent, nil)
 					require.Error(t, err, "agent %q: repo run_args setting %s must be refused: %v", agent, name, tt.args)
 					require.Contains(t, err.Error(), "docker.run_args")
 					require.Contains(t, err.Error(), name, "the refusal must name the variable the operator has to remove")
@@ -374,7 +374,7 @@ func TestDockerCredentialRunArgs_RefusesEnvFileForEmptyAccountSetAgents(t *testi
 			{"--env-file=repo.env"},
 		} {
 			t.Run(agent+"/"+strings.Join(args, "_"), func(t *testing.T) {
-				err := validateCredentialDockerRunArgs(args, agent)
+				err := validateCredentialDockerRunArgs(args, agent, nil)
 				require.Error(t, err, "agent %q: env-file passed: %v", agent, args)
 				require.Contains(t, err.Error(), "env-file")
 				require.Contains(t, err.Error(), "non-credential entries inline as -e")
@@ -413,7 +413,7 @@ func TestDockerCredentialRunArgs_AllowsDeploymentConfigForEmptyAccountSetAgents(
 	for _, agent := range credentialAgentsThatSubstituteEnv {
 		for _, entry := range deploymentEnvForAgent[agent] {
 			t.Run(agent+"/"+entry, func(t *testing.T) {
-				require.NoErrorf(t, validateCredentialDockerRunArgs([]string{"-e", entry}, agent),
+				require.NoErrorf(t, validateCredentialDockerRunArgs([]string{"-e", entry}, agent, nil),
 					"agent %q: a deployment-config env entry that does not substitute or route the credential was refused (over-refusal): %s", agent, entry)
 			})
 		}
@@ -451,7 +451,7 @@ func TestDockerCredentialRunArgs_RefusesRoutingNamesPerAgent(t *testing.T) {
 		{tmux.ProgramOpencode, "SSH_AUTH_SOCK"},
 	} {
 		t.Run(tt.agent+"/"+tt.name, func(t *testing.T) {
-			err := validateCredentialDockerRunArgs([]string{"-e", tt.name + "=attacker"}, tt.agent)
+			err := validateCredentialDockerRunArgs([]string{"-e", tt.name + "=attacker"}, tt.agent, nil)
 			require.Errorf(t, err, "agent %q: a routing name %s that changes where the mounted credential is sent was accepted", tt.agent, tt.name)
 			require.Contains(t, err.Error(), tt.name)
 			require.Contains(t, err.Error(), "session_env_passthrough", "the refusal must name the operator remedy")
@@ -486,7 +486,7 @@ func TestDockerCredentialRunArgs_RefusesCredentialSubstitutionInCombinedShortOpt
 	}
 	for _, tt := range cases {
 		t.Run(tt.name, func(t *testing.T) {
-			err := validateCredentialDockerRunArgs(tt.args, tt.agent)
+			err := validateCredentialDockerRunArgs(tt.args, tt.agent, nil)
 			require.Errorf(t, err, "a combined short option set a credential-bearing name: %v", tt.args)
 			require.Contains(t, err.Error(), tt.wantErr)
 		})
@@ -514,7 +514,7 @@ func TestDockerCredentialRunArgs_AllowsHarmlessCombinedShortOptionsForEmptyAccou
 		{tmux.ProgramAmp, []string{"-p8080:80"}},
 	} {
 		t.Run(tt.agent+"/"+strings.Join(tt.args, "_"), func(t *testing.T) {
-			require.NoErrorf(t, validateCredentialDockerRunArgs(tt.args, tt.agent),
+			require.NoErrorf(t, validateCredentialDockerRunArgs(tt.args, tt.agent, nil),
 				"a harmless combined short option was refused on the credential path (over-refusal): %v", tt.args)
 		})
 	}
@@ -536,7 +536,7 @@ func TestDockerCredentialRunArgs_ClusterScanDoesNotSkipALaterEnvForEmptyAccountS
 		{tmux.ProgramAmp, []string{"-ie", "TZ=UTC", "-e", "AMP_API_KEY=repo"}, "AMP_API_KEY"},
 	} {
 		t.Run(tt.agent+"/"+tt.name, func(t *testing.T) {
-			err := validateCredentialDockerRunArgs(tt.args, tt.agent)
+			err := validateCredentialDockerRunArgs(tt.args, tt.agent, nil)
 			require.Errorf(t, err,
 				"agent %q: a credential-bearing env after a combined short option escaped validation: %v", tt.agent, tt.args)
 			require.Contains(t, err.Error(), tt.name)
@@ -621,7 +621,7 @@ func TestDockerCredentialRunArgs_GuardCoversAccountScopedRelocatingAgents(t *tes
 	relocating, ok := configAgentsInAccountConfigVars()
 	require.True(t, ok, "could not enumerate the relocating agents")
 	for agent := range relocating {
-		err := validateCredentialDockerRunArgs([]string{"-e", "__PROBE__=x"}, agent)
+		err := validateCredentialDockerRunArgs([]string{"-e", "__PROBE__=x"}, agent, nil)
 		// __PROBE__ is not a denied name, so this only confirms the guard runs
 		// (the denied set is non-empty); it must not refuse a harmless probe.
 		require.NoErrorf(t, err, "agent %q: harmless probe was refused (over-refusal)", agent)
@@ -651,7 +651,7 @@ func TestDockerCredentialRunArgs_GuardCoversCredentialSubstitutingAgents(t *test
 			require.Containsf(t, credentialMountDeniedNames(agent), name,
 				"agent %q: identity name %q is missing from the credential-mount denied set", agent, name)
 		}
-		err := validateCredentialDockerRunArgs([]string{"-e", "__PROBE__=x"}, agent)
+		err := validateCredentialDockerRunArgs([]string{"-e", "__PROBE__=x"}, agent, nil)
 		// __PROBE__ is not a denied name, so this only confirms the guard runs
 		// (the denied set is non-empty); it must not refuse a harmless probe.
 		require.NoErrorf(t, err, "agent %q: harmless probe was refused (over-refusal)", agent)
@@ -673,7 +673,7 @@ func TestDockerCredentialRunArgs_GuardCoversEveryAgentCredentialFile(t *testing.
 			// Guard is active for this agent. Confirm the harmless probe is
 			// not over-refused — the guard _runs_ and would refuse a real
 			// credential-bearing name.
-			require.NoErrorf(t, validateCredentialDockerRunArgs([]string{"-e", "__PROBE__=x"}, agent),
+			require.NoErrorf(t, validateCredentialDockerRunArgs([]string{"-e", "__PROBE__=x"}, agent, nil),
 				"agent %q: harmless probe was refused (over-refusal) for a guarded credential-mount agent", agent)
 			continue
 		}

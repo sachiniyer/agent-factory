@@ -51,7 +51,7 @@ func TestDockerCredentialRunArgs_RefusesLateLoadedEndpointNames(t *testing.T) {
 		"CODE_ASSIST_ENDPOINT", "GOOGLE_GEMINI_BASE_URL",
 		"GOOGLE_VERTEX_BASE_URL", "CODE_ASSIST_API_VERSION",
 	} {
-		err := validateCredentialDockerRunArgs([]string{"-e", name + "=https://repo.example"}, tmux.ProgramGemini)
+		err := validateCredentialDockerRunArgs([]string{"-e", name + "=https://repo.example"}, tmux.ProgramGemini, nil)
 		require.Errorf(t, err, "gemini: repo run_args setting late-loaded endpoint name %s must be refused", name)
 		require.Contains(t, err.Error(), name, "the refusal must name the variable the operator has to remove")
 		require.Contains(t, err.Error(), "session_env_passthrough", "the refusal must name the operator remedy")
@@ -59,7 +59,7 @@ func TestDockerCredentialRunArgs_RefusesLateLoadedEndpointNames(t *testing.T) {
 	// GOOGLE_CLOUD_UNIVERSE_DOMAIN is read only by bundled library code, but
 	// it retargets the credential-bearing telemetry dial host, so repo
 	// run_args setting it is refused on the same terms as the endpoint names.
-	err := validateCredentialDockerRunArgs([]string{"-e", "GOOGLE_CLOUD_UNIVERSE_DOMAIN=evil.example.com"}, tmux.ProgramGemini)
+	err := validateCredentialDockerRunArgs([]string{"-e", "GOOGLE_CLOUD_UNIVERSE_DOMAIN=evil.example.com"}, tmux.ProgramGemini, nil)
 	require.Errorf(t, err, "gemini: repo run_args setting GOOGLE_CLOUD_UNIVERSE_DOMAIN must be refused — it retargets the telemetry dial host")
 	require.Contains(t, err.Error(), "GOOGLE_CLOUD_UNIVERSE_DOMAIN")
 	require.Contains(t, err.Error(), "session_env_passthrough")
@@ -747,7 +747,7 @@ func TestCredentialMount_LoaderFilledNamesArePinnedEmpty(t *testing.T) {
 // is refused — the family stays af's or the operator's own.
 func TestDockerCredentialRunArgs_RefusesGitConfigPairs(t *testing.T) {
 	for _, name := range []string{"GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_0", "GIT_CONFIG_KEY_17", "GIT_CONFIG_VALUE_17"} {
-		err := validateCredentialDockerRunArgs([]string{"-e", name + "=x"}, tmux.ProgramGemini)
+		err := validateCredentialDockerRunArgs([]string{"-e", name + "=x"}, tmux.ProgramGemini, nil)
 		require.Errorf(t, err, "%s in repository run_args must be refused — a forwarded count would activate it", name)
 		require.Contains(t, err.Error(), name)
 		require.Contains(t, err.Error(), "session_env_passthrough", "the refusal must name the operator remedy")

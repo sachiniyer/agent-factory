@@ -113,7 +113,7 @@ func TestDockerAccount_RefusesIdentityEnvBehindBareValueShorthand(t *testing.T) 
 		{name: "label eats -e then --env=LD_LIBRARY_PATH", args: []string{"-l", "-e", "--env=LD_LIBRARY_PATH=/workspace/.git/evil"}, wantErr: "LD_LIBRARY_PATH"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			err := validateAccountDockerRunArgs(tt.args, "claude")
+			err := validateAccountDockerRunArgs(tt.args, "claude", nil)
 			require.Errorf(t, err, "an identity env sneaked behind a bare value-taking shorthand must be refused: %v", tt.args)
 			require.Contains(t, err.Error(), tt.wantErr,
 				"the refusal must name the REAL denied variable, not the phantom --env")
@@ -136,16 +136,16 @@ func TestDockerAccount_RefusesMountBehindBareValueShorthand(t *testing.T) {
 	// must NOT refuse this (over-refusal): Docker honors no mount here. The
 	// fixture stops at the swallowed token — a bare spec after it would be a
 	// positional, refused for its own reason (#7733 R1).
-	require.NoErrorf(t, validateAccountDockerRunArgs([]string{"-l", "-v"}, "codex"),
+	require.NoErrorf(t, validateAccountDockerRunArgs([]string{"-l", "-v"}, "codex", nil),
 		"a -v swallowed by a bare -l is the label's value and installs no mount")
 
 	// -v swallows the next arg as its value: a following --mount is NOT a fresh
 	// mount (it is -v's value), so no mount lands and the guard must not refuse.
-	require.NoErrorf(t, validateAccountDockerRunArgs([]string{"-v", "--mount"}, "codex"),
+	require.NoErrorf(t, validateAccountDockerRunArgs([]string{"-v", "--mount"}, "codex", nil),
 		"a --mount swallowed by a bare -v is -v's value, not a fresh mount")
 
 	// -h swallows --mount: --mount is -h's value and installs no mount.
-	require.NoErrorf(t, validateAccountDockerRunArgs([]string{"-h", "--mount"}, "codex"),
+	require.NoErrorf(t, validateAccountDockerRunArgs([]string{"-h", "--mount"}, "codex", nil),
 		"a --mount swallowed by a bare -h installs no mount")
 
 	// A REAL --mount written AFTER the bare shorthand's consumed value must
@@ -154,7 +154,7 @@ func TestDockerAccount_RefusesMountBehindBareValueShorthand(t *testing.T) {
 	// must catch it. Before the fix, -l was skipped and -v re-read as a mount
 	// (refusing the wrong spec); after the fix, -v is consumed as -l's value
 	// and the real --mount is examined and refused.
-	require.Errorf(t, validateAccountDockerRunArgs([]string{"-l", "-v", "--mount", "type=bind,src=/tmp/other,dst=/af-account"}, "codex"),
+	require.Errorf(t, validateAccountDockerRunArgs([]string{"-l", "-v", "--mount", "type=bind,src=/tmp/other,dst=/af-account"}, "codex", nil),
 		"a real --mount after a bare shorthand's consumed value must be examined and refused")
 }
 
@@ -176,7 +176,7 @@ func TestDockerAccount_RefusesIdentityEnvBehindClusterValueShorthand(t *testing.
 		{name: "-tl eats -e then --env=LD_PRELOAD", args: []string{"-tl", "-e", "--env=LD_PRELOAD=/workspace/.git/evil.so"}, wantErr: "LD_PRELOAD"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			err := validateAccountDockerRunArgs(tt.args, "claude")
+			err := validateAccountDockerRunArgs(tt.args, "claude", nil)
 			require.Errorf(t, err, "an identity env sneaked behind a cluster's swallowed -e must be refused: %v", tt.args)
 			require.Contains(t, err.Error(), tt.wantErr)
 			require.NotContains(t, err.Error(), "--env")
