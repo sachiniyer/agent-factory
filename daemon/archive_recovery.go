@@ -261,13 +261,18 @@ func (m *Manager) prepareDirectRepoGoneKillCleanup(
 		return nil
 	}
 	recovery, unresolved := instance.WorktreeRelocationRecovery()
-	if unresolved && recovery.State != sessiongit.RelocationRecoveryStalled {
+	if unresolved && recovery.State != sessiongit.RelocationRecoveryStalled &&
+		recovery.State != sessiongit.RelocationRecoveryMoveInFlight {
 		// Any other lifecycle is owned by the destruction admission below: it
 		// validates cleanup-ready records and refuses the rest. A stalled probe
 		// record is this gate's own residue (or restore's), carries no
 		// authority in either direction, and is exactly what a retry claim may
 		// re-resolve — so fall through and reclaim it rather than leaving the
-		// session unkillable in this process (#3278 review).
+		// session unkillable in this process (#3278 review). A crash-left
+		// move_in_flight record resolves through that same claim — the
+		// resolution picks the candidate the kill must authorize (and retires
+		// the staging it names) — so it falls through too rather than
+		// repeating the admission's refusal forever (#7819 round two).
 		return nil
 	}
 	repoPath := instance.GetRepoPath()

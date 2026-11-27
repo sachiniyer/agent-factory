@@ -772,6 +772,59 @@ func TestKillSession_StalledAlternateReclaimVerifiesSelectedPath(t *testing.T) {
 		"the settled kill must delete the session row")
 }
 
+// TestKillSession_DirectRepoGoneMoveInFlightConverges: a crash mid-copy during
+// restore or rename leaves an archived row carrying a move_in_flight record;
+// when the origin is then deleted, admission treats the row as record-free so
+// recheckOrigin refuses with "kill the session again" — and while this
+// producer's gate skipped every unresolved state but stalled, the same kill
+// repeated the refusal forever (#7819 round two, N2). The producer must
+// resolve the record through the same claim the record-free row takes: the
+// resolution picks the candidate the kill must authorize and retires the
+// staging the record names, so the kill converges instead of looping.
+func TestKillSession_DirectRepoGoneMoveInFlightConverges(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	title := "direct-move-in-flight"
+	inst, _ := registerArchivable(t, manager, repoID, repoPath, title)
+	inst.SetBackend(&recoverFakeBackend{FakeBackend: session.NewFakeBackend()})
+	gw, err := inst.GetGitWorktree()
+	require.NoError(t, err)
+	_, _, err = manager.ArchiveSession(ArchiveSessionRequest{Title: title, RepoID: repoID})
+	require.NoError(t, err)
+	archivedPath := inst.GetWorktreePath()
+	require.NoError(t, os.RemoveAll(repoPath))
+
+	// Install the record the interrupted cross-device move would have left:
+	// the primary still holds the archived worktree and the staged copy the
+	// record names sits at .af-copy-* beside the never-published destination.
+	staging := filepath.Join(t.TempDir(), ".af-copy-0123456789abcdef0123456789abcdef")
+	require.NoError(t, os.MkdirAll(staging, 0o755))
+	info, err := os.Stat(archivedPath)
+	require.NoError(t, err)
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	require.True(t, ok)
+	require.NoError(t, gw.RestoreRelocationRecovery(sessiongit.RelocationRecovery{
+		State:         sessiongit.RelocationRecoveryMoveInFlight,
+		AlternatePath: filepath.Join(t.TempDir(), "archived-move-dest"),
+		IdentityKnown: true,
+		Device:        uint64(stat.Dev),
+		Inode:         uint64(stat.Ino),
+		FileType:      uint32(stat.Mode & syscall.S_IFMT),
+		StagingPath:   staging,
+	}))
+	require.NoError(t, persistInstanceData(repoID, inst.ToInstanceData()))
+
+	inst.SetBackend(&session.LocalBackend{})
+	_, err = manager.KillSession(KillSessionRequest{Title: title, RepoID: repoID})
+	require.NoError(t, err,
+		"the move_in_flight record resolves through the claim; the kill must not loop")
+	assert.False(t, exists(archivedPath),
+		"the kill must consume the archived directory the claim selected")
+	assert.False(t, exists(staging),
+		"claim resolution must retire the staging the record named")
+	assert.Nil(t, recordFor(t, repoID, title),
+		"the settled kill must delete the session row")
+}
+
 // TestKillSession_DirectRepoGoneStagingPersistFailureStaysRetryable: when the
 // direct-kill producer's FIRST durable write (the claim_stale staging fence)
 // fails, nothing durable exists — so the in-memory fence must be un-staged, or
