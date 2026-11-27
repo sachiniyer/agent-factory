@@ -106,7 +106,8 @@ const (
 	swapOutcomeNone       = "none"        // no swap has run on this server
 	swapOutcomeCommitted  = "committed"   // the new agent started on the new account
 	swapOutcomeRolledBack = "rolled_back" // the old scope was put back
-	swapOutcomeUnknown    = "unknown"     // the scope could not be put back
+	swapOutcomeUnknown    = "unknown"     // the scope could not be put back (terminal)
+	swapOutcomePending    = "pending"     // this swap's id was checkpointed before the rotation
 )
 
 // reconcileSwap learns how a swap whose response was lost actually ended, from
@@ -158,28 +159,42 @@ func (w *sandboxWorkspace) reconcileSwap(sw AccountSwapper, swapID string, scope
 				return true, prog, true, nil
 			case swapOutcomeRolledBack:
 				return false, "", true, nil
-			case swapOutcomeUnknown:
-				// This swap ran but its scope could not be put back, so the
-				// record alone cannot settle it. The host's layout is the
-				// other witness: a still-staged, never-rotated scope
-				// (scopeOutgoing — account.next.<id> present, no account.prev)
-				// PROVES the swap never reached the rotation, so it can only
-				// roll back. Settle as rolled_back only AFTER the serialized
-				// discard tombstones this swap's id and removes its stage —
-				// never on this first read — so a late run(swapID) that names
-				// the still-staged scope is refused instead of committing
-				// against a daemon that already recorded a rollback (#7862
-				// review). The discard claims this swap's own rolled_back for
-				// the slot its stage was just removed from (refuseLocked), so
-				// the second read settles. Any other layout stays fenced: a
-				// scopeIncoming/unknown over this swap's own unknown means the
-				// rotation may have reached the host, and a commit must never
-				// be guessed, so the row fences exactly where master would.
+			case swapOutcomePending:
+				// The pre-rotation checkpoint: this swap's id was persisted
+				// BEFORE swap() ran, so a restart rehydrated a swap that had
+				// not yet reached the rotation. The record alone cannot settle
+				// it — the host's layout is the other witness. A still-staged,
+				// never-rotated scope (scopeOutgoing — account.next.<id>
+				// present, no account.prev) PROVES the swap never reached the
+				// rotation, so it can only roll back. Settle as rolled_back
+				// only AFTER the serialized discard tombstones this swap's id
+				// and removes its stage — never on this first read — so a
+				// late run(swapID) that names the still-staged scope is
+				// refused instead of committing against a daemon that already
+				// recorded a rollback (#7862 review). The discard claims this
+				// swap's own rolled_back for the slot its stage was just
+				// removed from (refuseLocked), so the second read settles. Any
+				// other layout stays fenced: a scopeIncoming/unknown over this
+				// swap's own pending means the rotation may have reached the
+				// host, and a commit must never be guessed, so the row fences
+				// exactly where master would.
 				if w.probeScopeState(swapID, scopedStage, sshShortStepTimeout) != scopeOutgoing {
 					return false, "", false, nil
 				}
 				// scopeOutgoing: fall through to the shared discard below,
 				// then re-read.
+			case swapOutcomeUnknown:
+				// A terminal unknown: swap() ran and its scope could not be
+				// put back, so the rotation MAY have reached the host. The
+				// record alone cannot settle it, and unlike the pre-rotation
+				// checkpoint this state is NOT safe for the discard to upgrade
+				// to rolled_back — a straggler run(swapID) that takes the
+				// recorder's lock between this read and the discard can leave
+				// the host with neither account in place, and upgrading its
+				// terminal unknown to rolled_back would settle a rollback
+				// against a host that has no live scope (#7862 review). Fence,
+				// as on master.
+				return false, "", false, nil
 			default:
 				return false, "", false, nil
 			}
@@ -195,7 +210,7 @@ func (w *sandboxWorkspace) reconcileSwap(sw AccountSwapper, swapID string, scope
 				if w.probeScopeState(swapID, scopedStage, sshShortStepTimeout) != scopeOutgoing {
 					return false, "", false, nil
 				}
-			case swapOutcomeUnknown:
+			case swapOutcomeUnknown, swapOutcomePending:
 				// The host's scope is in doubt: fence, and leave every directory —
 				// the staged scope included — for whatever recovery inspects them.
 				return false, "", false, nil

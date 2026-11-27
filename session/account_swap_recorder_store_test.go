@@ -445,6 +445,11 @@ func TestSwapRestartReconcileSettlesEveryCrashPointToTheHostsProvenVerdictOrFenc
 		// Such a row must fail on 8a68aee82, which settled before the
 		// discard and left the still-staged scope open to a late commit.
 		stragglerRefused bool
+		// stageUntouched asserts the staged scope (account.next.<N>) is left
+		// in place after the reconcile — the property that a terminal
+		// `unknown` is fenced, not discarded, so a host the rotation may have
+		// reached keeps its staged scope for recovery (#7862 review P2).
+		stageUntouched bool
 	}
 
 	const (
@@ -462,15 +467,15 @@ func TestSwapRestartReconcileSettlesEveryCrashPointToTheHostsProvenVerdictOrFenc
 			masterVerdict: "settled rolled_back (none -> probe scopeOutgoing -> discard -> rolled_back)"},
 
 		// 2. after the pre-write, before the first rename: the disk holds
-		//    {unknown, N} and the host proves scopeOutgoing. This head
+		//    {pending, N} and the host proves scopeOutgoing. This head
 		//    settles as rolled_back; 53e3e788a fences (the P1).
-		{name: "2-after-prewrite-before-rename/prior", hasPrior: true, disk: accountSwapRecordData{Outcome: swapOutcomeUnknown, ID: swapN}, stage: true, settled: true, account: "work",
+		{name: "2-after-prewrite-before-rename/prior", hasPrior: true, disk: accountSwapRecordData{Outcome: swapOutcomePending, ID: swapN}, stage: true, settled: true, account: "work",
 			masterVerdict: "settled rolled_back (none -> probe scopeOutgoing -> discard)", newlyCorrect: true},
-		{name: "2-after-prewrite-before-rename/none", hasPrior: false, disk: accountSwapRecordData{Outcome: swapOutcomeUnknown, ID: swapN}, stage: true, settled: true, account: "work",
+		{name: "2-after-prewrite-before-rename/none", hasPrior: false, disk: accountSwapRecordData{Outcome: swapOutcomePending, ID: swapN}, stage: true, settled: true, account: "work",
 			masterVerdict: "settled rolled_back (none -> probe scopeOutgoing -> discard)", newlyCorrect: true},
 
 		// 2b. the straggler property on the same crash point: a matching
-		//     `unknown` over a proven scopeOutgoing settles only AFTER the
+		//     `pending` over a proven scopeOutgoing settles only AFTER the
 		//     serialized discard tombstones swapN, so a late run(swapN) that
 		//     names the still-staged scope is refused instead of committing
 		//     against a daemon that already recorded a rollback (#7862
@@ -478,25 +483,25 @@ func TestSwapRestartReconcileSettlesEveryCrashPointToTheHostsProvenVerdictOrFenc
 		//     without discarding, so the tombstone was never set and the
 		//     still-staged scope was still present — the straggler rotates
 		//     and commits, and these rows fail there.
-		{name: "2b-after-prewrite-before-rename-straggler/prior", hasPrior: true, disk: accountSwapRecordData{Outcome: swapOutcomeUnknown, ID: swapN}, stage: true, settled: true, account: "work", stragglerRefused: true,
+		{name: "2b-after-prewrite-before-rename-straggler/prior", hasPrior: true, disk: accountSwapRecordData{Outcome: swapOutcomePending, ID: swapN}, stage: true, settled: true, account: "work", stragglerRefused: true,
 			masterVerdict: "settled rolled_back (none -> probe scopeOutgoing -> discard -> tombstone)"},
-		{name: "2b-after-prewrite-before-rename-straggler/none", hasPrior: false, disk: accountSwapRecordData{Outcome: swapOutcomeUnknown, ID: swapN}, stage: true, settled: true, account: "work", stragglerRefused: true,
+		{name: "2b-after-prewrite-before-rename-straggler/none", hasPrior: false, disk: accountSwapRecordData{Outcome: swapOutcomePending, ID: swapN}, stage: true, settled: true, account: "work", stragglerRefused: true,
 			masterVerdict: "settled rolled_back (none -> probe scopeOutgoing -> discard -> tombstone)"},
 
 		// 3. between the two renames: next + prev both present, so the host
 		//    cannot prove the swap never rotated. The row fences, as master
 		//    does (none -> probe scopeUnknown -> fence).
-		{name: "3-between-renames/prior", hasPrior: true, disk: accountSwapRecordData{Outcome: swapOutcomeUnknown, ID: swapN}, stage: true, prev: true, fenced: true, account: "work",
+		{name: "3-between-renames/prior", hasPrior: true, disk: accountSwapRecordData{Outcome: swapOutcomePending, ID: swapN}, stage: true, prev: true, fenced: true, account: "work",
 			masterVerdict: "fenced (none -> probe scopeUnknown -> fence)"},
-		{name: "3-between-renames/none", hasPrior: false, disk: accountSwapRecordData{Outcome: swapOutcomeUnknown, ID: swapN}, stage: true, prev: true, fenced: true, account: "work",
+		{name: "3-between-renames/none", hasPrior: false, disk: accountSwapRecordData{Outcome: swapOutcomePending, ID: swapN}, stage: true, prev: true, fenced: true, account: "work",
 			masterVerdict: "fenced (none -> probe scopeUnknown -> fence)"},
 
 		// 4. after the rotation, before the terminal save: a prev is present
 		//    (scopeIncoming), so the rotation may have reached the host. The
 		//    row fences, as master does (none -> probe scopeIncoming -> fence).
-		{name: "4-after-rotation-before-terminal-save/prior", hasPrior: true, disk: accountSwapRecordData{Outcome: swapOutcomeUnknown, ID: swapN}, prev: true, fenced: true, account: "work",
+		{name: "4-after-rotation-before-terminal-save/prior", hasPrior: true, disk: accountSwapRecordData{Outcome: swapOutcomePending, ID: swapN}, prev: true, fenced: true, account: "work",
 			masterVerdict: "fenced (none -> probe scopeIncoming -> fence)"},
-		{name: "4-after-rotation-before-terminal-save/none", hasPrior: false, disk: accountSwapRecordData{Outcome: swapOutcomeUnknown, ID: swapN}, prev: true, fenced: true, account: "work",
+		{name: "4-after-rotation-before-terminal-save/none", hasPrior: false, disk: accountSwapRecordData{Outcome: swapOutcomePending, ID: swapN}, prev: true, fenced: true, account: "work",
 			masterVerdict: "fenced (none -> probe scopeIncoming -> fence)"},
 
 		// 5. after the terminal save: a matching committed over a prev —
@@ -529,6 +534,21 @@ func TestSwapRestartReconcileSettlesEveryCrashPointToTheHostsProvenVerdictOrFenc
 			masterVerdict: "fenced (none -> probe scopeNone -> fence)", newlyCorrect: true},
 		{name: "8-tombstone-window/none", hasPrior: false, disk: accountSwapRecordData{Outcome: swapOutcomeRolledBack, ID: swapN, Cancelled: swapN}, settled: true, account: "work",
 			masterVerdict: "fenced (none -> probe scopeNone -> fence)", newlyCorrect: true},
+
+		// 9. a terminal unknown over a proven scopeOutgoing: the rotation
+		//    ran and its scope could not be put back, so the record alone
+		//    cannot settle it and the discard must NOT upgrade it to
+		//    rolled_back — a straggler that took the lock between the read
+		//    and the discard can leave the host with neither account in
+		//    place (#7862 review P2). The row fences and the staged scope
+		//    is left untouched, as on master. On ce99d8d45 a matching
+		//    `unknown` over scopeOutgoing fell through to the discard, the
+		//    discard's refuseLocked upgraded it to rolled_back and removed
+		//    the stage, and the row settled — so this row fails there.
+		{name: "9-terminal-unknown-over-scopeoutgoing/prior", hasPrior: true, disk: accountSwapRecordData{Outcome: swapOutcomeUnknown, ID: swapN}, stage: true, fenced: true, account: "work", stageUntouched: true,
+			masterVerdict: "fenced (none -> probe scopeOutgoing -> discard -> upgraded unknown)", newlyCorrect: true},
+		{name: "9-terminal-unknown-over-scopeoutgoing/none", hasPrior: false, disk: accountSwapRecordData{Outcome: swapOutcomeUnknown, ID: swapN}, stage: true, fenced: true, account: "work", stageUntouched: true,
+			masterVerdict: "fenced (none -> probe scopeOutgoing -> discard -> upgraded unknown)", newlyCorrect: true},
 	}
 
 	for _, row := range rows {
@@ -617,6 +637,9 @@ func TestSwapRestartReconcileSettlesEveryCrashPointToTheHostsProvenVerdictOrFenc
 			}
 			acct, _ := f.inst.AccountSelection()
 			assert.Equal(t, row.account, acct, "the row settles on the account the verdict proves (master: %s)", row.masterVerdict)
+			if row.stageUntouched {
+				assert.DirExists(t, stage, "the staged scope is left in place while the row fences (master: %s)", row.masterVerdict)
+			}
 		})
 	}
 }

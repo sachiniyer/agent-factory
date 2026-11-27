@@ -79,16 +79,19 @@ func (r *accountSwapRecorder) noteStagedDiscarded(id string) {
 // otherwise downgrade a real commit into a rollback the host never did
 // (#7773 R1). A straggler's own reconcile still reaches not-committed through
 // the stale-record arm. The one upgrade is a slot already holding THIS swap's
-// own non-terminal unknown: the discard tombstoned it and just removed its
-// stage, so it can never commit and its verdict is rolled_back. The discard
-// holds the swap's lock, so no run() is in flight to clobber (#7862 review).
-// Caller holds r.mu.
+// own pre-rotation checkpoint (swapOutcomePending): the discard tombstoned it
+// and just removed its stage, so it can never commit and its verdict is
+// rolled_back. A terminal unknown is NOT upgraded — swap() ran and its scope
+// could not be put back, so the rotation may have reached the host and the
+// discard must not settle a rollback against a layout it cannot prove (#7862
+// review). The discard holds the swap's lock, so no run() is in flight to
+// clobber. Caller holds r.mu.
 func (r *accountSwapRecorder) refuseLocked(id string) {
 	if r.id == "" {
 		r.id, r.outcome, r.program = id, swapOutcomeRolledBack, ""
 		return
 	}
-	if r.id == id && r.outcome == swapOutcomeUnknown {
+	if r.id == id && r.outcome == swapOutcomePending {
 		r.outcome = swapOutcomeRolledBack
 	}
 }
@@ -106,16 +109,23 @@ func (r *accountSwapRecorder) run(id string, swap func() (string, error)) (strin
 		return "", fmt.Errorf("account swap %s: the staged scope was discarded before the request ran; refusing to rotate", id)
 	}
 	prevID, prevOutcome, prevProgram := r.id, r.outcome, r.program
-	r.id, r.outcome, r.program = id, swapOutcomeUnknown, "" // this swap's, until it is terminal
-	// Persist this swap's id under an unknown verdict BEFORE the rotation
+	r.id, r.outcome, r.program = id, swapOutcomePending, "" // this swap's, until it is terminal
+	// Persist this swap's id under a pending verdict BEFORE the rotation
 	// (#7793 review): the deferred save at the end of run leaves the prior
 	// swap's terminal record on disk throughout the rotation, so a crash
 	// during swap() rehydrates that stale named verdict and B's reconcile
 	// mistakes it for a queued request — discarding into a definite rollback
 	// even though the host may already run B's incoming account. Persisting
-	// B's own id as unknown makes a restart rehydrate B (not A); the
+	// B's own id as pending makes a restart rehydrate B (not A); the
 	// reconcile fences safely the way a fresh pre-fix recorder did, instead
 	// of settling a row/host account mismatch.
+	//
+	// The checkpoint is a state DISTINCT from a terminal unknown (#7862
+	// review): `pending` means the rotation has not started, so the discard
+	// may upgrade it to rolled_back over a proven scopeOutgoing; a terminal
+	// `unknown` means swap() ran and its scope could not be put back, which
+	// must stay fenced. Keeping the states distinct lets the discard tell a
+	// checkpoint it can settle from a terminal verdict it cannot.
 	//
 	// This pre-write is required, not best-effort: if it cannot land, the
 	// prior swap's terminal record stays on disk and a restart rehydrates
