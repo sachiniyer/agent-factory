@@ -353,22 +353,6 @@ user's real home and mounts it only if it exists, so:
       `CLOUDSDK_CONFIG`, the metadata endpoints, the executable-credential
       gate, the telemetry auth selector) and the remedy for every one is
       the same: name it in `session_env_passthrough`.
-    - Alongside the env names at `docker run`: the **resolver and
-      trust-store options** are refused for the same routing class —
-      `--dns`, `--dns-search`, `--dns-option`/`--dns-opt`, and `--link`
-      choose the resolver every endpoint name goes through;
-      `--net=container:…` puts the session inside a repo-named container's
-      network namespace; `--volumes-from` lands a donor's mounts af cannot
-      inspect; `--add-host` naming one of the agent's first-party
-      endpoint domains — or any host a forwarded env value points at —
-      repoints it outright; and a `-v`/`--mount`/`--tmpfs` target at,
-      inside, or above a resolution file (`/etc/hosts`,
-      `/etc/resolv.conf`, `/etc/nsswitch.conf`) or a TLS trust-store path
-      (`/etc/ssl/certs`, `/usr/share/ca-certificates`, `/etc/pki`, …)
-      delivers endpoints or roots af never selected. Non-endpoint
-      `--add-host` mappings such as `host.docker.internal:host-gateway`,
-      named and builtin `--network` values, and mounts elsewhere keep
-      working.
     - In af's own `docker exec` steps: every one names `/bin/sh` by absolute
       path, so the container's `PATH` — whatever it is — cannot hand af a
       repo-written `sh` to intercept the agent-server launch. Commands
@@ -433,11 +417,7 @@ user's real home and mounts it only if it exists, so:
     The operator's escape hatch is unchanged: names listed in the global
     `session_env_passthrough` keep their forwarded value and are never blanked
     or refused for the operator's own use — except the pane-boundary names
-    above, refused with the explicit error described there. A repo `-e` in
-    `docker.run_args` naming a forwarded name is refused outright, whatever
-    class the name falls in: af emits the forwarded names as bare `-e` entries
-    ahead of `run_args` and Docker keeps the last `-e` for a name, so the repo
-    entry would silently override the operator's own value.
+    above, refused with the explicit error described there.
 
     **Migration.** If a working setup legitimately carried one of these names —
     a corporate `HTTPS_PROXY`, a private CA bundle, a private-cloud
@@ -612,22 +592,7 @@ only needs the workspace tooling:
   own binaries and the tmux `default-shell -c` chain on `/bin/sh` unless
   the operator forwarded `PATH` or `SHELL` themselves. These entries and `cat` were
   already required and simply missing from this list (#3602 review); busybox and
-  coreutils each provide all of them. The account session's routing and trust
-  env names — the same endpoint, proxy, and CA set the credential-mount
-  boundary classifies — get the same last-wins treatment: a repo `-e` naming
-  any of them, or naming anything the operator forwarded through
-  `session_env_passthrough` (a repo `-e` lands after af's forwarded `-e`
-  entries, so it would override the operator's own value), is refused before
-  `docker run`; every name the operator did not forward is then pinned
-  defined-and-empty after `run_args`, so the repo-chosen image's `ENV` cannot
-  deliver an `ANTHROPIC_BASE_URL`, `HTTPS_PROXY`, or `NODE_EXTRA_CA_CERTS` to
-  the account's agent (a forwarded proxy's case twin is reseated to the
-  forwarded value rather than emptied). The resolver and trust-store options
-  are refused on the account path under the same rules the credential-mount
-  boundary documents above — `--dns*`/`--link`/`--net=container:…`,
-  `--add-host` to a protected host, `--volumes-from`, and mounts over the
-  resolution files or trust stores — while non-endpoint mappings, named
-  networks, and mounts elsewhere keep working.
+  coreutils each provide all of them.
 - The **agent CLIs** you intend to run (claude, codex, aider, gemini, …).
 - A libc/architecture compatible with the daemon's `af` binary. The copied-in
   binary is the **daemon's own executable**, and the release artifacts
