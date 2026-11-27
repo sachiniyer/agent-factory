@@ -87,12 +87,31 @@ func squashedPrefix(line, keep string) string {
 	return line
 }
 
+// remnantPaintingNarrowFixtures are the remnantNarrowFixtures whose every
+// proper-footer-prefix cut read clear on master — the rows this test calls
+// master-red. All but two of them: the 2_1_113 and 2_1_200 captures at 10
+// columns already held at every cut on master (under
+// claudeFolderTrustPaintingOf), so they sit in the settled control table
+// below.
+var remnantPaintingNarrowFixtures = []string{
+	"claude_2_0_25_reworded_arm_folder_trust_dialog_12_columns.ansi",
+	"claude_2_0_50_reworded_arm_folder_trust_dialog_10_columns.ansi",
+	"claude_2_1_19_reworded_arm_folder_trust_dialog_4_columns.ansi",
+	"claude_2_1_19_reworded_arm_folder_trust_dialog_10_columns.ansi",
+	"claude_2_1_20_folder_trust_dialog_9_columns.ansi",
+	"claude_2_1_200_folder_trust_dialog_configured_15_columns.ansi",
+	"claude_2_1_323_folder_trust_dialog_8_columns.ansi",
+	"claude_2_1_327_folder_trust_dialog_4_columns.ansi",
+	"claude_2_1_328_folder_trust_dialog_4_columns.ansi",
+	"claude_2_1_329_folder_trust_dialog_4_columns.ansi",
+}
+
 // Every narrow and short-pane folder-trust capture, cut after every proper
 // prefix of its footer that begins a row, holds: it held over the whole
 // footer, and the prefix is the same footer still painting. On master each of
 // these cuts read clear — the bug #7866 reported.
 func TestIssue7866NarrowPaneDialogHoldsAtEveryFooterPrefix(t *testing.T) {
-	for _, name := range append(append([]string{}, remnantNarrowFixtures...), remnantShortFixtures...) {
+	for _, name := range append(append([]string{}, remnantPaintingNarrowFixtures...), remnantShortFixtures...) {
 		capture := readTrustFixture(t, name)
 		cuts := claudeLaunchDialogFooterPrefixCuts(t, capture, claudeLaunchDialogFooters)
 		require.NotEmpty(t, cuts, "%s: the capture paints no proper footer prefix", name)
@@ -108,13 +127,17 @@ func TestIssue7866NarrowPaneDialogHoldsAtEveryFooterPrefix(t *testing.T) {
 // the boxed legacy dialogs and the 2.1.328 one 10 rows tall — keep holding at
 // every proper footer prefix too: each of those cuts was already a hold on
 // master, under one clause or another, and the clause the remnant reader adds
-// only makes it earlier.
+// only makes it earlier. The two 10-column captures of remnantNarrowFixtures
+// whose cuts already held on master under claudeFolderTrustPaintingOf are
+// covered here as well: they are controls, not master-red rows.
 func TestIssue7866SettledDialogHoldsAtEveryFooterPrefix(t *testing.T) {
 	for _, name := range []string{
 		"claude_2_0_25_legacy_folder_trust_dialog.ansi",
 		"claude_2_0_50_legacy_folder_trust_dialog.ansi",
 		"claude_2_1_19_legacy_folder_trust_dialog.ansi",
 		"claude_2_1_328_folder_trust_dialog_80x10.ansi",
+		"claude_2_1_113_folder_trust_dialog_10_columns.ansi",
+		"claude_2_1_200_folder_trust_dialog_10_columns.ansi",
 		// The 2.1.322 single-server dialog paints the reworded folder-trust
 		// footer word for word (claudeMCPServerFooter).
 		"claude_2_1_322_mcp_server_dialog_40_columns.ansi",
