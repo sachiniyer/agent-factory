@@ -2,9 +2,11 @@ package daemon
 
 import (
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -220,6 +222,14 @@ func newOffBoxLimitedFixture(t *testing.T) (*Manager, string, string, *session.I
 		SyncHost:     "box1",
 		SyncTarget:   hostEntry,
 		AutoSelected: true,
+		// The "host" these scripts would run on is this machine: the test's
+		// runner executes them locally, the same way the session package's own
+		// fixtures drive the provisioner.
+		Run: func(_ time.Duration, script string, stdin io.Reader, _ bool) ([]byte, error) {
+			cmd := exec.Command("sh", "-c", script)
+			cmd.Stdin = stdin
+			return cmd.CombinedOutput()
+		},
 	}))
 	// The swap's in-flight record refuses to cross without a durable write;
 	// the fixture row's checkpoints are in-memory only.

@@ -3,7 +3,6 @@ package session
 import (
 	"fmt"
 	"io"
-	"os/exec"
 	"strings"
 	"time"
 
@@ -44,8 +43,9 @@ type OffBoxSwapFixture struct {
 	// true for swap candidates to apply.
 	AutoSelected bool
 	// Run executes one remote step's script, the way the ssh transport's
-	// runCommand would on the host. nil runs `sh -c` locally — the same
-	// behaviour the session package's own fixtures use.
+	// runCommand would on the host. It is REQUIRED and lives in the caller's
+	// _test.go file: a compiled fixture must not add a shell-invocation site
+	// to production code (the shell-sites gate classifies every one).
 	Run func(timeout time.Duration, script string, stdin io.Reader, combined bool) ([]byte, error)
 }
 
@@ -60,15 +60,10 @@ func (i *Instance) InstallOffBoxSwapBackendForTest(fx OffBoxSwapFixture) error {
 	if fx.SessionDir == "" || fx.Account.Dir == "" || strings.TrimSpace(fx.SyncHost) == "" {
 		return fmt.Errorf("an off-box swap fixture needs a session dir, a synced account dir, and a listed-host name")
 	}
-	run := fx.Run
-	if run == nil {
-		run = func(_ time.Duration, script string, stdin io.Reader, _ bool) ([]byte, error) {
-			cmd := exec.Command("sh", "-c", script)
-			cmd.Stdin = stdin
-			return cmd.CombinedOutput()
-		}
+	if fx.Run == nil {
+		return fmt.Errorf("an off-box swap fixture needs the caller's remote-step runner")
 	}
-	p := &sandboxProvisioner{sessionDir: fx.SessionDir, runCommandFn: run}
+	p := &sandboxProvisioner{sessionDir: fx.SessionDir, runCommandFn: fx.Run}
 	p.account = &sandboxWorkspace{
 		shell:      p,
 		SessionDir: fx.SessionDir,
