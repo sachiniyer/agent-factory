@@ -131,7 +131,13 @@ func (s *accountSwapStore) clear() error {
 	if err := os.Remove(s.path); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("remove account swap record %s: %w", s.path, err)
 	}
-	return nil
+	// Sync the containing directory so the unlink is durable before the
+	// caller rotates the account — matching removeMarkerDurable's
+	// crash-stability discipline. A machine crash after the rotation must
+	// not resurrect the prior swap's record, which restart reconciliation
+	// could otherwise mistake for a queued request and settle as a
+	// rollback against a host that already committed the new account.
+	return syncDir(filepath.Dir(s.path))
 }
 
 // InstallDurableAccountSwapRecord wires the agent-server's swap recorder to a
