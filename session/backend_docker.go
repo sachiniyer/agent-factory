@@ -449,7 +449,10 @@ type dockerProvisioner struct {
 	// credentialMounts resolved a file; they are also admitted to the
 	// agent-server's --session-env so the empty value survives the inner env
 	// filter and reaches the agent — a workspace config loader treats
-	// defined-empty as set.
+	// defined-empty as set. Path-valued trust names (the SSL_CERT_*/CA-bundle
+	// class) stay empty only in the container env — the one hop `docker run`
+	// dominates — and are unset by af's provisioning execs and resolved to a
+	// real bundle at the agent's exec shim (#7889).
 	credentialEnvPins []string
 	afBin             string
 	program           string
@@ -708,7 +711,10 @@ func (p *dockerProvisioner) runContainer() error {
 	// ENV, or a run_args entry the validator's classification did not reach.
 	// Defined-and-empty is the same shape the account boundary installs: a
 	// workspace config loader treats it as set and does not supply the repo's
-	// value (#7526).
+	// value (#7526). Path-valued trust names keep that empty shape only here
+	// — `docker run` cannot unset an image ENV — and are unset in af's
+	// provisioning execs and resolved to a real platform bundle at the
+	// agent's exec shim, whose readers load the empty value as a path (#7889).
 	for _, name := range p.credentialEnvPins {
 		args = append(args, "-e", name+"=")
 	}

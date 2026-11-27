@@ -312,6 +312,13 @@ func execInvocation(args []string) error {
 // environment, discarding whatever value an intervening program installed.
 // The name is replaced rather than appended beside its old value so a getenv
 // can only read the empty one.
+//
+// A path-valued trust pin resolves instead (#7889): defined-empty for
+// SSL_CERT_FILE/SSL_CERT_DIR and the CA-bundle spellings is a PATH their
+// readers load — zero CAs — so the shim points each at the first platform
+// bundle location that exists in the container (resolveTrustPathPin). The
+// name stays claimed either way, so a repo .env loader cannot take it, and
+// a store-less image keeps the defined-empty pin rather than going unset.
 func reapplyEmptyPins(environ, pins []string) []string {
 	if len(pins) == 0 {
 		return environ
@@ -329,6 +336,10 @@ func reapplyEmptyPins(environ, pins []string) []string {
 		out = append(out, entry)
 	}
 	for _, name := range pins {
+		if entry, ok := resolveTrustPathPin(name); ok {
+			out = append(out, entry)
+			continue
+		}
 		out = append(out, name+"=")
 	}
 	return out

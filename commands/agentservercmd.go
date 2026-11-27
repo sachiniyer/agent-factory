@@ -131,7 +131,7 @@ func init() {
 	agentServerCmd.Flags().StringSliceVar(&agentServerSessionEnv, "session-env", nil,
 		"Additional exact environment variable name an agent may inherit (repeatable)")
 	agentServerCmd.Flags().StringSliceVar(&agentServerSessionEnvEmpty, "session-env-empty", nil,
-		"Environment variable name the pane's exec shim re-asserts defined-and-empty immediately before the agent execs (repeatable; set by the provisioning daemon's credential-mount env pins)")
+		"Environment variable name the pane's exec shim re-asserts defined immediately before the agent execs — defined-and-empty, or a resolved platform trust path for the SSL_CERT_*/CA-bundle names (#7889) (repeatable; set by the provisioning daemon's credential-mount env pins)")
 	agentServerCmd.Flags().BoolVar(&agentServerNoTmuxConfig, "no-tmux-config", false,
 		"Run every tmux invocation with -f /dev/null so the image's /etc/tmux.conf or a ~/.tmux.conf cannot pick programs or write session environment between af's env pins and the agent's exec")
 	_ = agentServerCmd.MarkFlagRequired("title")

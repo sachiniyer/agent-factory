@@ -7,6 +7,7 @@ package session
 import (
 	"context"
 	"os"
+	"slices"
 	"strings"
 	"time"
 
@@ -74,8 +75,33 @@ func (p *dockerProvisioner) dockerEnvironment() []string {
 // is a no-op for a root-default image (its default user IS root) and is the
 // only thing that works for a non-root one.
 func (p *dockerProvisioner) execSh(timeout time.Duration, script string) ([]byte, error) {
-	args := []string{"exec", "--user", "0:0", p.containerID, dockerContainerShell, "-c", script}
+	args := []string{"exec", "--user", "0:0", p.containerID, dockerContainerShell, "-c", p.trustPathUnpinnedScript(script)}
 	return p.docker(timeout, args...)
+}
+
+// trustPathUnpinnedScript prefixes a provisioning script with an unset of
+// the path-valued trust names THIS session pins defined-and-empty in the
+// container environment (#7889). The pin must stand there — `docker run`
+// cannot unset an image ENV — but a defined-empty SSL_CERT_FILE/SSL_CERT_DIR
+// or CA-bundle spelling is a PATH an env-honoring TLS client loads as zero
+// roots. The clone step's git is the only provisioning child that can open
+// a TLS connection; unsetting first makes every env-honoring stack fall
+// back to its compiled platform store instead of reading the pin's empty
+// path. Only PINNED names are unset — an operator-forwarded SSL_CERT_FILE
+// is the session's working CA config and the clone needs it. No .env-fill
+// channel exists on these children, so unlike the agent's exec shim —
+// which must keep the name claimed — unset is the inert form here.
+func (p *dockerProvisioner) trustPathUnpinnedScript(script string) string {
+	var unset []string
+	for _, name := range sessionenv.TrustPathPinNames() {
+		if slices.Contains(p.credentialEnvPins, name) {
+			unset = append(unset, name)
+		}
+	}
+	if len(unset) == 0 {
+		return script
+	}
+	return "unset " + strings.Join(unset, " ") + "; " + script
 }
 
 func (p *dockerProvisioner) shortID() string {
