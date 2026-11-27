@@ -656,34 +656,15 @@ func (s *localAgentServer) Kill(trustLiveGeneration bool) error {
 	for _, br := range brokers {
 		br.close()
 	}
-	// Whether this kill ends the session generation — and so must retire its
-	// durable swap record (#7883) — is decided by what the instance still holds
-	// when Kill runs. A workspace still bound here is destroyed (or, for an
-	// unproven workspace, quarantined in place) below: either way the
-	// generation is over. A workspace ALREADY released survives the kill by
-	// design — StopPreservingWorkspace ran first and cleared the pointer, the
-	// /v1/agent/stop path the SIGTERM's shutdownWorkspace follows — so its
-	// record is the preserved generation's own, and a later adopted restart
-	// rehydrates from it (#5571 W8.6). Read BEFORE the kill: a successful
-	// teardown clears the pointer, so checking after could not tell the two
-	// apart (Codex on this PR).
-	s.inst.mu.RLock()
-	workspaceHeld := s.inst.gitWorktree != nil
-	s.inst.mu.RUnlock()
-	if err := s.inst.currentBackend().Kill(s.inst, trustLiveGeneration); err != nil {
-		return err
-	}
-	// The workspace is gone, so this session generation is over and its durable
-	// swap record retires with it (#7883): a session re-created on the same
-	// (repo, title) key must never inherit a verdict a dead generation reached.
-	// This is the one method every workspace-destroying teardown on the
-	// in-sandbox agent-server converges on — the daemon's Kill RPC and a
-	// non-adopted SIGTERM's shutdownWorkspace — while a restart WITHIN the
-	// generation (the crashed server's adopted replacement) never reaches it,
-	// so the record survives to rehydrate that restart (#7862). A refused
-	// teardown returned above keeps the record: the generation may continue.
-	if workspaceHeld {
-		s.inst.retireDurableAccountSwapRecord()
-	}
-	return nil
+	// Kill never retires the durable swap record (#7897): retirement happens
+	// only at the explicit Kill RPC, whose handler calls
+	// Instance.RetireDurableAccountSwapRecord itself after this kill succeeds
+	// (row-removal kills AND archive teardown both call it — archive keeping
+	// its row is safe because archive refuses a session with an in-flight
+	// swap). Every signal-driven path that lands here — a host reboot's
+	// SIGTERM through shutdownWorkspace, a restart's pre-launch
+	// stopUnadoptedServer on a never-launched server — keeps the record for
+	// the reattach's restart to rehydrate in this same session dir; the
+	// mktemp reap's own rm -rf covers the SIGTERM-then-reap case.
+	return s.inst.currentBackend().Kill(s.inst, trustLiveGeneration)
 }
