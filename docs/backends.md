@@ -317,13 +317,17 @@ user's real home and mounts it only if it exists, so:
       read is falsy-safe, and a class counts as pinned only when **every
       name the agent's read consults** is pinned — a chain
       `A || B || default` leaves `A` free for the `.env` to claim if only
-      `B` is held. Where the measured empty read is NOT falsy-safe —
-      `SSL_CERT_FILE`/`SSL_CERT_DIR`, `NODE_EXTRA_CA_CERTS`,
-      `REQUESTS_CA_BUNDLE`, `CURL_CA_BUNDLE`, `CODEX_CA_CERTIFICATE`,
-      `GRPC_DEFAULT_SSL_ROOTS_FILE_PATH`, whose TLS stacks load the
-      empty value as a path and lose every platform root (#7889) — the
-      name stays claimed in the container environment but resolves to a
-      real bundle at the exec boundary below.
+      `B` is held. The CA-bundle spellings are falsy-safe for their
+      measured readers — node ignores `NODE_EXTRA_CA_CERTS` empty,
+      requests falls through `REQUESTS_CA_BUNDLE=''` to
+      `CURL_CA_BUNDLE`, curl falls from `CURL_CA_BUNDLE=''` to its
+      compiled CAfile, codex treats `CODEX_CA_CERTIFICATE=''` as unset,
+      grpc-js skips `GRPC_DEFAULT_SSL_ROOTS_FILE_PATH=''` — so they keep
+      the plain defined-empty pin. Where the measured empty read is a
+      PATH — `SSL_CERT_FILE`/`SSL_CERT_DIR` alone, whose OpenSSL/rustls
+      readers load the empty value and lose every platform root (#7889)
+      — the name stays claimed in the container environment but resolves
+      to a real bundle at the exec boundary below.
       **The claimed set is the checked artifact, not this list.** The
       measured reads — every `process.env` read in
       `@google/gemini-cli@0.42.0`, the CLI's own source and the libraries
@@ -370,18 +374,18 @@ user's real home and mounts it only if it exists, so:
       repo-written `sh` to intercept the agent-server launch. Commands
       *inside* those scripts (`git`, `cat`, `chmod`) resolve through the
       `PATH` re-asserted above — the image's own binaries. Each script also
-      opens by unsetting the session's pinned path-valued trust names, so an
-      env-honoring TLS client among them — the clone step's git is the one
-      provisioning child that can open a TLS connection — reads its compiled
-      platform store rather than the pin's defined-empty path (#7889). An
+      opens by unsetting the session's pinned `SSL_CERT_FILE`/`SSL_CERT_DIR`
+      — the two names whose measured empty read is a path — so no
+      provisioning child can inherit a defined-empty name an OpenSSL-family
+      TLS stack would load as zero roots (#7889). An
       operator-FORWARDED trust name is not a pin and is never unset — the
       clone needs that CA to reach a private-CA remote.
     - At the exec itself: the pins also reach the in-container agent-server,
       whose pane launch re-asserts each one **immediately
       before the agent execs** — after tmux's shell hop or a tmux config file
       could have re-set one — defined-and-empty for the falsy-safe classes,
-      or to the first existing platform trust-store path for the
-      `SSL_CERT_*/CA-bundle` names (#7889).
+      or to the first existing platform trust-store path for
+      `SSL_CERT_FILE`/`SSL_CERT_DIR` (#7889).
     - On tmux: every tmux invocation the agent-server runs carries
       `-f /dev/null`, so the image's `/etc/tmux.conf` or a `~/.tmux.conf`
       cannot pick `default-shell`, run hooks, or write session environment
@@ -432,13 +436,7 @@ user's real home and mounts it only if it exists, so:
       as the proxy case pairs (`HTTP/HTTPS/ALL/NO_PROXY`, either case),
       where the unforwarded twin is set to the forwarded spelling's value
       because a defined-empty twin would cancel it in clients that read
-      both — and as the CA-bundle precedence chain
-      (`REQUESTS_CA_BUNDLE or CURL_CA_BUNDLE or verify` for Requests;
-      `CURL_CA_BUNDLE` preferred over `SSL_CERT_FILE` for curl), where
-      every unforwarded member is reseated to the forwarded bundle
-      because an af-set member — defined-empty or a resolved platform
-      path alike — would outrank the operator's forwarded CA for the
-      clients that chain it (#7889).
+      both.
 
     The operator's escape hatch is unchanged: names listed in the global
     `session_env_passthrough` keep their forwarded value and are never blanked

@@ -13,7 +13,7 @@ import (
 // through session_env_passthrough exempts the group from the pin or
 // re-assert and reseats the unforwarded members to the operator's value,
 // so an af-set or image-supplied sibling can never sit ahead of the
-// operator's choice (#7529 R2, #7531, #7889).
+// operator's choice (#7529 R2, #7531).
 
 // credentialMountProxyCasePairs pairs each proxy variable's upper- and
 // lower-case spellings. Programs disagree on which spelling wins — and some
@@ -23,21 +23,6 @@ import (
 // spelling therefore exempts BOTH from the empty pin; pinning the twin of a
 // forwarded name could silently cancel the operator's proxy (#7529 R2).
 var credentialMountProxyCasePairs = sessionenv.ProxyEnvCasePairs
-
-// credentialMountTrustBundleGroup is the precedence chain the CA-bundle
-// spellings form across readers: Python Requests' environment merge is
-// `REQUESTS_CA_BUNDLE or CURL_CA_BUNDLE or verify`, and curl prefers
-// `CURL_CA_BUNDLE` over `SSL_CERT_FILE` for --cacert (curl --manual). Any
-// af-set member — an empty pin or a platform-resolved path alike —
-// outranks a lower member the operator forwarded for their private CA
-// (#7889). Forwarding ANY member therefore claims the whole chain: the
-// others are exempted from the pin and reseated to the operator's bundle
-// — the proxy twins' claim semantics — so the operator's CA reaches every
-// client of the chain. All three are bundle file paths, so the reseat is
-// verbatim, no grammar translation.
-var credentialMountTrustBundleGroup = []string{
-	"REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE", "SSL_CERT_FILE",
-}
 
 // credentialMountSelectorGroups pairs the program-selector names whose
 // consumers consult them as a precedence ladder: git runs GIT_SSH_COMMAND
@@ -166,55 +151,11 @@ func credentialMountSelectorForwarding(passthrough []string, environ []string) (
 	return names, synth
 }
 
-// credentialMountChainForwarding is credentialMountTwinForwarding over a
-// precedence chain of more than two members: the first forwarded-and-
-// host-set member supplies the value every other member is reseated to,
-// so no lower member keeps an image-supplied or af-set value a reader
-// could chain through (#7889's CA-bundle chain).
-func credentialMountChainForwarding(chain []string, passthrough, environ []string) (names, synth []string) {
-	forwarded := make(map[string]struct{}, len(passthrough))
-	for _, name := range passthrough {
-		forwarded[name] = struct{}{}
-	}
-	host := make(map[string]string, len(environ))
-	for _, entry := range environ {
-		if name, value, ok := strings.Cut(entry, "="); ok {
-			host[name] = value
-		}
-	}
-	var value string
-	claimed := false
-	for _, s := range chain {
-		if _, ok := forwarded[s]; !ok {
-			continue
-		}
-		if v, set := host[s]; set {
-			value, claimed = v, true
-			break
-		}
-	}
-	if !claimed {
-		return nil, nil
-	}
-	for _, s := range chain {
-		_, fwd := forwarded[s]
-		_, set := host[s]
-		if fwd && set {
-			continue
-		}
-		names = append(names, s)
-		synth = append(synth, s+"="+value)
-	}
-	return names, synth
-}
-
 // credentialMountGroupForwarding applies the twin forwarding to every
-// pair table — proxy case spellings, the CA-bundle precedence chain, and
-// selector precedence groups share the same claim semantics (#7531).
+// pair table — proxy case spellings and selector precedence groups share
+// the same claim semantics (#7531).
 func credentialMountGroupForwarding(passthrough []string, environ []string) (names, synth []string) {
 	names, synth = credentialMountTwinForwarding(credentialMountProxyCasePairs, passthrough, environ)
 	n, s := credentialMountSelectorForwarding(passthrough, environ)
-	names, synth = append(names, n...), append(synth, s...)
-	n, s = credentialMountChainForwarding(credentialMountTrustBundleGroup, passthrough, environ)
 	return append(names, n...), append(synth, s...)
 }

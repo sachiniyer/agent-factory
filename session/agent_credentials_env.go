@@ -522,16 +522,6 @@ func credentialMountPinnedNames(agent string, passthrough []string) []string {
 			forwarded[pair[0]] = struct{}{}
 		}
 	}
-	// The CA-bundle chain exempts transitively: claiming any member claims
-	// the readers that would have chained to it.
-	for _, member := range credentialMountTrustBundleGroup {
-		if _, ok := forwarded[member]; ok {
-			for _, other := range credentialMountTrustBundleGroup {
-				forwarded[other] = struct{}{}
-			}
-			break
-		}
-	}
 	out := make([]string, 0)
 	for name := range credentialMountDeniedNames(agent) {
 		if _, reasserted := credentialMountReassertedNames[name]; reasserted {

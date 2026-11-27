@@ -8,10 +8,10 @@ import (
 
 // #7889: af's own provisioning execs inherit the container env where
 // `-e SSL_CERT_FILE=` stands because `docker run` cannot unset an image ENV.
-// The clone step's git is the one provisioning child that can open a TLS
-// connection, so the exec helpers prefix each script with an unset of the
-// pinned path-valued trust names — the env-honoring TLS stacks then fall back
-// to the compiled platform store instead of loading the pin's empty path.
+// The exec helpers prefix each script with an unset of the pinned
+// path-valued trust names — the two whose measured empty read is a PATH —
+// so no provisioning child (the clone's git, hooks, helpers) can inherit a
+// defined-empty name an OpenSSL/rustls reader would load as zero roots.
 func TestTrustPathUnpinnedScriptUnsetsPinnedTrustNames(t *testing.T) {
 	p := &dockerProvisioner{credentialEnvPins: []string{
 		"SSL_CERT_FILE", "SSL_CERT_DIR", "NODE_EXTRA_CA_CERTS",
@@ -19,12 +19,9 @@ func TestTrustPathUnpinnedScriptUnsetsPinnedTrustNames(t *testing.T) {
 		"HTTP_PROXY",
 	}}
 	got := p.trustPathUnpinnedScript("git clone https://example.invalid/r.git")
-	for _, name := range []string{
-		"SSL_CERT_FILE", "SSL_CERT_DIR", "NODE_EXTRA_CA_CERTS",
-		"REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE", "CODEX_CA_CERTIFICATE",
-	} {
+	for _, name := range []string{"SSL_CERT_FILE", "SSL_CERT_DIR"} {
 		if !strings.Contains(got, " "+name) {
-			t.Fatalf("script must unset pinned trust name %s: %q", name, got)
+			t.Fatalf("script must unset pinned path-valued name %s: %q", name, got)
 		}
 	}
 	if !strings.HasPrefix(got, "unset ") {
@@ -33,11 +30,17 @@ func TestTrustPathUnpinnedScriptUnsetsPinnedTrustNames(t *testing.T) {
 	if !strings.HasSuffix(got, "git clone https://example.invalid/r.git") {
 		t.Fatalf("the operator's script must run verbatim after the preamble: %q", got)
 	}
-	// A non-path pin is not a TLS-store reader — empty is its neutral form,
-	// so unsetting it would only change proxy semantics for no benefit.
-	for _, name := range strings.Fields(strings.TrimPrefix(strings.SplitN(got, ";", 2)[0], "unset ")) {
-		if name == "HTTP_PROXY" {
-			t.Fatalf("a non-path pin must keep its defined-empty claim, not be unset: %q", got)
+	// Everything else stays pinned defined-empty: the five falsy-safe
+	// bundle spellings whose measured empty read is harmless (unset would
+	// let a repo .env claim the name), and non-path pins where empty IS
+	// the semantics (no proxy, no endpoint).
+	unset := strings.Fields(strings.TrimPrefix(strings.SplitN(got, ";", 2)[0], "unset "))
+	for _, name := range []string{
+		"NODE_EXTRA_CA_CERTS", "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE",
+		"CODEX_CA_CERTIFICATE", "HTTP_PROXY",
+	} {
+		if slices.Contains(unset, name) {
+			t.Fatalf("%s keeps its defined-empty pin — it must not be unset: %q", name, got)
 		}
 	}
 }
@@ -66,85 +69,83 @@ func TestTrustPathUnpinnedScriptNoPinsIsIdentity(t *testing.T) {
 	}
 }
 
-// The CA-bundle spellings form a precedence CHAIN across readers: Requests
-// merges `REQUESTS_CA_BUNDLE or CURL_CA_BUNDLE or verify` and curl prefers
-// `CURL_CA_BUNDLE` over `SSL_CERT_FILE` for --cacert — so a member af sets,
-// even to a real platform bundle, outranks a lower member the operator
-// forwarded for a private CA (#7889 review). Forwarding ANY member must
-// exempt the WHOLE chain from the pin, exactly like the proxy case twins.
-func TestCredentialMountPinnedNames_TrustBundleChainExemptsAll(t *testing.T) {
-	for _, forwarded := range credentialMountTrustBundleGroup {
-		pinned := credentialMountPinnedNames("opencode", []string{forwarded})
-		for _, member := range credentialMountTrustBundleGroup {
-			if slices.Contains(pinned, member) {
-				t.Fatalf("forwarding %s must exempt chain member %s from the pin", forwarded, member)
-			}
+// Unforwarded, every trust spelling stays pinned (#7889 R2): the five
+// bundle names are falsy-safe for their measured readers — node ignores
+// NODE_EXTRA_CA_CERTS=”, requests falls through REQUESTS_CA_BUNDLE=” to
+// CURL_CA_BUNDLE, curl falls from CURL_CA_BUNDLE=” to its compiled CAfile,
+// codex treats CODEX_CA_CERTIFICATE=” as unset, grpc-js skips
+// GRPC_DEFAULT_SSL_ROOTS_FILE_PATH=” — so defined-empty holds the
+// repo/image claim off while staying inert, and SSL_CERT_FILE/SSL_CERT_DIR
+// resolve to a real store at the shim.
+func TestCredentialMountPinnedNames_AllTrustNamesStayPinned(t *testing.T) {
+	for _, row := range []struct{ agent, name string }{
+		// The shared routing names pin on every credential-mount agent.
+		{"opencode", "SSL_CERT_FILE"}, {"opencode", "SSL_CERT_DIR"},
+		{"opencode", "NODE_EXTRA_CA_CERTS"}, {"opencode", "REQUESTS_CA_BUNDLE"},
+		{"opencode", "CURL_CA_BUNDLE"},
+		// Per-agent tables and the gemini-bundle pin carry the rest.
+		{"codex", "CODEX_CA_CERTIFICATE"},
+		{"gemini", "GRPC_DEFAULT_SSL_ROOTS_FILE_PATH"},
+	} {
+		if pinned := credentialMountPinnedNames(row.agent, []string{"OPERATOR_THING"}); !slices.Contains(pinned, row.name) {
+			t.Fatalf("%s: unforwarded trust name %s must stay pinned", row.agent, row.name)
 		}
-	}
-	// Unforwarded, all three stay pinned — the resolved-path pin only
-	// matters when the operator did not claim the chain. SSL_CERT_DIR is
-	// no chain member (no reader falls back to it from a bundle file) and
-	// stays pinned regardless.
-	pinned := credentialMountPinnedNames("opencode", []string{"OPERATOR_THING"})
-	for _, member := range credentialMountTrustBundleGroup {
-		if !slices.Contains(pinned, member) {
-			t.Fatalf("unforwarded trust-bundle name %s must stay pinned", member)
-		}
-	}
-	if !slices.Contains(pinned, "SSL_CERT_DIR") {
-		t.Fatal("SSL_CERT_DIR must stay pinned — it is not a chain member")
 	}
 }
 
-// The unforwarded members cannot simply drop the pin — their names are in
-// the inner filter's always-admitted set, so an image value for them would
-// reach the agent. They are reseated to the operator's forwarded bundle
-// through the chain machinery instead (bare `-e NAME` + synthesized NAME=V
-// in the docker client env, so the value never enters argv).
-func TestCredentialMountTrustBundleForwarding_ReseatsChainToForwardedBundle(t *testing.T) {
-	// Forwarding CURL_CA_BUNDLE: the operator's bundle must outrank the
-	// resolved platform path for Requests (REQUESTS sits ahead of CURL in
-	// its chain) AND for curl over nothing — both siblings reseat.
-	names, synth := credentialMountChainForwarding(credentialMountTrustBundleGroup,
-		[]string{"CURL_CA_BUNDLE"}, []string{"CURL_CA_BUNDLE=/operator/private-ca.pem"})
-	if !slices.Equal(names, []string{"REQUESTS_CA_BUNDLE", "SSL_CERT_FILE"}) {
-		t.Fatalf("names = %v, want both unclaimed members emitted for the reseat", names)
+// A forwarded trust name exempts ONLY itself (#7889 R3 — no transitive
+// exemption: the falsy-safe siblings' defined-empty pins are inert for
+// their readers, so nothing needs reseating to keep the operator's CA
+// ahead).
+func TestCredentialMountPinnedNames_ForwardedTrustNameExemptsOnlyItself(t *testing.T) {
+	pinned := credentialMountPinnedNames("opencode", []string{"SSL_CERT_FILE"})
+	if slices.Contains(pinned, "SSL_CERT_FILE") {
+		t.Fatal("the forwarded name itself must leave the pin set")
 	}
-	if !slices.Equal(synth, []string{
-		"REQUESTS_CA_BUNDLE=/operator/private-ca.pem",
-		"SSL_CERT_FILE=/operator/private-ca.pem",
-	}) {
-		t.Fatalf("synth = %v, want both members reseated to the forwarded bundle", synth)
+	for _, name := range []string{
+		"SSL_CERT_DIR", "CURL_CA_BUNDLE", "REQUESTS_CA_BUNDLE",
+	} {
+		if !slices.Contains(pinned, name) {
+			t.Fatalf("%s must stay pinned when only SSL_CERT_FILE is forwarded", name)
+		}
 	}
+}
 
-	// Forwarding SSL_CERT_FILE (the finding's exact case): curl prefers
-	// CURL_CA_BUNDLE, so CURL must reseat or the platform pin outranks the
-	// operator's CA; REQUESTS reseats so Requests reaches it too.
-	names, synth = credentialMountChainForwarding(credentialMountTrustBundleGroup,
-		[]string{"SSL_CERT_FILE"}, []string{"SSL_CERT_FILE=/op/openssl-ca.pem"})
-	if !slices.Equal(names, []string{"REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE"}) {
-		t.Fatalf("names = %v, want REQUESTS and CURL emitted for the reseat", names)
+// #7889 R2: a forwarded operator CA must WIN its reader chain — no af-set
+// value may sit ahead of it. Because the falsy-safe spellings keep their
+// defined-empty pin, each name a reader consults FIRST reads falsy and the
+// reader falls through to the operator's value (or its compiled default).
+// The table is the audit: each row names a reader chain and the names that
+// must stay defined-empty-pinned for the forwarded claim to win.
+func TestForwardedOperatorCAWinsEveryReaderChain(t *testing.T) {
+	chains := []struct {
+		reader   string
+		agent    string   // which agent's pin table carries the names
+		forward  string   // the operator's claim through session_env_passthrough
+		falsyPin []string // consulted first — must stay pinned so empty falls through
+	}{
+		// curl: CURL_CA_BUNDLE beats SSL_CERT_FILE for --cacert, and '' is
+		// skipped (compiled CAfile/SSL_CERT_FILE next) → the file wins.
+		{"curl", "opencode", "SSL_CERT_FILE", []string{"CURL_CA_BUNDLE"}},
+		// requests: `REQUESTS_CA_BUNDLE or CURL_CA_BUNDLE or verify` —
+		// '' is falsy at each step → a forwarded member wins.
+		{"requests", "opencode", "CURL_CA_BUNDLE", []string{"REQUESTS_CA_BUNDLE"}},
+		{"requests", "opencode", "REQUESTS_CA_BUNDLE", nil},
+		// grpc-js skips an empty GRPC_DEFAULT_SSL_ROOTS_FILE_PATH and
+		// codex's custom_ca.rs treats CODEX_CA_CERTIFICATE='' as unset —
+		// forwarded, each name is its reader's only override.
+		{"grpc-js", "gemini", "GRPC_DEFAULT_SSL_ROOTS_FILE_PATH", nil},
+		{"codex", "codex", "CODEX_CA_CERTIFICATE", nil},
 	}
-	if !slices.Equal(synth, []string{
-		"REQUESTS_CA_BUNDLE=/op/openssl-ca.pem",
-		"CURL_CA_BUNDLE=/op/openssl-ca.pem",
-	}) {
-		t.Fatalf("synth = %v, want the whole chain reseated to the forwarded bundle", synth)
-	}
-
-	// All members forwarded and set: each keeps its own approved value.
-	names, synth = credentialMountChainForwarding(credentialMountTrustBundleGroup,
-		credentialMountTrustBundleGroup,
-		[]string{"REQUESTS_CA_BUNDLE=/op/r.pem", "CURL_CA_BUNDLE=/op/c.pem", "SSL_CERT_FILE=/op/s.pem"})
-	if len(names) != 0 || len(synth) != 0 {
-		t.Fatalf("a fully claimed chain must not reseat anything: names=%v synth=%v", names, synth)
-	}
-
-	// A forwarded-but-unset claim emits nothing (the claimed-empty semantics
-	// the twins already carry) — and the exemption above still holds.
-	names, synth = credentialMountChainForwarding(credentialMountTrustBundleGroup,
-		[]string{"CURL_CA_BUNDLE"}, []string{"UNRELATED=1"})
-	if len(names) != 0 || len(synth) != 0 {
-		t.Fatalf("a forwarded-but-unset claim must not reseat: names=%v synth=%v", names, synth)
+	for _, c := range chains {
+		pinned := credentialMountPinnedNames(c.agent, []string{c.forward})
+		if slices.Contains(pinned, c.forward) {
+			t.Fatalf("%s chain: forwarded %s must leave the pin set", c.reader, c.forward)
+		}
+		for _, name := range c.falsyPin {
+			if !slices.Contains(pinned, name) {
+				t.Fatalf("%s chain: %s must stay pinned defined-empty so its empty read falls through to %s", c.reader, name, c.forward)
+			}
+		}
 	}
 }

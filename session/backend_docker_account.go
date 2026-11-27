@@ -650,9 +650,9 @@ func (p *dockerProvisioner) sessionExecOptions() []string {
 // execSessionSh runs a `sh -c <script>` inside the container as the session
 // user — the provisioning steps that work on the account- or session-owned
 // home and workspace (trust, clone, git identity). The trust-path unset is
-// applied here too: the clone step's git is the one provisioning child that
-// can open a TLS connection, and a defined-empty CA pin read as a path
-// would zero its trust store (#7889).
+// applied here too: a defined-empty SSL_CERT_FILE/SSL_CERT_DIR pin is a
+// path an OpenSSL-family stack in any of these children would load as zero
+// roots (#7889).
 func (p *dockerProvisioner) execSessionSh(timeout time.Duration, script string) ([]byte, error) {
 	args := []string{"exec"}
 	args = append(args, p.sessionExecOptions()...)

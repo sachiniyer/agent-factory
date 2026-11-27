@@ -6,6 +6,7 @@ import (
 
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/daemon"
+	"github.com/sachiniyer/agent-factory/internal/sessionenv"
 	"github.com/sachiniyer/agent-factory/log"
 
 	"github.com/spf13/cobra"
@@ -67,6 +68,15 @@ branch before shutdown), not this server's.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		log.Initialize(false)
 		defer log.Close()
+
+		// The container env carries the credential-mount trust pins
+		// defined-and-empty (-e SSL_CERT_FILE=) because `docker run` cannot
+		// unset an image ENV — but this process is the parent of every
+		// non-pane child af starts inside (post-worktree hooks, helpers),
+		// and an OpenSSL/rustls reader among them would load the empty
+		// value as a path and drop every root. Re-point the names to a real
+		// bundle or drop them before anything spawns (#7889 R1).
+		sessionenv.NeutralizeTrustPathPins()
 
 		repo, err := resolveAgentServerRepo(agentServerRepo)
 		if err != nil {
@@ -131,7 +141,7 @@ func init() {
 	agentServerCmd.Flags().StringSliceVar(&agentServerSessionEnv, "session-env", nil,
 		"Additional exact environment variable name an agent may inherit (repeatable)")
 	agentServerCmd.Flags().StringSliceVar(&agentServerSessionEnvEmpty, "session-env-empty", nil,
-		"Environment variable name the pane's exec shim re-asserts defined immediately before the agent execs — defined-and-empty, or a resolved platform trust path for the SSL_CERT_*/CA-bundle names (#7889) (repeatable; set by the provisioning daemon's credential-mount env pins)")
+		"Environment variable name the pane's exec shim re-asserts defined immediately before the agent execs — defined-and-empty, or a resolved platform trust path for SSL_CERT_FILE/SSL_CERT_DIR (#7889) (repeatable; set by the provisioning daemon's credential-mount env pins)")
 	agentServerCmd.Flags().BoolVar(&agentServerNoTmuxConfig, "no-tmux-config", false,
 		"Run every tmux invocation with -f /dev/null so the image's /etc/tmux.conf or a ~/.tmux.conf cannot pick programs or write session environment between af's env pins and the agent's exec")
 	_ = agentServerCmd.MarkFlagRequired("title")

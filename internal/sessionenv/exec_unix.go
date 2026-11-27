@@ -314,11 +314,16 @@ func execInvocation(args []string) error {
 // can only read the empty one.
 //
 // A path-valued trust pin resolves instead (#7889): defined-empty for
-// SSL_CERT_FILE/SSL_CERT_DIR and the CA-bundle spellings is a PATH their
-// readers load — zero CAs — so the shim points each at the first platform
-// bundle location that exists in the container (resolveTrustPathPin). The
-// name stays claimed either way, so a repo .env loader cannot take it, and
-// a store-less image keeps the defined-empty pin rather than going unset.
+// SSL_CERT_FILE/SSL_CERT_DIR is a PATH their readers load — OpenSSL gets
+// zero CAs, rustls-native-certs reads Some("") and skips the platform
+// roots — so the shim points each at the first platform bundle location
+// that exists in the container (resolveTrustPathPin). The name stays
+// claimed either way, so a repo .env loader cannot take it, and a
+// store-less image keeps the defined-empty pin rather than going unset.
+// The one exception is SSL_CERT_DIR next to a forwarded SSL_CERT_FILE:
+// resolving the dir would add the image's hashed roots to a rustls reader
+// that, with the dir unset, trusts only the operator's file — the dir
+// keeps its defined-empty claim instead (#7889 R5).
 func reapplyEmptyPins(environ, pins []string) []string {
 	if len(pins) == 0 {
 		return environ
@@ -327,6 +332,7 @@ func reapplyEmptyPins(environ, pins []string) []string {
 	for _, name := range pins {
 		pinned[name] = struct{}{}
 	}
+	_, filePinned := pinned["SSL_CERT_FILE"]
 	out := make([]string, 0, len(environ)+len(pins))
 	for _, entry := range environ {
 		name, _, _ := strings.Cut(entry, "=")
@@ -336,6 +342,15 @@ func reapplyEmptyPins(environ, pins []string) []string {
 		out = append(out, entry)
 	}
 	for _, name := range pins {
+		// A forwarded SSL_CERT_FILE claims the file slot for the operator's
+		// CA; a resolved hashed dir would silently widen that trust. Only a
+		// FILE that is NOT itself a pin counts — a pinned FILE re-resolves
+		// below, so whatever stale value the environ holds is being replaced
+		// and the dir resolves beside it as one consistent platform root set.
+		if name == "SSL_CERT_DIR" && !filePinned && envNonEmpty(environ, "SSL_CERT_FILE") {
+			out = append(out, name+"=")
+			continue
+		}
 		if entry, ok := resolveTrustPathPin(name); ok {
 			out = append(out, entry)
 			continue
@@ -343,6 +358,18 @@ func reapplyEmptyPins(environ, pins []string) []string {
 		out = append(out, name+"=")
 	}
 	return out
+}
+
+// envNonEmpty reports whether the name is defined with a non-empty value in
+// the environment list.
+func envNonEmpty(environ []string, name string) bool {
+	for _, entry := range environ {
+		n, v, ok := strings.Cut(entry, "=")
+		if ok && n == name {
+			return v != ""
+		}
+	}
+	return false
 }
 
 // neutralizeGitConfigCountForExec is the exec-shim wrapper around
