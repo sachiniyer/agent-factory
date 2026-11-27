@@ -140,7 +140,12 @@ func ListAFRelocationResidue(dirs ...string) ([]string, error) {
 // cannot find ends the walk as absent: nothing below a missing directory can
 // carry residue. Each symlink component is resolved with stat so a link that
 // points at a live tree is fine — only one whose target does not exist makes
-// the scan's "no residue" answer unproven.
+// the scan's "no residue" answer unproven. Every component syscall is bounded
+// (BoundedLstat/BoundedStat): a raw os.Lstat on a component under a stalled
+// NFS/FUSE mount would wedge the same op-lock the bounded scan exists to
+// protect, which is exactly the path this helper walks (#7819 R10). A
+// bounded-syscall timeout therefore errors the walk rather than being read
+// as absence — unknown, never "no residue".
 func danglingSymlinkComponent(dir string) (string, error) {
 	abs, err := filepath.Abs(dir)
 	if err != nil {
@@ -152,7 +157,7 @@ func danglingSymlinkComponent(dir string) (string, error) {
 			continue
 		}
 		prefix = filepath.Join(prefix, part)
-		info, lerr := os.Lstat(prefix)
+		info, lerr := BoundedLstat(prefix)
 		if lerr != nil {
 			if errors.Is(lerr, os.ErrNotExist) {
 				return "", nil
@@ -162,7 +167,7 @@ func danglingSymlinkComponent(dir string) (string, error) {
 		if info.Mode()&os.ModeSymlink == 0 {
 			continue
 		}
-		if _, serr := os.Stat(prefix); serr != nil {
+		if _, serr := BoundedStat(prefix); serr != nil {
 			if errors.Is(serr, os.ErrNotExist) {
 				return prefix, nil
 			}
@@ -249,10 +254,17 @@ func BindAFRelocationResidue(candidate, source, repoPath string) (ResidueBinding
 // linked-worktree `.git` pointer without traversing the candidate by
 // pathname. The directory is opened O_NOFOLLOW — a symlink swapped in place
 // of the scanned directory fails the open outright — the descriptor's fstat
-// identity is compared with a fresh lstat of the pathname so a rename between
-// the scan and the open reads as unbindable rather than binding a
-// replacement, and the `.git` pointer is read by openat relative to the held
-// descriptor so the read lands in the inspected object (R6).
+// identity is compared with a fresh lstat of the pathname, and the `.git`
+// pointer is read by openat relative to the held descriptor so the read
+// lands in the inspected object (R6).
+//
+// The identity comparison covers the open-to-lstat window only: a rename
+// between the caller's directory scan and this open is not detected, so the
+// bind describes the pathname's current occupant. That is the semantics the
+// callers want — they act on the pathname itself (refusing and naming it to
+// the operator), so binding whatever sits at the candidate at bind time is
+// honest; the lstat check exists so a swap under inspection cannot make the
+// verdict describe an object that has since left the pathname.
 func verifyResidueCandidatePointerShape(candidate string) (string, error) {
 	fd, err := unix.Open(
 		candidate,

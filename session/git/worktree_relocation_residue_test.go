@@ -1,6 +1,7 @@
 package git
 
 import (
+	"context"
 	"errors"
 	"os"
 	"os/exec"
@@ -8,6 +9,7 @@ import (
 	"strings"
 	"syscall"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -559,4 +561,49 @@ func TestListAFRelocationResidue_ResolvedSymlinkParentStillScans(t *testing.T) {
 	residue, err := ListAFRelocationResidue(link)
 	require.NoError(t, err)
 	assert.ElementsMatch(t, []string{filepath.Join(link, ".af-source-"+strings.Repeat("1", 32))}, residue)
+}
+
+// TestListAFRelocationResidue_StalledPathComponentIsBounded pins R10 (#7819):
+// the dangling-symlink walk's component stats go through BoundedLstat, so an
+// lstat that never returns — the stalled NFS/FUSE case the bounded scan
+// exists for — surfaces as a deadline error, never as a wedged op-lock or a
+// fabricated "no residue" answer.
+func TestListAFRelocationResidue_StalledPathComponentIsBounded(t *testing.T) {
+	parent := t.TempDir()
+	absent := filepath.Join(parent, "absent-scan-root")
+
+	original := boundedLstatPath
+	release := make(chan struct{})
+	boundedLstatPath = func(p string) (os.FileInfo, error) {
+		if p == parent {
+			<-release
+		}
+		return original(p)
+	}
+	// Registered first so LIFO runs the drain below after the release close;
+	// a t.Fatal inside the drain cannot skip restoring the seam.
+	t.Cleanup(func() { boundedLstatPath = original })
+	t.Cleanup(func() {
+		close(release)
+		key := boundedStatKey{path: parent}
+		deadline := time.Now().Add(5 * time.Second)
+		for {
+			boundedLstatFlights.Lock()
+			flight := boundedLstatFlights.byPath[key]
+			boundedLstatFlights.Unlock()
+			if flight == nil {
+				return
+			}
+			if time.Now().After(deadline) {
+				t.Fatal("the stalled component lstat did not drain after release")
+			}
+			time.Sleep(time.Millisecond)
+		}
+	})
+
+	residue, err := ListAFRelocationResidue(absent)
+	require.Error(t, err,
+		"a stalled component stat must surface, not wedge the caller or read as absent")
+	assert.ErrorIs(t, err, context.DeadlineExceeded)
+	assert.Nil(t, residue)
 }
