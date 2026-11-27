@@ -33,7 +33,9 @@ const dindImage = "docker:28-dind"
 //	                     metadata` with the exact signature that reddened master
 //	                     and the v1.0.211 release
 //	the fix works      — the REAL round-trip Dockerfiles, FROM the local-only
-//	                     base, must BUILD with the registry unreachable
+//	                     base, must BUILD with the registry unreachable AND
+//	                     the build steps' forwarding dropped (#7896), i.e.
+//	                     fetching literally nothing over the network
 //
 // The middle part is the one worth keeping honest about: it is this bug's
 // reproduction, run every time, so the check can never pass by measuring
@@ -50,18 +52,25 @@ func TestImageBuildsWithRegistryBlocked(t *testing.T) {
 		t.Skipf("set %s=1 to run the registry-blocked build check (make registry-free-check); it needs a privileged docker-in-docker container", registryBlockedEnv)
 	}
 	requireDocker(t)
+	// The base — with the packages already installed — is built on the HOST
+	// daemon: its apk layer is the one fetch left in these tests, and it runs
+	// before the isolated daemon exists (#7896). Only the fetch-free overlays
+	// are built below.
 	base := requireRoundTripBaseImage(t)
 
 	d := startIsolatedDaemon(t)
 	d.seedImage(t, base)
 
-	// Drop the daemon's OWN egress. Locally-generated packets traverse OUTPUT,
-	// so this kills registry resolution; a build's RUN steps are forwarded
-	// instead of locally generated, so `apk add` still reaches the network and
-	// the REAL Dockerfiles remain buildable. That asymmetry is what lets this
-	// check exercise the actual images rather than a network-free stand-in.
-	d.mustRun(t, 30*time.Second, "drop the isolated daemon's egress",
-		"iptables -A OUTPUT -o lo -j ACCEPT && iptables -P OUTPUT DROP")
+	// Drop the daemon's OWN egress AND its forwarding. Locally-generated
+	// packets traverse OUTPUT, so OUTPUT DROP kills registry resolution — the
+	// #2521 property. A build's RUN steps are forwarded rather than locally
+	// generated, which is the hole that used to let `apk add` reach a package
+	// mirror anyway (#3779). With the packages baked into the seeded base
+	// (#7896) the subject builds need nothing forwarded, so FORWARD DROP
+	// upgrades the check from "resolves no registry" to "fetches nothing at
+	// all" — proven, not asserted.
+	d.mustRun(t, 30*time.Second, "drop the isolated daemon's egress and forwarding",
+		"iptables -A OUTPUT -o lo -j ACCEPT && iptables -P OUTPUT DROP && iptables -P FORWARD DROP")
 
 	// The block is real. Without this the whole check could pass by measuring a
 	// daemon that was never actually cut off.
@@ -71,8 +80,8 @@ func TestImageBuildsWithRegistryBlocked(t *testing.T) {
 	t.Logf("registry block verified: %s cannot be pulled inside the isolated daemon", roundTripBaseUpstream)
 
 	// The bug is real. Nothing seeded `alpine:3.20` into this daemon — only the
-	// local-only retag — so a Dockerfile naming the public base has to resolve
-	// it remotely, and cannot.
+	// built local-only base — so a Dockerfile naming the public base has to
+	// resolve it remotely, and cannot.
 	ctl := d.buildContext(t, "control", dockerRoundTripDockerfile(roundTripBaseUpstream), nil)
 	out, err := d.run(300*time.Second, "docker build -t af-registry-blocked-control "+ctl)
 	if err == nil {
@@ -84,7 +93,8 @@ func TestImageBuildsWithRegistryBlocked(t *testing.T) {
 	t.Logf("reproduction confirmed: FROM %s fails in `load metadata` exactly as it did on master and on the v1.0.211 release", roundTripBaseUpstream)
 
 	// The fix works: the real images, from the local-only base, with the
-	// registry unreachable.
+	// registry unreachable and the build steps' forwarding dropped — i.e. a
+	// build that could fetch nothing at all still completes.
 	for _, tc := range []struct {
 		name       string
 		dockerfile string
@@ -101,7 +111,7 @@ func TestImageBuildsWithRegistryBlocked(t *testing.T) {
 		if strings.Contains(out, "registry-1.docker.io") {
 			t.Fatalf("the %s built, but its output names registry-1.docker.io, so something still reached for it:\n%s", tc.name, out)
 		}
-		t.Logf("%s built with registry-1.docker.io unreachable", tc.name)
+		t.Logf("%s built with registry-1.docker.io unreachable and no forwarded egress", tc.name)
 	}
 }
 

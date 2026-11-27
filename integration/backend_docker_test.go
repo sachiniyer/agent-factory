@@ -230,9 +230,11 @@ func buildDockerRoundTripImage(t *testing.T) string {
 	t.Helper()
 	const tag = "af-docker-roundtrip:test"
 	dir := t.TempDir()
-	// FROM a local-only base, so this build resolves no remote reference at all
-	// (#2521). requireRoundTripBaseImage is the one step that may reach a
-	// registry, and it has already run by the time the Dockerfile is written.
+	// FROM a local-only base that already carries the packages, so this build
+	// resolves no remote reference AND fetches nothing over the network (#2521,
+	// #7896). requireRoundTripBaseImage is the one step that may reach a
+	// registry or a package mirror, and it has already run by the time the
+	// Dockerfile is written.
 	dockerfile := dockerRoundTripDockerfile(requireRoundTripBaseImage(t))
 	if err := os.WriteFile(filepath.Join(dir, "Dockerfile"), []byte(dockerfile), 0644); err != nil {
 		t.Fatalf("write Dockerfile: %v", err)
@@ -241,7 +243,7 @@ func buildDockerRoundTripImage(t *testing.T) string {
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "docker", "build", "-t", tag, dir)
 	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("building the round-trip image failed. Its base is already in the local image store and its FROM names no registry, so this is a real build error, not a registry outage: %v\n%s", err, out)
+		t.Fatalf("building the round-trip image failed. Its base (with the packages already installed) is in the local image store, its FROM names no registry, and the build fetches nothing over the network — so this is a real build error, not a registry or mirror outage: %v\n%s", err, out)
 	}
 	return tag
 }

@@ -10,7 +10,8 @@ import (
 	"testing"
 )
 
-// These tests cover the apk layer's mirror tolerance (#3779).
+// These tests cover the apk layer's mirror tolerance (#3779) and the #7896
+// layering that keeps that layer out of every per-test build.
 //
 // The bug: `Registry-free image build` went red because dl-cdn answered
 // "temporary error (try again later)" for about a minute, so `apk add` exited 4
@@ -18,15 +19,21 @@ import (
 // property the same log had already proved one step earlier.
 //
 // Unlike #3774 there is no unrelated source to drop: the packages genuinely have
-// to come from a mirror, and TestImageBuildsWithRegistryBlocked deliberately
-// builds the real Dockerfile text. So the contract has two halves, and BOTH are
-// asserted below, because getting only the first is how you end up with a build
-// that cannot fail:
+// to come from a mirror. So the contract has two halves, and BOTH are asserted
+// below, because getting only the first is how you end up with a build that
+// cannot fail:
 //
 //  1. one mirror's bad minute does not fail the build — a second mirror on a
 //     different operator, plus a bounded retry;
 //  2. an outage on every mirror STILL fails the build, loudly, naming the
 //     packages.
+//
+// #7896 then moved WHERE the layer runs: once per test binary, inside the base
+// image's build (roundTripBaseDockerfile), under its own labelled
+// infrastructure budget — never inside a per-test `docker build`'s 300s. The
+// drift guards below pin both halves of that: the base is the only Dockerfile
+// that may carry an apk invocation, and every per-test Dockerfile must fetch
+// nothing at all.
 //
 // apk is stubbed, so these are hermetic: no docker, no network, no mirror. The
 // behaviour against a real apk and real mirrors is proven separately in a
@@ -199,37 +206,71 @@ func TestApkMirrorBranchTracksTheBase(t *testing.T) {
 		t.Errorf("alpineBranch() %q does not track roundTripBaseUpstream %q",
 			alpineBranch(), roundTripBaseUpstream)
 	}
-	for _, df := range []string{
-		dockerRoundTripDockerfile(roundTripBaseImage),
-		sshdRoundTripDockerfile(roundTripBaseImage),
+	// The only Dockerfile left with a mirror in it is the base's (#7896).
+	if df := roundTripBaseDockerfile(roundTripBaseUpstream); !strings.Contains(df, alpineFallbackMirror+"/"+alpineBranch()+"/main") {
+		t.Errorf("the base image Dockerfile does not name the fallback mirror for the pinned branch:\n%s", df)
+	}
+}
+
+// The drift guard, updated for the #7896 layering: packages install in exactly
+// ONE place — the base image's hardened apk layer. A second, hand-written
+// `apk add` (in the base, or back in any per-test Dockerfile) would be exactly
+// the un-hardened fetch this family of issues keeps paying for, and
+// TestImageBuildsWithRegistryBlocked builds whatever text these functions
+// return.
+func TestBaseDockerfileInstallsThroughTheHardenedLayer(t *testing.T) {
+	df := roundTripBaseDockerfile(roundTripBaseUpstream)
+	if !strings.Contains(df, "for attempt in $(seq 1 "+strconv.Itoa(apkAddAttempts)+")") {
+		t.Errorf("the base image does not go through the retry loop:\n%s", df)
+	}
+	// Exactly one apk INVOCATION, inside the loop — not a second bare
+	// one. Counted as `apk add --no-cache` rather than `apk add`, because
+	// the layer's own retry/failure messages quote the phrase and would
+	// make a bare-phrase count read 3 on a correct Dockerfile.
+	if got := strings.Count(df, "apk add --no-cache"); got != 1 {
+		t.Errorf("the base image has %d apk invocations, want exactly 1 (the hardened layer)", got)
+	}
+	if strings.Contains(df, "RUN apk add") {
+		t.Errorf("the base image installs with a bare `RUN apk add`, which fails on one mirror's bad minute (#3779):\n%s", df)
+	}
+	// The labels dockerBaseImageCurrent verifies are emitted too — without
+	// them a stale bare retag of the upstream could pass for a built base.
+	for _, want := range []string{
+		basePackagesLabel + `="` + strings.Join(roundTripBasePackages, " ") + `"`,
+		baseDigestLabel + `="` + baseDockerfileDigest(roundTripBaseUpstream) + `"`,
 	} {
-		if !strings.Contains(df, alpineFallbackMirror+"/"+alpineBranch()+"/main") {
-			t.Errorf("a round-trip Dockerfile does not name the fallback mirror for the pinned branch:\n%s", df)
+		if !strings.Contains(df, want) {
+			t.Errorf("the base image Dockerfile does not carry %s:\n%s", want, df)
 		}
 	}
 }
 
-// The drift guard. Both round-trip images must install through apkAddRun; a
-// second, hand-written `apk add` would be exactly the un-hardened layer this
-// issue is about, and TestImageBuildsWithRegistryBlocked builds whatever text
-// these functions return.
-func TestRoundTripDockerfilesInstallThroughTheHardenedLayer(t *testing.T) {
+// The #7896 property, checked textually with no docker: once the packages are
+// baked into the base image, every per-test Dockerfile must contain NO network
+// fetch — no package manager, no downloader, no URL — and its FROM must name a
+// local-only image (af-*), so buildkit has nothing to resolve remotely either.
+// If a new image genuinely needs another package, extend roundTripBasePackages
+// — never add a fetch to a per-test Dockerfile, which is how a mirror got a
+// vote inside a 300s build budget in the first place.
+func TestPerTestDockerfilesFetchNothingOverTheNetwork(t *testing.T) {
 	for name, df := range map[string]string{
-		"docker round-trip": dockerRoundTripDockerfile(roundTripBaseImage),
-		"sshd round-trip":   sshdRoundTripDockerfile(roundTripBaseImage),
+		"docker round-trip":   dockerRoundTripDockerfile(roundTripBaseImage),
+		"sshd round-trip":     sshdRoundTripDockerfile(roundTripBaseImage),
+		"account alias":       accountAliasDockerfile(roundTripBaseImage),
+		"symlinked-home sshd": symlinkedHomeDockerfile(roundTripBaseImage),
+		"sandbox host":        sandboxHostDockerfile("af-sshd-roundtrip:test"),
 	} {
-		if !strings.Contains(df, "for attempt in $(seq 1 "+strconv.Itoa(apkAddAttempts)+")") {
-			t.Errorf("%s image does not go through the retry loop:\n%s", name, df)
+		from, _, _ := strings.Cut(df, "\n")
+		if !strings.HasPrefix(from, "FROM af-") {
+			t.Errorf("%s Dockerfile does not FROM a local-only (af-*) image: %s\n%s", name, from, df)
 		}
-		// Exactly one apk INVOCATION, inside the loop — not a second bare
-		// one. Counted as `apk add --no-cache` rather than `apk add`, because
-		// the layer's own retry/failure messages quote the phrase and would
-		// make a bare-phrase count read 3 on a correct Dockerfile.
-		if got := strings.Count(df, "apk add --no-cache"); got != 1 {
-			t.Errorf("%s image has %d apk invocations, want exactly 1 (the hardened layer)", name, got)
-		}
-		if strings.Contains(df, "RUN apk add") {
-			t.Errorf("%s image installs with a bare `RUN apk add`, which fails on one mirror's bad minute (#3779):\n%s", name, df)
+		for _, fetch := range []string{
+			"apk", "apt", "wget", "curl", "pip", "npm", "yarn", "pnpm",
+			"git clone", "go get", "go install", "svn", "ftp://", "http://", "https://",
+		} {
+			if strings.Contains(df, fetch) {
+				t.Errorf("%s Dockerfile contains a network fetch %q — packages install once through the base image's hardened layer (#7896), never in a per-test build:\n%s", name, fetch, df)
+			}
 		}
 	}
 }

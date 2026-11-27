@@ -35,6 +35,15 @@ func (h *sandboxHost) sshCommand() string {
 		h.privKey, h.known, h.port)
 }
 
+// sandboxHostDockerfile is the sandbox host's overlay image: the sshd
+// round-trip image (which already carries git/tmux/bash/openssh-server, #7896)
+// plus the stub agent on PATH. No fetch — COPY and a local chmod only.
+func sandboxHostDockerfile(sshdImage string) string {
+	return "FROM " + sshdImage + "\n" +
+		"COPY claude /usr/local/bin/claude\n" +
+		"RUN chmod +x /usr/local/bin/claude\n"
+}
+
 // startSandboxHost builds the image, starts the container and returns once sshd
 // answers. repo is the local source repo; its bare clone becomes file:///repo.git
 // inside the container and is set as the repo's origin.
@@ -49,10 +58,9 @@ func startSandboxHost(t *testing.T, repo string) *sandboxHost {
 	base := buildSSHDRoundTripImage(t)
 	dir := t.TempDir()
 	writeFile(t, filepath.Join(dir, "claude"), stubAgentScript, 0755)
-	writeFile(t, filepath.Join(dir, "Dockerfile"),
-		"FROM "+base+"\nCOPY claude /usr/local/bin/claude\nRUN chmod +x /usr/local/bin/claude\n", 0644)
+	writeFile(t, filepath.Join(dir, "Dockerfile"), sandboxHostDockerfile(base), 0644)
 	if out, err := exec.Command("docker", "build", "-t", "af-sandbox-e2e:test", dir).CombinedOutput(); err != nil {
-		t.Fatalf("building the sandbox e2e image: %v\n%s", err, out)
+		t.Fatalf("building the sandbox e2e image failed. Its base (with the packages already installed) is in the local image store, its FROM names no registry, and the build fetches nothing over the network — so this is a real build error, not a registry or mirror outage: %v\n%s", err, out)
 	}
 
 	writeFile(t, filepath.Join(repo, "README.md"), "sandbox e2e\n", 0644)

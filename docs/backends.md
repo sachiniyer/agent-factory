@@ -690,13 +690,17 @@ kill. A second case commits real work on the session branch, **archives** it
 is present, and the session is drivable again). It skips cleanly where Docker is
 unavailable.
 
-These builds resolve nothing against a registry. The public base is fetched once
-per test binary, with retry, and retagged to a local-only name the Dockerfiles
-build `FROM`; a base that cannot be fetched at all skips, the same way a missing
-Docker daemon does. `make registry-free-check` proves it, by building the real
-Dockerfiles inside a second Docker daemon whose egress is dropped — and re-running
-this bug's own reproduction each time, so it cannot pass by measuring a network
-that was quietly reachable (#2521).
+These builds resolve nothing against a registry and fetch nothing over the
+network. The public base is fetched once per test binary, with retry, then the
+local-only base the Dockerfiles build `FROM` is *built* from it, installing the
+packages every round-trip image needs (git, tmux, bash, openssh-server) through
+one hardened `apk` layer under its own infrastructure budget — so a slow
+package mirror cannot cancel a per-test `docker build` inside its 300s (#7896),
+and a base that cannot be obtained at all skips, the same way a missing Docker
+daemon does. `make registry-free-check` proves it, by building the real
+Dockerfiles inside a second Docker daemon whose egress *and* forwarding are
+dropped — and re-running this bug's own reproduction each time, so it cannot
+pass by measuring a network that was quietly reachable (#2521).
 
 ### Making docker the default backend for a repo
 
