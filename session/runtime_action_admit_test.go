@@ -162,6 +162,7 @@ func TestRuntimeAction_HandoffMissionRefusalSuggestsPasteSafeCommands(t *testing
 			view := LifecycleView{
 				Title: tc.title, Liveness: LiveRunning, Started: true,
 				PendingHandoffMission: true,
+				HandoffDeliveryStatus: PromptCouldNotConfirm,
 			}
 			err := view.ValidateRuntimeAction(RuntimeActionHandoff)
 			require.Error(t, err)
@@ -221,7 +222,12 @@ func TestRuntimeAction_HandoffMissionRefusalSuggestsPasteSafeCommands(t *testing
 	// — "same phrasing, two complete commands" — is locked: a wording change
 	// to this refusal is caught here, and both backtick-fenced commands are
 	// the seam's output rather than a raw %s or a flag named only in prose.
-	owing := LifecycleView{Title: "owing", Liveness: LiveRunning, Started: true, PendingHandoffMission: true}
+	// A running row with an ambiguous verdict is the shape both verbs apply
+	// to (CanRetryPendingHandoffMissionDelivery admits the resend).
+	owing := LifecycleView{
+		Title: "owing", Liveness: LiveRunning, Started: true,
+		PendingHandoffMission: true, HandoffDeliveryStatus: PromptCouldNotConfirm,
+	}
 	require.EqualError(t, owing.ValidateRuntimeAction(RuntimeActionHandoff),
 		"session \"owing\" still owes the mission from its last handoff; resolve it first — `af sessions retry-limit -- owing` resends it, `af sessions retry-limit --delivered -- owing` retires it")
 }

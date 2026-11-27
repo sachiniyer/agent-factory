@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"github.com/sachiniyer/agent-factory/internal/sessionenv"
-	"github.com/sachiniyer/agent-factory/internal/shellsuggest"
 	"github.com/sachiniyer/agent-factory/log"
 )
 
@@ -531,25 +530,14 @@ func (i *Instance) admitOffBoxAccountSwap(p *sandboxProvisioner, name string) (*
 	// admitAccountSwapWith -> ValidateOffBoxAccountSwap, so the gate must
 	// live here rather than only on the manual RuntimeActionHandoff arm;
 	// without it the failover's commit silently calls SetPendingHandoffMission
-	// and discards an obligation nothing else records.
-	if mission := i.PendingHandoffMission(); mission != "" {
-		retry := shellsuggest.PositionalCommand("af", []string{"sessions", "retry-limit"}, i.Title)
-		// The remedies follow the recorded delivery verdict (#4429): a
-		// positively not-delivered mission belongs to automatic recovery, and
-		// CanConfirmPendingHandoffDelivery refuses it, so suggesting
-		// `retry-limit --delivered` there only leads to another refusal. An
-		// ambiguous (or recorded-delivered) verdict is the operator's
-		// confirm-or-retry decision, so both verbs apply. The sentinel lets
-		// the daemon's automatic failover keep this refusal from being
-		// bypassed by the ordinary same-account fallback.
-		if i.PendingHandoffMissionAutoRetryable() {
-			return nil, sessionenv.Account{}, nil, fmt.Errorf("session %q still owes the mission from its last handoff; resolve it first — `%s` resends it (handoff recovery replays it automatically): %w",
-				i.Title, retry, ErrOffBoxAccountSwapOwesMission)
-		}
-		return nil, sessionenv.Account{}, nil, fmt.Errorf("session %q still owes the mission from its last handoff; resolve it first — `%s` resends it, `%s` retires it: %w",
-			i.Title, retry,
-			shellsuggest.PositionalCommand("af", []string{"sessions", "retry-limit", "--delivered"}, i.Title),
-			ErrOffBoxAccountSwapOwesMission)
+	// and discards an obligation nothing else records. The remedies come from
+	// the same predicates the daemon routes on, shared with
+	// runtimeActionPendingHandoffMission, so the two refusals cannot drift; the
+	// sentinel lets the daemon's automatic failover keep this refusal from
+	// being bypassed by the ordinary same-account fallback.
+	if v := i.LifecycleView(); v.PendingHandoffMission {
+		return nil, sessionenv.Account{}, nil, fmt.Errorf("session %q still owes the mission from its last handoff; resolve it first — %s: %w",
+			v.Title, pendingHandoffMissionRemedy(v), ErrOffBoxAccountSwapOwesMission)
 	}
 	if name = strings.TrimSpace(name); name == "" {
 		return nil, sessionenv.Account{}, nil, fmt.Errorf("session %q: an account handoff needs the account to move to", i.Title)
