@@ -238,3 +238,53 @@ func TestRepro_TargetedAutoCreateBindsTaskID(t *testing.T) {
 	assert.Equal(t, resp.SessionID, stored[0].ID,
 		"the response's SessionID is the stored session's stable identity")
 }
+
+// TestRepro_WatchAutoCreateKeysRunStatus pins the Codex P1 on taskrun.go:252
+// (#7880): a watch task that auto-creates its absent target_session must key its
+// run-status write to the created run, not land it as an unkeyed event. Before
+// the fix deliverTaskPromptOutcome discarded the run key and the watch path wrote
+// through UpdateTaskStatusForTarget (unkeyed), which advanced the row's clock
+// past the session's creation time and refused every later keyed failure or
+// interruption stamp for that run as stale — the same invisible-failure
+// behavior the cron fix addressed. The watch path now threads the RunKey through
+// RecordRunStatusForTarget, so the write is keyed and a later failure stamp
+// lands.
+func TestRepro_WatchAutoCreateKeysRunStatus(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	repoPath := setupTaskRepo(t)
+	stubDeliverCreated(t, "sess-watch", fixedCreatedAt, false)
+
+	require.NoError(t, task.AddTask(task.Task{
+		ID:            "reproW0001",
+		Name:          "watch",
+		Prompt:        "event: {{line}}",
+		WatchCmd:      "watch.sh",
+		TargetSession: "captain",
+		ProjectPath:   repoPath,
+		Program:       "claude",
+		Enabled:       true,
+		CreatedAt:     time.Now(),
+	}))
+
+	require.NoError(t, deliverWatchEventWithOptions("reproW0001", "line1", watchDeliveryOptions{}))
+
+	got, err := task.GetTask("reproW0001")
+	require.NoError(t, err)
+	assert.Equal(t, "started", got.LastRunStatus,
+		"the watch auto-create is recorded started")
+	assert.Equal(t, "sess-watch", got.LastRunID,
+		"the watch run-status write must be keyed to the created session, not unkeyed (which cleared LastRunID)")
+	require.NotNil(t, got.LastRunStartedAt)
+	assert.True(t, got.LastRunStartedAt.Equal(fixedCreatedAt),
+		"the run's start time is the session's creation time, so later keyed writers for this run are not refused as stale")
+
+	// The failure verdict the session lifecycle would produce once the
+	// auto-created run dies — keyed to the same run — must LAND. Before the fix
+	// the unkeyed write advanced the row clock past fixedCreatedAt, so
+	// runOrder({sess-watch, fixedCreatedAt}, unkeyed@later) < 0 refused this.
+	later := fixedCreatedAt.Add(time.Minute)
+	_, applied, err := task.RecordRunStatus("reproW0001", task.RunKey{ID: "sess-watch", StartedAt: fixedCreatedAt}, &later, task.RunFailedUndeliveredStatus)
+	require.NoError(t, err)
+	assert.True(t, applied, "the failure verdict for the watch auto-created run must land (the row is keyed to it, so it is not refused as stale)")
+	assert.Equal(t, task.RunFailedUndeliveredStatus, lastRunStatus(t, "reproW0001"))
+}

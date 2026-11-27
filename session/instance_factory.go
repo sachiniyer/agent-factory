@@ -32,6 +32,11 @@ type InstanceOptions struct {
 	// a user-created session. It is what lets the daemon count a task's in-flight
 	// sessions for the watch-task concurrency limit without guessing from titles.
 	TaskID string
+	// TaskTargetSession marks a session created as a task's reusable
+	// target_session (#7880), not a per-fire spawn the task may reap via
+	// on_complete. Set only by the targeted auto-create path; the create-per-run
+	// spawn leaves it false so its finished run is reaped as before.
+	TaskTargetSession bool
 	// BacklogItem marks the session as started for a backlog item of the removed
 	// Backlog feature (#6662). Nothing sets it; it exists only so records from
 	// that feature keep loading.
@@ -863,10 +868,11 @@ func NewInstance(opts InstanceOptions) (*Instance, error) {
 
 	payloadOrphaned = false
 	instance := &Instance{
-		ID:           id,
-		sandboxCreds: opts.SandboxCredentials,
-		TaskID:       opts.TaskID,
-		Title:        opts.Title,
+		ID:                id,
+		sandboxCreds:      opts.SandboxCredentials,
+		TaskID:            opts.TaskID,
+		TaskTargetSession: opts.TaskTargetSession,
+		Title:             opts.Title,
 		// The daemon-named branch of an off-box session, known from the first
 		// frame rather than after the first push (#5571 W2.4). Empty for local.
 		Branch:         res.Branch,

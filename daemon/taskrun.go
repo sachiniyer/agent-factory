@@ -224,6 +224,15 @@ func deliverTaskPromptRun(t *task.Task, prompt string, deferWhileAttached bool, 
 		// can branch on isMutationCommitted and a re-fire does not treat the
 		// durable row as retryable.
 		if isMutationCommitted(err) {
+			// A committed auto-create still CREATED a session (#3357): apply
+			// its key before propagating the committed error, so a caller that
+			// correlates the run despite the error (the watch path keying its
+			// status write) reads the same identity a clean create would have
+			// reported (#7880). result carries the created session's identity
+			// because deliverPromptForTaskRPC preserves committed results.
+			if result.sessionID != "" {
+				*run = task.RunKey{ID: result.sessionID, StartedAt: result.sessionCreatedAt}
+			}
 			return "", false, err
 		}
 		wrapped := fmt.Errorf("failed to deliver prompt to target session %q: %w", target, err)

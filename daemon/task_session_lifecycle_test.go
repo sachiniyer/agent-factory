@@ -716,3 +716,72 @@ func TestTaskSessionLifecycle_UndeliveredRunKeepsSessionUnderArchive(t *testing.
 		"the failed run's session is not archived")
 	assert.Equal(t, taskStatusErroredPromptUndelivered, lastRunStatus(t, "task-undeliv-arch"))
 }
+
+// registerTaskTargetSession is registerTaskSpawnedSession for a session created
+// as a task's reusable target_session (#7880): TaskTargetSession is set, so the
+// on_complete lifecycle must keep it in place even when the task's policy is
+// edited mid-run to drop the target and set archive/kill.
+func registerTaskTargetSession(t *testing.T, m *Manager, repoID, repoPath, title, taskID string) *session.Instance {
+	t.Helper()
+	inst, err := session.NewInstance(session.InstanceOptions{
+		Title: title, Path: repoPath, Program: "claude",
+		TaskID: taskID, TaskTargetSession: true,
+	})
+	require.NoError(t, err)
+	inst.SetBackend(session.NewFakeBackend())
+	inst.SetStartedForTest(true)
+	inst.SetStatusForTest(session.Running)
+
+	seedDiskInstance(t, repoID, title, repoPath)
+	m.mu.Lock()
+	m.instances[daemonInstanceKey(repoID, title)] = inst
+	m.mu.Unlock()
+
+	require.True(t, inst.TaskRunActive(), "precondition: a target-session create still marks its run in flight")
+	require.True(t, inst.TaskTargetSession, "precondition: the session is recorded as a task target session")
+	return inst
+}
+
+// TestRepro_TargetSessionNotReapedByOnCompleteAfterMidRunEdit pins the deletion-
+// class Codex P1 on delivery.go:455 (#7880). A targeted task auto-creates its
+// reusable target_session and binds it to the task (so the failure/interruption
+// stampers can operate on it), which also enrols the session in
+// applyTaskSessionLifecycleOnRunEnd. If the task is edited before that first run
+// finishes to drop target_session and set on_complete=kill — a valid update — the
+// lifecycle reads the task's NEW policy and would archive or permanently delete
+// this reusable target, even though task.onCompleteApplies says a target session
+// is not the task's to reap. The sticky TaskTargetSession fact recorded at
+// creation carries the original ownership mode across that edit, so the target
+// is kept. It must fail on 48eff5422 (before the TaskTargetSession check landed).
+func TestRepro_TargetSessionNotReapedByOnCompleteAfterMidRunEdit(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	seedCronTask(t, "reproT0001", repoPath)
+	inst := registerTaskTargetSession(t, manager, repoID, repoPath, "captain", "reproT0001")
+	// The task has been edited mid-run to drop target_session and set
+	// on_complete=kill: onCompleteApplies would now answer true, so without the
+	// sticky target flag this verb reaps a reusable target.
+	stubTaskLifecycle(t, "reproT0001", task.OnCompleteKill)
+
+	// The kill seam must NOT be reached for a target session — fail if it is.
+	killReached := false
+	prevKill := killSessionForLifecycle
+	killSessionForLifecycle = func(_ *Manager, _ KillSessionRequest, _ sessionTeardownGuard) error {
+		killReached = true
+		return errors.New("kill must not be called on a task target session")
+	}
+	t.Cleanup(func() { killSessionForLifecycle = prevKill })
+
+	was := endRunOnIdleEdge(t, inst)
+	manager.applyTaskSessionLifecycleOnRunEnd(repoID, inst, was)
+	// The paused/deferred path must file no obligation for a target either.
+	manager.deferTaskSessionLifecycleWhilePaused(repoID, inst, was)
+	manager.applyDeferredTaskSessionLifecycle(repoID, inst)
+
+	require.False(t, killReached, "on_complete=kill must not reap a session created as a task's target_session")
+	assert.Equal(t, session.LiveReady, inst.GetLiveness(), "the reusable target stays live")
+	assert.Nil(t, inst.OwedOnComplete(), "no on_complete obligation may be filed for a target session")
+	manager.mu.Lock()
+	_, stillRegistered := manager.instances[daemonInstanceKey(repoID, "captain")]
+	manager.mu.Unlock()
+	assert.True(t, stillRegistered, "the reusable target session is not removed")
+}

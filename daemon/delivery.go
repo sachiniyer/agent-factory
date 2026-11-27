@@ -387,6 +387,19 @@ func (m *Manager) deliverPromptWithOutcome(req DeliverPromptRequest) (string, se
 			}
 			return "sent", deliveryStatus, false, session.InstanceData{}, nil
 		}
+		// A committed auto-create (#3357) provisioned a sandbox it could not
+		// confirm teardown/startup for, but it durably recorded the session —
+		// its retained InstanceData carries the identity the caller needs to key
+		// its run-status write to the run. Surface that identity alongside the
+		// committed marker rather than discarding it, so
+		// controlServer.DeliverPrompt populates the response's
+		// SessionID/SessionCreatedAt and the task RPC path can correlate the
+		// run (#7880). The committed error propagates verbatim, exactly as
+		// before, so a caller still branches on isMutationCommitted and does
+		// not treat the durable row as retryable.
+		if isMutationCommitted(err) && created.ID != "" {
+			return createdTaskStatus(created), session.PromptCouldNotConfirm, false, created, err
+		}
 		return "", session.PromptCouldNotConfirm, false, session.InstanceData{}, fmt.Errorf("failed to auto-create target session %q: %w", req.Title, err)
 	}
 	status := createdTaskStatus(created)
@@ -453,6 +466,14 @@ func (m *Manager) createMissingPromptTarget(req DeliverPromptRequest) (_ session
 		// no cap; the cap stays inert here exactly as it was before this bound
 		// the session (the targeted branch never enforced a cap).
 		TaskID: req.TaskID,
+		// Mark this as a task's reusable target_session (#7880), not a per-fire
+		// spawn the task may reap: the on_complete lifecycle reads this sticky
+		// fact to keep the target in place even if the task is edited mid-run to
+		// drop the target and set archive/kill. task.onCompleteApplies already
+		// says a target session is not the task's to reap, but the lifecycle
+		// reloads the task's CURRENT policy, so this records that intent at
+		// creation and carries it across such an edit.
+		TaskTargetSession: true,
 	})
 }
 

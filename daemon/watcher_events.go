@@ -204,7 +204,15 @@ func deliverWatchEventWithOptions(taskID, line string, options watchDeliveryOpti
 	if strings.TrimSpace(prompt) == "" {
 		return notAttempted(fmt.Errorf("event rendered an empty prompt (line %q)", line))
 	}
-	status, promptRetained, err := deliverTaskPromptOutcome(t, prompt, true)
+	// A watch-task auto-create reports its run's identity through the same
+	// out-parameter cron fires use (#5661): key the status write to it so the
+	// write does not land as an unkeyed event that advances the row's clock past
+	// the session's creation time, which would refuse every later keyed failure
+	// or interruption stamp for that run as stale (#7880). A send into an
+	// existing target reports no identity (zero RunKey), which is the correct
+	// unkeyed write the contract describes.
+	var run task.RunKey
+	status, promptRetained, err := deliverTaskPromptRun(t, prompt, true, &run)
 	if err != nil {
 		return err
 	}
@@ -233,8 +241,17 @@ func deliverWatchEventWithOptions(taskID, line string, options watchDeliveryOpti
 			// The verdict records the session the delivery went to — the
 			// task's config may be retargeted later, and a restarted daemon
 			// re-arms the send's re-verification on THIS identity (#6590).
-			_, err := updateWatchTaskStatus(taskID, &now, status, task.CanonicalTargetSession(t.TargetSession))
-			return err
+			// A keyed auto-create writes through the run-status state machine
+			// so a later keyed failure/interruption stamp for this run is
+			// accepted rather than refused as stale; an unkeyed send into an
+			// existing target keeps the legacy write.
+			target := task.CanonicalTargetSession(t.TargetSession)
+			if run.ID != "" {
+				_, _, werr := task.RecordRunStatusForTarget(taskID, run, &now, status, target)
+				return werr
+			}
+			_, werr := updateWatchTaskStatus(taskID, &now, status, target)
+			return werr
 		}
 		var err error
 		if status == TaskStatusLimitParked && options.commitParkedStatus != nil {

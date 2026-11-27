@@ -69,9 +69,18 @@ type Instance struct {
 	// a user-created one (#1892). It is the daemon's association between a task
 	// delivery and its session, replacing title-prefix guessing; the watch-task
 	// concurrency limit counts a task's in-flight sessions by it. Immutable after
-	// construction, so cross-goroutine readers may read it without the mutex
-	// (like ID and Title).
+	// construction, so cross-goroutine readers may read it without the mutex (like
+	// ID and Title).
 	TaskID string
+	// TaskTargetSession marks a session created as a task's reusable
+	// target_session (#7880), distinguishing it from a per-fire spawn the task
+	// owns and may reap via on_complete. The lifecycle reads it to keep a target
+	// in place across a mid-run task edit that drops the target and sets
+	// archive/kill — the same intent task.onCompleteApplies expresses, made
+	// sticky at creation so the lifecycle's reload of the task's CURRENT policy
+	// cannot override it. Immutable after construction, so cross-goroutine
+	// readers may read it without the mutex (like ID and TaskID).
+	TaskTargetSession bool
 	// BacklogItem is the id of the backlog item the removed Backlog feature
 	// (#6662) started this session for, 0 for any other session. Kept so records
 	// written by that feature still load and round-trip; nothing reads it now.

@@ -240,6 +240,18 @@ type InstanceData struct {
 	// reopen the delivery window an observation already closed. omitempty +
 	// additive: an older record decodes to zero, which releases nothing.
 	TaskRunTurnObservedAt time.Time `json:"task_run_turn_observed_at,omitzero"`
+	// TaskTargetSession records that this session was created as a task's
+	// reusable target_session (#7880), not as a per-fire spawn the task owns
+	// and may reap. The on_complete lifecycle reads it to keep a target
+	// session in place even when the task's policy is edited mid-run to drop
+	// the target and set archive/kill — task.onCompleteApplies already says a
+	// target session is not the task's to reap, but the lifecycle decision
+	// reloads the task's CURRENT policy, so this sticky fact recorded at
+	// creation is what carries that intent across a mid-run edit.
+	// omitempty + additive: an older record decodes to false, the pre-fix
+	// reading in which a create-per-run spawn is the only task-spawned shape —
+	// so a legacy row is treated as a reapable spawn, exactly as before.
+	TaskTargetSession bool `json:"task_target_session,omitempty"`
 	// PendingOnComplete records an on_complete teardown owed to this session's
 	// finished task run (#4162). The daemon files it BEFORE waiting on
 	// post-worktree hooks, so a shutdown that drops the in-flight lifecycle

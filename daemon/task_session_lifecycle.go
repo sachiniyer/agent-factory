@@ -158,6 +158,13 @@ func (m *Manager) deferTaskSessionLifecycleWhilePaused(repoID string, instance *
 	if !runEndedIntoIdle(instance, taskRunWasActive) || instance.TaskID == "" {
 		return
 	}
+	// A reusable target_session is never reaped (#7880); do not file an owed
+	// marker for it. applyTaskSessionLifecycleOnRunEnd makes the same check
+	// when it drains, so skipping the file here keeps the marker off the row
+	// entirely rather than filing-and-discharging it.
+	if instance.TaskTargetSession {
+		return
+	}
 	key := daemonInstanceKey(repoID, instance.Title)
 	m.mu.Lock()
 	if m.deferredTaskLifecycle == nil {
@@ -280,6 +287,21 @@ func (m *Manager) applyTaskSessionLifecycleOnRunEnd(repoID string, instance *ses
 	// the last time a lifecycle op keyed on a title reached the wrong worktree.
 	sessionID := instance.ID
 	title := instance.Title
+	// A session created as a task's reusable target_session is never reaped by
+	// on_complete (#7880): task.onCompleteApplies already says a target session
+	// is not the task's to reap, but this decision reloads the task's CURRENT
+	// policy, so a mid-run edit that drops the target and sets archive/kill
+	// would otherwise archive or permanently delete a durable, reusable target.
+	// The sticky TaskTargetSession fact recorded at creation carries the
+	// original ownership mode across that edit. Discharge any owed marker a
+	// paused/deferred path filed and leave the session in place — the same
+	// outcome a keep verb reaches below.
+	if instance.TaskTargetSession {
+		if instance.OwedOnComplete() != nil {
+			m.dischargeOwedTaskLifecycle(repoID, sessionID, title)
+		}
+		return
+	}
 	// The adoption baseline was pinned by the completion transition itself, in the
 	// same critical section that cleared taskRunActive (#3865) — NOT read here,
 	// which is the window #2953 left open with persistPollChange's storage I/O
