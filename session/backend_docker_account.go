@@ -128,7 +128,7 @@ func validateAccountDockerRunArgs(args []string, agent string) error {
 		if reason, refused := accountDockerRoutingReason(agent, name); refused {
 			remedy := "have the operator forward it through session_env_passthrough"
 			if _, path := accountRoutingPathValuedNames[name]; path {
-				remedy = "drop the entry, or have the operator mount the file at the same container path and forward it through session_env_passthrough"
+				remedy = "drop the entry, or have the operator mount the file or directory at the same container path and forward it through session_env_passthrough"
 			}
 			return fmt.Errorf(
 				"backend=docker: docker.run_args cannot set %s for an account-scoped %s session because %s; the remedy: %s",
@@ -413,13 +413,17 @@ func accountDockerRoutingReason(agent, name string) (string, bool) {
 }
 
 // accountRoutingPathValuedNames names the routing-class entries whose value is
-// a container file path the agent's TLS stack reads (a CA bundle or cert file).
-// Forwarding such a name through session_env_passthrough is not enough on its
-// own — the file the operator points at must also be mounted at the same
-// container path — so the refusal's remedy names the mount alongside the
-// forward and offers "drop the entry" the way the credential-mount path does.
+// a container path the agent's TLS stack reads (a CA bundle or cert file, or a
+// CA directory). Forwarding such a name through session_env_passthrough is not
+// enough on its own — the file or directory the operator points at must also be
+// mounted at the same container path — so the refusal's remedy names the mount
+// alongside the forward and offers "drop the entry" the way the credential-mount
+// path does. SSL_CERT_DIR sits here alongside SSL_CERT_FILE: forwarding the
+// directory does not make its host CAs available inside the container, so the
+// remedy has to name the mount.
 var accountRoutingPathValuedNames = map[string]struct{}{
 	"SSL_CERT_FILE":        {},
+	"SSL_CERT_DIR":         {},
 	"NODE_EXTRA_CA_CERTS":  {},
 	"REQUESTS_CA_BUNDLE":   {},
 	"CURL_CA_BUNDLE":       {},

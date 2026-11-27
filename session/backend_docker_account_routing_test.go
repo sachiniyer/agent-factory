@@ -141,16 +141,20 @@ func TestAccountDockerRunArgs_RoutingReasonNamesTheMechanism(t *testing.T) {
 
 // TestAccountDockerRunArgs_RoutingRemedyNamesTheMountForPathValues pins the
 // remedy text the review asked for: a routing name whose value is a container
-// file path (a CA bundle or cert file the agent's TLS stack reads) names the
-// mount-at-the-same-container-path step forwarding alone does not cover, and
-// offers "drop the entry" the way the credential-mount path's refusal does. An
-// endpoint or proxy name keeps the forward-only remedy.
+// path the agent's TLS stack reads (a CA bundle or cert file, or a CA
+// directory) names the mount-at-the-same-container-path step forwarding alone
+// does not cover, and offers "drop the entry" the way the credential-mount
+// path's refusal does. An endpoint or proxy name keeps the forward-only
+// remedy. SSL_CERT_DIR is a directory-valued routing name alongside
+// SSL_CERT_FILE, so it gets the same mount-naming remedy rather than the
+// forward-only one forwarding alone leaves the host CAs unreachable.
 func TestAccountDockerRunArgs_RoutingRemedyNamesTheMountForPathValues(t *testing.T) {
 	for _, tt := range []struct {
 		agent string
 		name  string
 	}{
 		{tmux.ProgramClaude, "SSL_CERT_FILE"},
+		{tmux.ProgramClaude, "SSL_CERT_DIR"},
 		{tmux.ProgramClaude, "NODE_EXTRA_CA_CERTS"},
 		{tmux.ProgramClaude, "REQUESTS_CA_BUNDLE"},
 		{tmux.ProgramClaude, "CURL_CA_BUNDLE"},
@@ -160,7 +164,7 @@ func TestAccountDockerRunArgs_RoutingRemedyNamesTheMountForPathValues(t *testing
 			err := validateAccountDockerRunArgs([]string{"-e", tt.name + "=/workspace/.ca.pem"}, tt.agent)
 			require.Error(t, err)
 			require.Contains(t, err.Error(), "drop the entry", "a path-valued routing name must offer dropping the entry")
-			require.Contains(t, err.Error(), "mount the file at the same container path",
+			require.Contains(t, err.Error(), "mount the file or directory at the same container path",
 				"a path-valued routing name must name the mount-at-the-same-container-path step")
 			require.Contains(t, err.Error(), "session_env_passthrough")
 		})
