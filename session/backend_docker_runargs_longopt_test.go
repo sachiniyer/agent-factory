@@ -216,8 +216,9 @@ func TestDockerAccount_AdmitsCommonRunArgs(t *testing.T) {
 		{"--publish", "8080:80"},
 		{"--publish=8080:80"},
 		{"--network", "host"},
-		{"--net", "host"},      // hidden alias of --network
-		{"--net-alias=af-box"}, // hidden alias of --network-alias
+		{"--net", "host"},        // hidden alias of --network
+		{"--net-alias=af-box"},   // hidden alias of --network-alias
+		{"--dns-opt", "ndots:1"}, // hidden alias of --dns-option
 		{"-u", "1000"},
 		{"--user=1000"},
 		{"-w", "/src"},
@@ -275,9 +276,11 @@ func TestDockerAccount_AdmitsCommonRunArgs(t *testing.T) {
 		{"--blkio-weight=100"},
 		{"--cap-drop=ALL"},
 		{"--domainname=example"},
+		{"--dns=1.1.1.1", "--dns-search=corp"},
 		{"--expose=8080"},
 		{"--group-add=docker"},
 		{"--ip=10.0.0.2"},
+		{"--link=other:alias"},
 		{"--oom-score-adj=-100"},
 		{"--pids-limit=100"},
 		{"--runtime=runc"},
@@ -331,6 +334,7 @@ func TestDockerCredential_AdmitsCommonRunArgs(t *testing.T) {
 			{"--label", "k=v"},
 			{"--name", "x"},
 			{"--net", "host"},
+			{"--dns-opt", "ndots:1"},
 			{"--kernel-memory=1m"},
 			{"--cpu-count=2"},
 			{"--volume", "/host:/container"},

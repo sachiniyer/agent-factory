@@ -281,16 +281,14 @@ func resolveAgentCredentialMounts(agent string, relabel bool) []string {
 // credential path predates that hardening and was never retrofitted, leaving the
 // gap this closes.
 //
-// The mount surface mostly needs no guard here because a repo cannot win it:
-// Docker refuses a second -v at af's single-file credential mount's
-// destination, and a parent-directory mount does not shadow af's single-file
-// child (runc mounts parent-then-child, so the child always wins). #7867 R3
-// added one bounded check on top: mounts are checked against the name-
-// resolution files and TLS trust-store paths, because those route the mounted
-// credential's TRAFFIC rather than the file itself — the same reason the
-// resolver options (--add-host, --dns*, --link, --net=container:) and
-// --volumes-from are refused. A mount anywhere else still passes through, for
-// the reason above.
+// The mount surface needs no guard here because a repo cannot win it: Docker
+// refuses a second -v at af's single-file credential mount's destination, and a
+// parent-directory mount does not shadow af's single-file child (runc mounts
+// parent-then-child, so the child always wins). So unlike the account guard,
+// this checks environment entries only — a -v, --mount, --tmpfs, --device or
+// --volumes-from is left through, because none can replace the single-file
+// mount the credential path's safety rests on. The account guard blocks those
+// for its own nested-path reason, which does not apply to a single-file mount.
 //
 // The refused set is credentialMountDeniedNames plus the loader prefix
 // family: the roster-derived union of the identity, config-root, routing,
@@ -324,44 +322,6 @@ func validateCredentialDockerRunArgs(args []string, agent string, passthrough []
 		}
 		return nil
 	}
-	// checkMount reads a mount option's value against the resolution and
-	// trust-store paths only — the credential path has no account boundary
-	// to protect and a mount cannot shadow af's single-file credential
-	// mount (runc mounts parent-then-child), but it CAN decide where the
-	// agent's endpoint hosts resolve and which certificate authorities its
-	// TLS stack trusts (#7867 R3): the routing names the env check refuses
-	// are only words for where these paths point.
-	checkMount := func(value string) error {
-		if protected := dockerRoutingProtectedPath(dockerRoutingMountTarget(value)); protected != "" {
-			return fmt.Errorf(
-				"backend=docker: docker.run_args cannot install a mount over %s for the credential-mount session's %s agent because %s",
-				protected, agent, dockerRoutingProtectedReason(protected))
-		}
-		return nil
-	}
-	// checkAddHost and checkNetwork are the account path's resolver and
-	// namespace guards applied to the same routing class: an --add-host
-	// remap of an endpoint host or a --net=container: share routes the
-	// mounted credential's traffic exactly as a proxy env name would.
-	endpointHosts := dockerSessionEndpointHosts(agent, passthrough, os.Environ())
-	checkAddHost := func(value string) error {
-		for _, host := range dockerAddHostNames(value) {
-			if protected := dockerHostProtected(host, endpointHosts); protected != "" {
-				return fmt.Errorf(
-					"backend=docker: docker.run_args cannot use --add-host to remap %s for the credential-mount session's %s agent because that host is (or sits under) one the agent's authenticated traffic resolves to — a repo-chosen address there routes the mounted credential to a server the repository controls",
-					host, agent)
-			}
-		}
-		return nil
-	}
-	checkNetwork := func(value string) error {
-		if strings.HasPrefix(value, "container:") {
-			return fmt.Errorf(
-				"backend=docker: docker.run_args cannot join another container's network namespace for the credential-mount session's %s agent because the donor's resolver and outbound path become this session's — and the session's authenticated traffic becomes the donor's to observe; use a named --network instead",
-				agent)
-		}
-		return nil
-	}
 	for index := 0; index < len(args); index++ {
 		arg := args[index]
 		switch {
@@ -388,84 +348,20 @@ func validateCredentialDockerRunArgs(args []string, agent string, passthrough []
 			if err := checkEnv(strings.TrimPrefix(arg, "-e")); err != nil {
 				return err
 			}
-		// The mount and resolver options join the guard for the same routing
-		// class (#7867 R3): a mount shadowing a resolution file or a trust
-		// store, an --add-host remap of an endpoint host, a --dns* resolver,
-		// a --link alias, a --net=container: share, or a --volumes-from donor
-		// af cannot inspect each routes the mounted credential's traffic
-		// without touching an env name at all. Non-endpoint --add-host
-		// mappings and named --networks stay allowed.
-		case arg == "--volumes-from" || strings.HasPrefix(arg, "--volumes-from="):
-			return fmt.Errorf(
-				"backend=docker: docker.run_args cannot use --volumes-from for the credential-mount session's %s agent because af cannot prove what the donor container mounts — the donor's mounts land at its own container paths, resolution files and trust stores included; name the mount explicitly with -v or --mount instead",
-				agent)
-		case arg == "-v" || arg == "--volume" || arg == "--mount" || arg == "--tmpfs":
-			if index+1 < len(args) {
-				index++
-				if err := checkMount(args[index]); err != nil {
-					return err
-				}
-			}
-		case strings.HasPrefix(arg, "--volume=") || strings.HasPrefix(arg, "--mount=") || strings.HasPrefix(arg, "--tmpfs="):
-			if err := checkMount(strings.SplitN(arg, "=", 2)[1]); err != nil {
-				return err
-			}
-		case strings.HasPrefix(arg, "-v="):
-			if err := checkMount(strings.TrimPrefix(arg, "-v=")); err != nil {
-				return err
-			}
-		case strings.HasPrefix(arg, "-v") && len(arg) > 2:
-			if err := checkMount(strings.TrimPrefix(arg, "-v")); err != nil {
-				return err
-			}
-		case arg == "--add-host":
-			if index+1 < len(args) {
-				index++
-				if err := checkAddHost(args[index]); err != nil {
-					return err
-				}
-			}
-		case strings.HasPrefix(arg, "--add-host="):
-			if err := checkAddHost(strings.TrimPrefix(arg, "--add-host=")); err != nil {
-				return err
-			}
-		case arg == "--dns" || arg == "--dns-search" || arg == "--dns-option" || arg == "--dns-opt":
-			return fmt.Errorf(
-				"backend=docker: docker.run_args cannot use %s for the credential-mount session's %s agent because it chooses the resolver every hostname in the container goes through — including the agent's endpoint hosts — so a repo-chosen resolver routes the mounted credential's traffic the way a proxy does",
-				arg, agent)
-		case strings.HasPrefix(arg, "--dns=") || strings.HasPrefix(arg, "--dns-search=") || strings.HasPrefix(arg, "--dns-option=") || strings.HasPrefix(arg, "--dns-opt="):
-			name, _, _ := strings.Cut(arg, "=")
-			return fmt.Errorf(
-				"backend=docker: docker.run_args cannot use %s for the credential-mount session's %s agent because it chooses the resolver every hostname in the container goes through — including the agent's endpoint hosts — so a repo-chosen resolver routes the mounted credential's traffic the way a proxy does",
-				name, agent)
-		case arg == "--link" || strings.HasPrefix(arg, "--link="):
-			return fmt.Errorf(
-				"backend=docker: docker.run_args cannot use --link for the credential-mount session's %s agent because it injects a host mapping and an env alias for a repo-named container — write the mapping with --add-host to a host that is not an endpoint, or attach with a named --network",
-				agent)
-		case arg == "--net" || arg == "--network":
-			if index+1 < len(args) {
-				index++
-				if err := checkNetwork(args[index]); err != nil {
-					return err
-				}
-			}
-		case strings.HasPrefix(arg, "--net=") || strings.HasPrefix(arg, "--network="):
-			if err := checkNetwork(strings.SplitN(arg, "=", 2)[1]); err != nil {
-				return err
-			}
 		case strings.HasPrefix(arg, "--") || (len(arg) == 2 && arg[0] == '-'):
 			// Every remaining flag spelling pflag knows: a `--name` or
 			// `--name=value` long option, or a bare two-character `-x`
-			// shorthand. The guarded spellings above already claimed the env,
-			// mount, and resolver options; what remains still needs the
-			// consumption half of the pflag model — a bare value-taking
-			// option (--label, --user, -l, -u) swallows the NEXT argv element
-			// whatever its shape, so a following -e is its value and never a
-			// flag af sees — the swallow #7726 measured.
-			// dockerRunOptionConsumption reports the consumption so the outer
-			// index skips the swallowed token, and refuses the shapes af
-			// cannot model: an option not in the `docker run` table in a
-			// position where it could take a value, and the `--` terminator.
+			// shorthand. The guarded spellings above already claimed the env
+			// options; what remains still needs the consumption half of the
+			// pflag model — a bare value-taking option (--label, --user, -l,
+			// -u, or a mount option like --volume this path does not check)
+			// swallows the NEXT argv element whatever its shape, so a
+			// following -e is its value and never a flag af sees — the
+			// swallow #7726 measured. dockerRunOptionConsumption reports the
+			// consumption so the outer index skips the swallowed token, and
+			// refuses the shapes af cannot model: an option not in the
+			// `docker run` table in a position where it could take a value,
+			// and the `--` terminator.
 			consume, err := dockerRunOptionConsumption(arg,
 				"the credential-mount session's "+agent+" agent")
 			if err != nil {
@@ -475,11 +371,11 @@ func validateCredentialDockerRunArgs(args []string, agent string, passthrough []
 				index++
 			}
 		case len(arg) > 2 && arg[0] == '-' && arg[1] != '-':
-			// A combined short option (e.g. -te, -tv) whose -e sets an
-			// environment variable and whose -v installs a mount exactly as
-			// each does on its own. The -e can redirect credential lookup and
-			// the -v can shadow a resolution file or trust store (#7867 R3),
-			// so both guarded characters dispatch to their checks.
+			// A combined short option (e.g. -te) whose -e sets an environment
+			// variable exactly as -e on its own does. Only -e can redirect
+			// credential lookup on this path, so a -v in the cluster is read as
+			// a value-taking option that ends the walk rather than a mount to
+			// check — there is no account boundary here to protect.
 			//
 			// pflag: a cluster ending in a value-taking option consumes the
 			// NEXT argv element as that option's value, so Docker never
@@ -490,14 +386,9 @@ func validateCredentialDockerRunArgs(args []string, agent string, passthrough []
 			// name through. dockerClusterConsumesNextArg reports that
 			// consumption so the outer index skips the swallowed token; the
 			// cluster's own guarded check above already examined the value.
-			if err := dockerCheckShorthandCluster(arg, args, index, dockerGuardedShorthands,
-				func(character byte, value string) error {
-					if character == 'v' {
-						return checkMount(value)
-					}
-					return checkEnv(value)
-				},
-				"the credential-mount session's "+agent+" agent", "the -v or -e"); err != nil {
+			if err := dockerCheckShorthandCluster(arg, args, index, "e",
+				func(character byte, value string) error { return checkEnv(value) },
+				"the credential-mount session's "+agent+" agent", "the -e"); err != nil {
 				return err
 			}
 			if dockerClusterConsumesNextArg(arg) && index+1 < len(args) {

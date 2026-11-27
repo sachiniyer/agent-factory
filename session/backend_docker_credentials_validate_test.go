@@ -247,15 +247,11 @@ func TestDockerCredentialRunArgs_ClusterScanDoesNotSkipALaterEnv(t *testing.T) {
 }
 
 // TestDockerCredentialRunArgs_AllowsEveryMountInstallingOption pins that the
-// credential guard still passes ordinary mount/device options through,
-// because none can replace af's single-file credential mount (Docker refuses
-// a second -v at the same destination; a parent dir does not shadow the file
-// child; a --device is a node not a credential reader). Since #7867 R3 the
-// pass-through is bounded: mounts targeting the name-resolution files or TLS
-// trust stores are refused (they route the credential's traffic, not the
-// file), and --volumes-from joins them because af cannot prove what the donor
-// mounts — the dedicated refusal tests cover both. The account guard refuses
-// these for its nested-path reason, which does not apply here.
+// credential guard passes mount/device/volumes-from options through, because
+// none can replace af's single-file credential mount (Docker refuses a second
+// -v at the same destination; a parent dir does not shadow the file child; a
+// --device is a node not a credential reader). The account guard refuses these
+// for its nested-path reason, which does not apply here.
 func TestDockerCredentialRunArgs_AllowsEveryMountInstallingOption(t *testing.T) {
 	for _, args := range [][]string{
 		{"-v", "/tmp/other:/root/.codex/other"},
@@ -266,6 +262,8 @@ func TestDockerCredentialRunArgs_AllowsEveryMountInstallingOption(t *testing.T) 
 		{"--tmpfs=/tmp:size=64m"},
 		{"--device", "/dev/zero:/dev/zero"},
 		{"--device=/dev/fuse"},
+		{"--volumes-from", "repo-donor"},
+		{"--volumes-from=repo-donor"},
 		{"-v", "/dev/null:/root/.codex/auth.json:ro"}, // Docker refuses a duplicate single-file mount
 		{"-v", "/tmp/shadow/.codex:/root/.codex:ro"},  // parent dir does not shadow the file child
 	} {

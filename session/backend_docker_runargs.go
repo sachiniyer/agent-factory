@@ -190,12 +190,9 @@ var dockerRunBooleanLongopts = map[string]struct{}{
 	"use-api-socket":        {},
 }
 
-// dockerGuardedShorthands are the short options the guarded validators have
-// to see: -v installs a mount, -e can name another identity or route a
-// credential. Both are checked wherever they appear, including behind other
-// options in a combined short option, on both guarded paths — the credential
-// path guards -v since #7867 R3 (a mount shadowing a resolution file or trust
-// store routes the mounted credential's traffic).
+// dockerGuardedShorthands are the short options this validator has to see: -v
+// installs a mount, -e can name another identity. Both are checked wherever
+// they appear, including behind other options in a combined short option.
 const dockerGuardedShorthands = "ve"
 
 // dockerShorthandValue reports the value Docker gives the short option at
@@ -268,16 +265,16 @@ func dockerClusterConsumesNextArg(arg string) bool {
 // obvious remedy — write the options separately — while an accept would hand a
 // repository a credential boundary (#3401).
 //
-// guarded is the set of short options this walk has to act on: "ve" on both
-// guarded paths — a -v installs a mount (which can shadow a resolution file
-// or trust store even where no account boundary exists, #7867 R3) and a -e
-// names another identity or routes a credential. check dispatches per guarded
-// character — 'v' to a mount check, 'e' to an env check — and returns the
-// per-option refusal. whichGuarded is the "-v or -e" / "-e" phrase the
-// fail-closed refusal names, and scope is the "account-scoped session" /
-// "credential-mount session" clause, so the account and credential guards
-// share the WORDING the account tests pin without two copies of the
-// pflag-walk drifting apart.
+// guarded is the set of short options this walk has to act on: "ve" for the
+// account path (a -v installs a mount, a -e names another identity) and "e"
+// for the credential-mount path (only -e can redirect credential lookup; a -v
+// cannot shadow af's single-file credential mount, so the credential path does
+// not guard it). check dispatches per guarded character — 'v' to a mount
+// check, 'e' to an env check — and returns the per-option refusal. whichGuarded
+// is the "-v or -e" / "-e" phrase the fail-closed refusal names, and scope is
+// the "account-scoped session" / "credential-mount session" clause, so the
+// account and credential guards share the WORDING the account tests pin
+// without two copies of the pflag-walk drifting apart.
 //
 // pflag resolves the `-f=value` form BEFORE it consults the option's kind, so
 // an explicit `=` makes the WHOLE suffix that option's value — a boolean's
