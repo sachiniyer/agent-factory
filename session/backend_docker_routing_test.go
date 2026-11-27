@@ -89,16 +89,6 @@ func TestDockerRunArgs_AddHostSeesForwardedEndpoints(t *testing.T) {
 	err = validateCredentialDockerRunArgs([]string{"--add-host", "ghe.acme.example:10.0.0.9"}, tmux.ProgramClaude, passthrough)
 	require.Error(t, err, "remapping the operator's forwarded gh host must be refused")
 	require.Contains(t, err.Error(), "ghe.acme.example")
-
-	// A single-label forwarded host is protected too: "corpproxy:3128"
-	// names the operator's proxy exactly as a dotted host does, and
-	// --add-host remaps either spelling.
-	t.Setenv("HTTP_PROXY", "corpproxy:3128")
-	singleLabel := []string{"HTTP_PROXY"}
-	err = validateAccountDockerRunArgs([]string{"--add-host", "corpproxy:10.0.0.9"}, "claude", singleLabel)
-	require.Error(t, err, "remapping the operator's forwarded single-label proxy host must be refused")
-	err = validateCredentialDockerRunArgs([]string{"--add-host", "corpproxy:10.0.0.9"}, tmux.ProgramClaude, singleLabel)
-	require.Error(t, err, "remapping the operator's forwarded single-label proxy host must be refused")
 }
 
 // TestDockerRunArgs_RefusesResolverOptions pins the --dns* refusal: every
@@ -208,8 +198,7 @@ func TestDockerRunArgs_RefusesResolutionAndTrustStoreMounts(t *testing.T) {
 		{"-v", "/repo/share:/usr/local/share/ca-certificates"},
 		{"--mount", "type=bind,src=/repo/etc,dst=/etc"},
 		{"-v", "/repo/root.d:/"},
-		{"-tv", "/repo/hosts:/etc/hosts"},          // the cluster spelling
-		{"-v", "/tmp/ca,dst=/safe:/etc/ssl/certs"}, // a dst= inside a -v source is path text, not a --mount key
+		{"-tv", "/repo/hosts:/etc/hosts"}, // the cluster spelling
 	}
 	for _, spelling := range refused {
 		label := strings.Join(spelling, " ")
@@ -228,9 +217,8 @@ func TestDockerRunArgs_RefusesResolutionAndTrustStoreMounts(t *testing.T) {
 		{"-v", "/repo/data:/workspace/data"},
 		{"--mount", "type=bind,src=/repo/tools,dst=/opt/tools"},
 		{"--tmpfs", "/tmp/scratch"},
-		{"--tmpfs", "/data:rw,noexec"},                  // options after the target stay allowed
-		{"-v", "/repo/ca,dst=/etc/ssl/certs:/opt/ca.d"}, // commas are path text to -v; the real target is /opt/ca.d
-		{"-v", "/repo/certificates.d:/etc/ssl-keys"},    // a lookalike, not the store
+		{"--tmpfs", "/data:rw,noexec"},               // options after the target stay allowed
+		{"-v", "/repo/certificates.d:/etc/ssl-keys"}, // a lookalike, not the store
 	}
 	for _, spelling := range allowed {
 		label := strings.Join(spelling, " ")

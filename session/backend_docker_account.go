@@ -326,17 +326,10 @@ func validateAccountDockerRunArgs(args []string, agent string, passthrough []str
 			if err := checkDevice(strings.TrimPrefix(arg, "--device=")); err != nil {
 				return err
 			}
-		case arg == "-v" || arg == "--volume":
+		case arg == "-v" || arg == "--volume" || arg == "--mount":
 			if index+1 < len(args) {
 				index++
-				if err := checkMount(args[index], dockerVolumeTarget(args[index])); err != nil {
-					return err
-				}
-			}
-		case arg == "--mount":
-			if index+1 < len(args) {
-				index++
-				if err := checkMount(args[index], dockerLongMountTarget(args[index])); err != nil {
+				if err := checkMount(args[index], dockerRoutingMountTarget(args[index])); err != nil {
 					return err
 				}
 			}
@@ -347,12 +340,8 @@ func validateAccountDockerRunArgs(args []string, agent string, passthrough []str
 					return err
 				}
 			}
-		case strings.HasPrefix(arg, "--volume="):
-			if err := checkMount(strings.SplitN(arg, "=", 2)[1], dockerVolumeTarget(strings.SplitN(arg, "=", 2)[1])); err != nil {
-				return err
-			}
-		case strings.HasPrefix(arg, "--mount="):
-			if err := checkMount(strings.SplitN(arg, "=", 2)[1], dockerLongMountTarget(strings.SplitN(arg, "=", 2)[1])); err != nil {
+		case strings.HasPrefix(arg, "--volume=") || strings.HasPrefix(arg, "--mount="):
+			if err := checkMount(strings.SplitN(arg, "=", 2)[1], dockerRoutingMountTarget(strings.SplitN(arg, "=", 2)[1])); err != nil {
 				return err
 			}
 		case strings.HasPrefix(arg, "--tmpfs="):
@@ -360,11 +349,11 @@ func validateAccountDockerRunArgs(args []string, agent string, passthrough []str
 				return err
 			}
 		case strings.HasPrefix(arg, "-v="):
-			if err := checkMount(strings.TrimPrefix(arg, "-v="), dockerVolumeTarget(strings.TrimPrefix(arg, "-v="))); err != nil {
+			if err := checkMount(strings.TrimPrefix(arg, "-v="), dockerRoutingMountTarget(strings.TrimPrefix(arg, "-v="))); err != nil {
 				return err
 			}
 		case strings.HasPrefix(arg, "-v") && len(arg) > 2:
-			if err := checkMount(strings.TrimPrefix(arg, "-v"), dockerVolumeTarget(strings.TrimPrefix(arg, "-v"))); err != nil {
+			if err := checkMount(strings.TrimPrefix(arg, "-v"), dockerRoutingMountTarget(strings.TrimPrefix(arg, "-v"))); err != nil {
 				return err
 			}
 		// Docker's own resolver and namespace options are the same routing
@@ -443,7 +432,7 @@ func validateAccountDockerRunArgs(args []string, agent string, passthrough []str
 			if err := dockerCheckShorthandCluster(arg, args, index, dockerGuardedShorthands,
 				func(character byte, value string) error {
 					if character == 'v' {
-						return checkMount(value, dockerVolumeTarget(value))
+						return checkMount(value, dockerRoutingMountTarget(value))
 					}
 					return checkEnv(value)
 				},
