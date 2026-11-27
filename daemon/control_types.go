@@ -1,6 +1,8 @@
 package daemon
 
 import (
+	"time"
+
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/session"
 )
@@ -388,6 +390,21 @@ type DeliverPromptResponse struct {
 	// initial prompt is already owned by resume, from an existing limited target
 	// whose watch event still needs queue replay.
 	PromptRetained bool `json:"prompt_retained,omitempty"`
+	// SessionID is the stable identity of the session this call CREATED — empty
+	// when it sent into an existing target. A targeted delivery that auto-creates
+	// its absent target reports the run's identity here so the caller's task-status
+	// write can be keyed to it (#5661): without it the run is an unkeyed event
+	// whose clock advances past the session's creation time, clearing LastRunID
+	// and refusing every later keyed failure verdict for that run as stale.
+	SessionID string `json:"session_id,omitempty"`
+	// SessionCreatedAt is the creation time of the session this call CREATED,
+	// ordering its run. Zero unless SessionID is set.
+	SessionCreatedAt time.Time `json:"session_created_at,omitempty"`
+	// LastPromptDeliveryStatus is the created session's own verdict on its initial
+	// prompt (#5278): PromptNotDelivered means the create started a session whose
+	// prompt provably never landed, which the caller records as a failed run rather
+	// than "started". Empty unless SessionID is set.
+	LastPromptDeliveryStatus session.PromptDeliveryStatus `json:"last_prompt_delivery_status,omitempty"`
 	MutationOutcome
 }
 

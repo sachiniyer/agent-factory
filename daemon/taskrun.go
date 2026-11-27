@@ -239,6 +239,18 @@ func deliverTaskPromptRun(t *task.Task, prompt string, deferWhileAttached bool, 
 		return "", false, wrapped
 	}
 	status := result.status
+	// A targeted delivery that auto-created its absent target reports the
+	// created session's identity through the response (#5661). Key the run's
+	// status write to it — mirroring the create-per-run branch above — so the
+	// write does not land as an unkeyed event that clears LastRunID and advances
+	// the row's clock past the session's creation time, which would refuse
+	// every later keyed failure verdict for that run as stale and leave the row
+	// reading "started" while the auto-created session is dead. A send into an
+	// existing target reports no identity (zero), which is the correct unkeyed
+	// write the contract describes.
+	if result.sessionID != "" {
+		*run = task.RunKey{ID: result.sessionID, StartedAt: result.sessionCreatedAt}
+	}
 	if status == TaskStatusLimitParked {
 		// One line per park episode, not one per re-check (#7843): the watch
 		// drainer retries a parked head every drainBaseBackoff, and the mark
@@ -252,6 +264,15 @@ func deliverTaskPromptRun(t *task.Task, prompt string, deferWhileAttached bool, 
 				t.ID, target, checks)
 		}
 		return status, result.promptRetained, nil
+	}
+	// A create whose initial prompt send PROVED it never landed carries the
+	// verdict home on the created session (#5278): report the failed outcome
+	// here, at the status write's owner, rather than "started" — the same
+	// verdict the create-per-run branch already reports. Without this a
+	// provably-undelivered auto-created run reads as healthy.
+	if result.sessionID != "" && result.lastPromptDeliveryStatus == session.PromptNotDelivered {
+		log.InfoLog.Printf("task %s auto-created target session %q but its prompt provably did not land", t.ID, target)
+		return taskStatusErroredPromptUndelivered, false, nil
 	}
 	if status == "sent" {
 		status = taskSendStatus(result.deliveryStatus)

@@ -1,11 +1,25 @@
 package daemon
 
-import "github.com/sachiniyer/agent-factory/session"
+import (
+	"time"
+
+	"github.com/sachiniyer/agent-factory/session"
+)
 
 type taskPromptDeliveryResult struct {
 	status         string
 	deliveryStatus session.PromptDeliveryStatus
 	promptRetained bool
+	// sessionID/sessionCreatedAt identify the session this delivery CREATED
+	// (empty when it sent into an existing target), so deliverTaskPromptRun can
+	// key its run-status write to the run (#5661). lastPromptDeliveryStatus is
+	// the created session's own verdict on its initial prompt (#5278):
+	// PromptNotDelivered means the create started a session whose prompt
+	// provably never landed, which the caller records as a failed run rather
+	// than "started". Zero unless a session was created.
+	sessionID                string
+	sessionCreatedAt         time.Time
+	lastPromptDeliveryStatus session.PromptDeliveryStatus
 }
 
 // deliverPromptForTaskRPC preserves the daemon's structural distinction between
@@ -29,7 +43,11 @@ func deliverPromptForTaskRPC(req DeliverPromptRequest) (taskPromptDeliveryResult
 		resp.DeliveryStatus = session.PromptCouldNotConfirm
 	}
 	return taskPromptDeliveryResult{
-		status: resp.Status, deliveryStatus: resp.DeliveryStatus,
-		promptRetained: resp.PromptRetained,
+		status:                   resp.Status,
+		deliveryStatus:           resp.DeliveryStatus,
+		promptRetained:           resp.PromptRetained,
+		sessionID:                resp.SessionID,
+		sessionCreatedAt:         resp.SessionCreatedAt,
+		lastPromptDeliveryStatus: resp.LastPromptDeliveryStatus,
 	}, err
 }

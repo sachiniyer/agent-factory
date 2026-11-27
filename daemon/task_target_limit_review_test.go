@@ -348,7 +348,7 @@ func TestTaskDeliveryWaitsForHealthySnapshotToClearLimit(t *testing.T) {
 	}
 	deliveryDone := make(chan result, 1)
 	go func() {
-		status, _, _, err := manager.deliverPromptWithOutcome(DeliverPromptRequest{
+		status, _, _, _, err := manager.deliverPromptWithOutcome(DeliverPromptRequest{
 			Title: "clearing-limit", RepoPath: repoPath, Program: "claude",
 			Prompt: "scheduled", TaskRepoID: repoID, TaskOrigin: true,
 		})

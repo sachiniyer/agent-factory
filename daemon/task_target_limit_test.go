@@ -16,7 +16,7 @@ func routeTaskDeliveryToManager(t *testing.T, manager *Manager) {
 	t.Helper()
 	original := deliverPromptForTask
 	deliverPromptForTask = func(req DeliverPromptRequest) (taskPromptDeliveryResult, error) {
-		status, deliveryStatus, promptRetained, err := manager.deliverPromptWithOutcome(req)
+		status, deliveryStatus, promptRetained, _, err := manager.deliverPromptWithOutcome(req)
 		return taskPromptDeliveryResult{status: status, deliveryStatus: deliveryStatus, promptRetained: promptRetained}, err
 	}
 	t.Cleanup(func() { deliverPromptForTask = original })
