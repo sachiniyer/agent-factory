@@ -161,15 +161,11 @@ var (
 type claudeLaunchDialogOptions struct {
 	labels []string
 	// pair is how many of labels, counted from the end, are the dialog's
-	// single-row inline option rows ("Yes  No" / "Yes  2. No"). Each of those
-	// IS the dialog's whole option block — the cursor's ❯ sits on it and
-	// nothing the dialog paints stacks above or below it — so the reader
-	// accepts one only as the block's lowest label, directly over the footer.
-	// Read as one more label on top of a block that already has its
-	// affirmative, the block grows upward into rows af must keep holding as
-	// the dialog's body — the reading replaced master's, which is the one
-	// thing a re-wrap reading may never do (#7453; #7661 review, R1). For the
-	// same reason the top of a pane never cuts one.
+	// single-row inline option rows ("Yes  No" / "Yes  2. No"). Each IS the
+	// dialog's whole option block, accepted only as the block's lowest label
+	// directly over the footer. Reading one atop a block grows it upward into
+	// the dialog's body — a re-wrap reading may never do that (#7453; #7661
+	// R1); the top-cut clause honors this too (#7618).
 	pair    int
 	footers []string
 	// read names the dialog that the labels read show, given which of them were
@@ -482,6 +478,11 @@ func claudeLaunchDialogTailOver(pane claudeLaunchDialogPane, options claudeLaunc
 	match := claudeLaunchDialogMatch{kind: kind}
 	// A pair label can only be the block's lowest, read first.
 	match.pair = len(read) > 0 && read[0] >= len(options.labels)-options.pair
+	// The top-cut clause offers the pair labels only with no block below (#7618, #7661 R1).
+	tailLabels := options.labels
+	if labels > 0 {
+		tailLabels = options.labels[:len(options.labels)-options.pair]
+	}
 	switch {
 	case at == 0 && labels > 0:
 		if claudeLaunchDialogRuleFrom(pane, pane.index[0]) {
@@ -489,7 +490,7 @@ func claudeLaunchDialogTailOver(pane claudeLaunchDialogPane, options claudeLaunc
 		}
 		match.saw = "only its option rows and " + shown
 		return match, true
-	case at > 0 && claudeLaunchDialogLabelTail(pane.text[:at], options.labels[:len(options.labels)-options.pair]):
+	case at > 0 && claudeLaunchDialogLabelTail(pane.text[:at], tailLabels):
 		if claudeLaunchDialogRuleFrom(pane, pane.index[0]) {
 			return claudeLaunchDialogMatch{}, false
 		}
