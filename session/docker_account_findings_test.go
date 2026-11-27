@@ -350,7 +350,7 @@ func TestDockerAccount_RefusesLoaderFilledRunArgsWhereThePinExists(t *testing.T)
 		{"--env=GIT_CONFIG_PARAMETERS=core.x=y"},
 		{"-e=GIT_CONFIG_KEY_0=safe.directory"},
 	} {
-		err := validateAccountDockerRunArgs(args, "gemini")
+		err := validateAccountDockerRunArgs(args, "gemini", nil)
 		require.Error(t, err, "a repo-chosen value for %v must not reach a gemini account container", args)
 		require.Contains(t, err.Error(), "session_env_passthrough",
 			"the refusal must name the channel a real operator value takes")
@@ -358,18 +358,17 @@ func TestDockerAccount_RefusesLoaderFilledRunArgsWhereThePinExists(t *testing.T)
 	// Agents that pin nothing keep their run_args — the GIT_CONFIG_* family is
 	// how their safe.directory workaround is expressed.
 	for _, agent := range []string{"claude", "codex"} {
-		require.NoError(t, validateAccountDockerRunArgs([]string{"-e", "GIT_CONFIG_COUNT=1"}, agent),
+		require.NoError(t, validateAccountDockerRunArgs([]string{"-e", "GIT_CONFIG_COUNT=1"}, agent, nil),
 			"%s pins no keep-if-set name — the pair workaround must keep working", agent)
-		require.NoError(t, validateAccountDockerRunArgs([]string{"-e", "GIT_CONFIG_KEY_0=safe.directory"}, agent))
-		require.NoError(t, validateAccountDockerRunArgs([]string{"-e", "GIT_CONFIG_VALUE_0=/work"}, agent))
+		require.NoError(t, validateAccountDockerRunArgs([]string{"-e", "GIT_CONFIG_KEY_0=safe.directory"}, agent, nil))
+		require.NoError(t, validateAccountDockerRunArgs([]string{"-e", "GIT_CONFIG_VALUE_0=/work"}, agent, nil))
 	}
 }
 
 func TestDockerAccount_AllowsSimilarlyNamedMountTargets(t *testing.T) {
 	err := validateAccountDockerRunArgs(
 		[]string{"--mount", "type=bind,src=/tmp/cache,dst=/af-account-cache"},
-		"codex",
-	)
+		"codex", nil)
 	require.NoError(t, err)
 }
 
@@ -380,7 +379,7 @@ func TestDockerAccount_RejectsNormalizedProtectedMountTargets(t *testing.T) {
 		{"--volume", "/tmp/other:/af-home/."},
 	}
 	for _, args := range tests {
-		err := validateAccountDockerRunArgs(args, "codex")
+		err := validateAccountDockerRunArgs(args, "codex", nil)
 		require.Error(t, err, "normalized protected target escaped validation: %v", args)
 	}
 }
@@ -784,7 +783,7 @@ func TestDockerAccount_RejectsProtectedMountTargetsInAnyFieldCase(t *testing.T) 
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			err := validateAccountDockerRunArgs(tt.args, "codex")
+			err := validateAccountDockerRunArgs(tt.args, "codex", nil)
 			require.Errorf(t, err, "repo-controlled run_args mounted over the account boundary: %v", tt.args)
 			require.Contains(t, err.Error(), "account mount")
 		})
@@ -812,7 +811,7 @@ func TestDockerAccount_AllowsNonProtectedMountTargetsInAnyFieldCase(t *testing.T
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			require.NoErrorf(t, validateAccountDockerRunArgs(tt.args, "codex"), "harmless mount refused: %v", tt.args)
+			require.NoErrorf(t, validateAccountDockerRunArgs(tt.args, "codex", nil), "harmless mount refused: %v", tt.args)
 		})
 	}
 }
@@ -837,7 +836,7 @@ func TestDockerAccount_RejectsProtectedTargetsInColonMountForms(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			err := validateAccountDockerRunArgs(tt.args, "codex")
+			err := validateAccountDockerRunArgs(tt.args, "codex", nil)
 			require.Errorf(t, err, "a colon-form mount reached the account boundary: %v", tt.args)
 			require.Contains(t, err.Error(), "account mount")
 		})
@@ -885,7 +884,7 @@ func TestDockerAccount_RejectsProtectedTargetsInVolumeEqualsForm(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			err := validateAccountDockerRunArgs(tt.args, "codex")
+			err := validateAccountDockerRunArgs(tt.args, "codex", nil)
 			require.Errorf(t, err, "a -v= form mount reached the account boundary: %v", tt.args)
 			require.Contains(t, err.Error(), "account mount")
 		})
@@ -916,7 +915,7 @@ func TestDockerAccount_AllowsHarmlessTargetsInVolumeEqualsForm(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			require.NoErrorf(t, validateAccountDockerRunArgs(tt.args, "codex"), "a harmless -v= mount was refused: %v", tt.args)
+			require.NoErrorf(t, validateAccountDockerRunArgs(tt.args, "codex", nil), "a harmless -v= mount was refused: %v", tt.args)
 		})
 	}
 }
@@ -941,9 +940,9 @@ func TestDockerAccount_VolumeEqualsFormMatchesOtherForms(t *testing.T) {
 	}
 	for _, tt := range cases {
 		t.Run(tt.name, func(t *testing.T) {
-			equalsErr := validateAccountDockerRunArgs([]string{"-v=" + tt.onePath}, "codex")
-			twoArgErr := validateAccountDockerRunArgs(tt.twoArg, "codex")
-			attachedErr := validateAccountDockerRunArgs([]string{tt.attached}, "codex")
+			equalsErr := validateAccountDockerRunArgs([]string{"-v=" + tt.onePath}, "codex", nil)
+			twoArgErr := validateAccountDockerRunArgs(tt.twoArg, "codex", nil)
+			attachedErr := validateAccountDockerRunArgs([]string{tt.attached}, "codex", nil)
 			require.Equalf(t, twoArgErr == nil, equalsErr == nil,
 				"-v= verdict (err=%v) does not match -v <path> verdict (err=%v) for %q", equalsErr, twoArgErr, tt.onePath)
 			require.Equalf(t, attachedErr == nil, equalsErr == nil,
@@ -1000,7 +999,7 @@ func TestDockerAccount_RejectsProtectedMountsInCombinedShortOptions(t *testing.T
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			err := validateAccountDockerRunArgs(tt.args, "codex")
+			err := validateAccountDockerRunArgs(tt.args, "codex", nil)
 			require.Errorf(t, err, "a combined short option mounted over the account boundary: %v", tt.args)
 			require.Contains(t, err.Error(), "account mount")
 		})
@@ -1025,7 +1024,7 @@ func TestDockerAccount_RejectsIdentityEnvInCombinedShortOptions(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			err := validateAccountDockerRunArgs(tt.args, "codex")
+			err := validateAccountDockerRunArgs(tt.args, "codex", nil)
 			require.Errorf(t, err, "a combined short option set an identity variable: %v", tt.args)
 			require.Contains(t, err.Error(), tt.wantErr)
 		})
@@ -1057,7 +1056,7 @@ func TestDockerAccount_RefusesUnreadableCombinedShortOptions(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			err := validateAccountDockerRunArgs(tt.args, "codex")
+			err := validateAccountDockerRunArgs(tt.args, "codex", nil)
 			require.Errorf(t, err, "an unreadable combined short option was accepted: %v", tt.args)
 			require.Contains(t, err.Error(), "combined short option")
 			require.Contains(t, err.Error(), tt.args[0], "the refusal must name the argument the operator has to fix")
@@ -1092,7 +1091,7 @@ func TestDockerAccount_AllowsCombinedShortOptionsItCanRead(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			require.NoErrorf(t, validateAccountDockerRunArgs(tt.args, "codex"), "a readable combined short option was refused: %v", tt.args)
+			require.NoErrorf(t, validateAccountDockerRunArgs(tt.args, "codex", nil), "a readable combined short option was refused: %v", tt.args)
 		})
 	}
 }
@@ -1123,7 +1122,7 @@ func TestDockerAccount_ClusterScanDoesNotSkipTheNextArgument(t *testing.T) {
 	}
 	for _, args := range refused {
 		t.Run("refused/"+strings.Join(args, " "), func(t *testing.T) {
-			require.Errorf(t, validateAccountDockerRunArgs(args, "codex"),
+			require.Errorf(t, validateAccountDockerRunArgs(args, "codex", nil),
 				"a real guarded flag after a combined short option escaped validation: %v", args)
 		})
 	}
@@ -1140,7 +1139,7 @@ func TestDockerAccount_ClusterScanDoesNotSkipTheNextArgument(t *testing.T) {
 	}
 	for _, args := range allowed {
 		t.Run("allowed/"+strings.Join(args, " "), func(t *testing.T) {
-			require.NoErrorf(t, validateAccountDockerRunArgs(args, "codex"),
+			require.NoErrorf(t, validateAccountDockerRunArgs(args, "codex", nil),
 				"a mount-shaped token that the cluster consumes as its value must not be refused: %v", args)
 		})
 	}
@@ -1175,7 +1174,7 @@ func TestDockerAccount_AllowsExplicitBooleanShortOptions(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			require.NoErrorf(t, validateAccountDockerRunArgs(tt.args, "codex"),
+			require.NoErrorf(t, validateAccountDockerRunArgs(tt.args, "codex", nil),
 				"a valid explicit boolean was refused, which would stop the session from starting: %v", tt.args)
 		})
 	}
@@ -1195,7 +1194,7 @@ func TestDockerAccount_ExplicitBooleanDoesNotHideALaterMount(t *testing.T) {
 	}
 	for _, args := range tests {
 		t.Run(strings.Join(args, " "), func(t *testing.T) {
-			require.Errorf(t, validateAccountDockerRunArgs(args, "codex"),
+			require.Errorf(t, validateAccountDockerRunArgs(args, "codex", nil),
 				"an explicit boolean shadowed a later guarded option: %v", args)
 		})
 	}
@@ -1236,7 +1235,7 @@ func TestDockerAccount_RejectsVolumesFrom(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			err := validateAccountDockerRunArgs(tt.args, "codex")
+			err := validateAccountDockerRunArgs(tt.args, "codex", nil)
 			require.Errorf(t, err, "--volumes-from installed the donor's mounts over the account boundary: %v", tt.args)
 			require.Contains(t, err.Error(), "--volumes-from", "the refusal must name the option the operator has to remove")
 		})
@@ -1254,7 +1253,7 @@ func TestDockerAccount_RejectsVolumesFrom(t *testing.T) {
 // `donor` positional itself is refused like any other (#7733 R1), so the
 // fixture stops at the cluster.
 func TestDockerAccount_AllowsSingleDashVolumesFrom(t *testing.T) {
-	require.NoError(t, validateAccountDockerRunArgs([]string{"-volumes-from"}, "codex"))
+	require.NoError(t, validateAccountDockerRunArgs([]string{"-volumes-from"}, "codex", nil))
 }
 
 // TestDockerAccount_RefusesEveryMountInstallingOption is the anti-recurrence
@@ -1288,7 +1287,7 @@ func TestDockerAccount_RefusesEveryMountInstallingOption(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.option, func(t *testing.T) {
-			require.Errorf(t, validateAccountDockerRunArgs(tt.args, "codex"),
+			require.Errorf(t, validateAccountDockerRunArgs(tt.args, "codex", nil),
 				"%s can install a filesystem at a container path and is not guarded", tt.option)
 		})
 	}
@@ -1319,7 +1318,7 @@ func TestDockerAccount_RejectsProtectedDeviceTargets(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			err := validateAccountDockerRunArgs(tt.args, "codex")
+			err := validateAccountDockerRunArgs(tt.args, "codex", nil)
 			require.Errorf(t, err, "a --device wrote a node into the account boundary: %v", tt.args)
 			require.Contains(t, err.Error(), "--device")
 		})
@@ -1353,7 +1352,7 @@ func TestDockerAccount_AllowsHarmlessDeviceTargets(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			require.NoErrorf(t, validateAccountDockerRunArgs(tt.args, "codex"), "a harmless --device was refused: %v", tt.args)
+			require.NoErrorf(t, validateAccountDockerRunArgs(tt.args, "codex", nil), "a harmless --device was refused: %v", tt.args)
 		})
 	}
 }
@@ -1370,7 +1369,7 @@ func TestDockerAccount_DeviceScanDoesNotSkipALaterMount(t *testing.T) {
 	}
 	for _, args := range tests {
 		t.Run(strings.Join(args, " "), func(t *testing.T) {
-			require.Errorf(t, validateAccountDockerRunArgs(args, "codex"),
+			require.Errorf(t, validateAccountDockerRunArgs(args, "codex", nil),
 				"a guarded option after --device escaped validation: %v", args)
 		})
 	}
@@ -1435,7 +1434,7 @@ func TestDockerAccount_ChecksTheEffectiveDeviceTarget(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			err := validateAccountDockerRunArgs([]string{"--device", tt.value}, "codex")
+			err := validateAccountDockerRunArgs([]string{"--device", tt.value}, "codex", nil)
 			if tt.refused {
 				require.Errorf(t, err, "a device node landed inside the account boundary: --device %s", tt.value)
 				require.Contains(t, err.Error(), "--device")

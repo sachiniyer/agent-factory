@@ -81,7 +81,7 @@ func dockerMountTarget(field string) (string, bool) {
 // roots (the routing/trust class the credential-mount guard refuses from the
 // same repo-controlled channel, ported to the account path so a repository
 // cannot deliver the account's credential to a server it controls).
-func validateAccountDockerRunArgs(args []string, agent string) error {
+func validateAccountDockerRunArgs(args []string, agent string, passthrough []string) error {
 	denied := accountDockerDeniedNames(agent)
 	// The keep-if-set names the account boundary pins at exec are refused to
 	// run_args for the agent that pins them: a repo -e NAME=… appended after a
@@ -94,8 +94,25 @@ func validateAccountDockerRunArgs(args []string, agent string) error {
 	// GIT_CONFIG_COUNT would otherwise animate repository-supplied pairs.
 	loaderDenied := sessionenv.AccountLoaderFilledNames(agent)
 	pairGuard := slices.Contains(loaderDenied, "GIT_CONFIG_COUNT")
+	// Every name the operator claims is checked first: the agent-server's
+	// filter admits every passthrough-listed name into the agent's
+	// environment, so a =-valued repo entry naming one — whatever class the
+	// classified checks below would give it — delivers the repo's value to
+	// the agent, overriding the operator's forwarded value when the host
+	// sets one and substituting for it when it does not (#7867 R2). A bare
+	// -e NAME is not refused — it can only carry the daemon environment's
+	// own value, which is what af's own forwarding delivers. Running this
+	// first keeps the refusal honest: for a name the operator already
+	// forwards, "forward it through session_env_passthrough" would be a
+	// remedy they already took.
+	forwarded := dockerForwardedPassthroughNames(passthrough)
 	checkEnv := func(value string) error {
-		name, _, _ := strings.Cut(value, "=")
+		name, _, hasValue := strings.Cut(value, "=")
+		if _, claimed := forwarded[name]; hasValue && claimed {
+			return fmt.Errorf(
+				"backend=docker: docker.run_args cannot set %s for an account-scoped %s session because the operator claims that name through session_env_passthrough — the agent env filter admits every passthrough-listed name, so the repo's value reaches the agent and overrides the operator's forwarded one; drop the entry",
+				name, agent)
+		}
 		if _, refused := denied[name]; refused {
 			return fmt.Errorf(
 				"backend=docker: docker.run_args cannot set %s for an account-scoped %s session because it can override the selected identity",

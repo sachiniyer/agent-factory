@@ -299,9 +299,26 @@ func resolveAgentCredentialMounts(agent string, relabel bool) []string {
 // Every mountable agent has a non-empty set — the shared credential and
 // routing names alone guarantee it — so this guard is never a no-op on the
 // roster the way #4454's account-only table was for amp and opencode.
-func validateCredentialDockerRunArgs(args []string, agent string) error {
+func validateCredentialDockerRunArgs(args []string, agent string, passthrough []string) error {
+	// Every name the operator claims is checked first: the agent-server's
+	// filter admits every passthrough-listed name into the agent's
+	// environment, so a =-valued repo entry naming one — whatever class
+	// credentialMountDeniedReason would give it — delivers the repo's
+	// value to the agent, overriding the operator's forwarded value when
+	// the host sets one and substituting for it when it does not (#7867
+	// R2). A bare -e NAME is not refused — it can only carry the daemon
+	// environment's own value, which is what af's own forwarding delivers.
+	// Running this first keeps the refusal honest: for a name the operator
+	// already forwards, "have the operator forward it" would be a remedy
+	// they already took.
+	forwarded := dockerForwardedPassthroughNames(passthrough)
 	checkEnv := func(value string) error {
-		name, _, _ := strings.Cut(value, "=")
+		name, _, hasValue := strings.Cut(value, "=")
+		if _, claimed := forwarded[name]; hasValue && claimed {
+			return fmt.Errorf(
+				"backend=docker: docker.run_args cannot set %s for the credential-mount session's %s agent because the operator claims that name through session_env_passthrough — the agent env filter admits every passthrough-listed name, so the repo's value reaches the agent and overrides the operator's forwarded one; drop the entry",
+				name, agent)
+		}
 		if reason, refused := credentialMountDeniedReason(agent, name); refused {
 			return fmt.Errorf(
 				"backend=docker: docker.run_args cannot set %s for the credential-mount session's %s agent because %s — drop the entry, or have the operator forward %s through the global session_env_passthrough",

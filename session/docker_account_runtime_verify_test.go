@@ -159,7 +159,7 @@ func TestAccountRuntimeVerify_RefusesEveryAliasedOption(t *testing.T) {
 			// The premise: this row is invisible to the lexical guard. If a
 			// future change makes it visible there, this row stops testing what
 			// it claims to and must be rewritten rather than quietly passing.
-			require.NoErrorf(t, validateAccountDockerRunArgs(tt.runArgs, "codex"),
+			require.NoErrorf(t, validateAccountDockerRunArgs(tt.runArgs, "codex", nil),
 				"premise: the lexical guard cannot see this alias, so the runtime check is what closes it")
 
 			inspected, err := parseDockerInspectContainer([]byte(tt.inspect))

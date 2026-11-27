@@ -271,10 +271,15 @@ func (dockerRuntime) Provision(spec ProvisionSpec) (ProvisionResult, error) {
 			}
 			return ProvisionResult{}, fmt.Errorf("backend=docker: %w", aerr)
 		}
-		if aerr := validateAccountDockerRunArgs(runArgs, spec.Account.Agent); aerr != nil {
+		// The validator takes the passthrough list AFTER the account filter:
+		// the filtered list is what af forwards into the container as bare
+		// -e NAME entries, so it is the set a repo -e in run_args could
+		// last-wins override.
+		filtered := filterAccountPassthrough(spec.SessionEnvPassthrough, spec.Account.Agent)
+		if aerr := validateAccountDockerRunArgs(runArgs, spec.Account.Agent, filtered); aerr != nil {
 			return ProvisionResult{}, aerr
 		}
-		spec.SessionEnvPassthrough = filterAccountPassthrough(spec.SessionEnvPassthrough, spec.Account.Agent)
+		spec.SessionEnvPassthrough = filtered
 	}
 	// Stamp the AF home onto the container (af.home label) so the orphan sweeper
 	// can scope to this daemon's home. If it can't be resolved, omit the label —
@@ -334,7 +339,11 @@ func (dockerRuntime) Provision(spec ProvisionSpec) (ProvisionResult, error) {
 		// installed. The account path's lexical guard (validateAccountDockerRunArgs)
 		// defends the same redirect on its path; this is the symmetric guard for
 		// the credential-mount path, refused BEFORE docker run rather than after.
-		if err := validateCredentialDockerRunArgs(runArgs, p.agentName()); err != nil {
+		// The credential path does not filter the operator's passthrough the
+		// way the account path does — a pane-boundary entry is refused
+		// outright below rather than dropped — so the raw list is the
+		// session's effective forward claim here.
+		if err := validateCredentialDockerRunArgs(runArgs, p.agentName(), spec.SessionEnvPassthrough); err != nil {
 			return ProvisionResult{}, err
 		}
 		p.credentialMounts = resolveAgentCredentialMounts(p.agentName(), p.bindMountRelabel())

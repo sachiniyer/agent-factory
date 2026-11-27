@@ -156,13 +156,13 @@ func TestDockerRunArgs_RefusesLoaderEnvNames(t *testing.T) {
 		for _, spelling := range loaderEnvSpellings(name, "/workspace/.x/payload") {
 			t.Run(name+"/"+strings.Join(spelling, " "), func(t *testing.T) {
 				for _, agent := range []string{"claude", "codex", "gemini"} {
-					err := validateAccountDockerRunArgs(spelling, agent)
+					err := validateAccountDockerRunArgs(spelling, agent, nil)
 					require.Errorf(t, err, "account %s: run_args %v must be refused", agent, spelling)
 					require.Containsf(t, err.Error(), name,
 						"account %s: the refusal must name %s", agent, name)
 				}
 				for _, agent := range []string{tmux.ProgramClaude, tmux.ProgramCodex, tmux.ProgramGemini} {
-					err := validateCredentialDockerRunArgs(spelling, agent)
+					err := validateCredentialDockerRunArgs(spelling, agent, nil)
 					require.Errorf(t, err, "credential-mount %s: run_args %v must be refused", agent, spelling)
 					require.Containsf(t, err.Error(), name,
 						"credential-mount %s: the refusal must name %s", agent, name)
@@ -185,9 +185,9 @@ func TestDockerRunArgs_AdmitsOrdinaryEnvNames(t *testing.T) {
 		"TMP", "TEMP", "PWD",
 	} {
 		for _, spelling := range loaderEnvSpellings(name, "x") {
-			require.NoErrorf(t, validateAccountDockerRunArgs(spelling, "codex"),
+			require.NoErrorf(t, validateAccountDockerRunArgs(spelling, "codex", nil),
 				"account: ordinary env %s via %v was refused (over-refusal)", name, spelling)
-			require.NoErrorf(t, validateCredentialDockerRunArgs(spelling, tmux.ProgramClaude),
+			require.NoErrorf(t, validateCredentialDockerRunArgs(spelling, tmux.ProgramClaude, nil),
 				"credential-mount: ordinary env %s via %v was refused (over-refusal)", name, spelling)
 		}
 	}
@@ -218,12 +218,12 @@ func TestDockerLoaderReason_NamesTheConsumerAndSource(t *testing.T) {
 
 	// The two guards must carry the same reason through their own wrappers,
 	// and the account refusal must name the operator remedies (#7571 R9).
-	err := validateAccountDockerRunArgs([]string{"-e", "GCONV_PATH=/x"}, "codex")
+	err := validateAccountDockerRunArgs([]string{"-e", "GCONV_PATH=/x"}, "codex", nil)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "GCONV_PATH")
 	require.Contains(t, err.Error(), "image's ENV")
 	require.Contains(t, err.Error(), "session_env_passthrough")
-	err = validateCredentialDockerRunArgs([]string{"-e", "SHELLOPTS=xtrace"}, tmux.ProgramClaude)
+	err = validateCredentialDockerRunArgs([]string{"-e", "SHELLOPTS=xtrace"}, tmux.ProgramClaude, nil)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "SHELLOPTS")
 	require.Contains(t, err.Error(), "session_env_passthrough")

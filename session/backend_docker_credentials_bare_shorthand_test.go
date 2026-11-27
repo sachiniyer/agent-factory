@@ -62,7 +62,7 @@ func TestDockerCredentialRunArgs_RefusesDeniedEnvBehindBareValueShorthand(t *tes
 		{name: "label eats -e then --env=LD_LIBRARY_PATH", args: []string{"-l", "-e", "--env=LD_LIBRARY_PATH=/workspace/.git/evil"}, wantErr: "LD_LIBRARY_PATH"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			err := validateCredentialDockerRunArgs(tt.args, tmux.ProgramGemini)
+			err := validateCredentialDockerRunArgs(tt.args, tmux.ProgramGemini, nil)
 			require.Errorf(t, err, "a denied env name sneaked behind a bare value-taking shorthand must be refused: %v", tt.args)
 			require.Contains(t, err.Error(), "docker.run_args")
 			// The refusal must name the REAL denied variable, not the phantom
@@ -94,7 +94,7 @@ func TestDockerCredentialRunArgs_RefusesDeniedEnvBehindClusterValueShorthand(t *
 		{name: "-tl eats -e then --env=NAME", args: []string{"-tl", "-e", "--env=GH_HOST=attacker.example"}},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			err := validateCredentialDockerRunArgs(tt.args, tmux.ProgramGemini)
+			err := validateCredentialDockerRunArgs(tt.args, tmux.ProgramGemini, nil)
 			require.Errorf(t, err, "a denied env name sneaked behind a cluster's swallowed -e must be refused: %v", tt.args)
 			require.Contains(t, err.Error(), "GH_HOST")
 			require.NotContains(t, err.Error(), "--env",
@@ -113,23 +113,23 @@ func TestDockerCredentialRunArgs_AllowsBareValueShorthandConsumingGuardedToken(t
 	// -l swallows -v as its value: -v is NOT a mount on the credential path.
 	// (The trailing tokens are real options — a bare spec would be a
 	// positional and is refused for its own reason, #7733 R1.)
-	require.NoErrorf(t, validateCredentialDockerRunArgs([]string{"-l", "-v", "-e", "TZ=UTC"}, tmux.ProgramCodex),
+	require.NoErrorf(t, validateCredentialDockerRunArgs([]string{"-l", "-v", "-e", "TZ=UTC"}, tmux.ProgramCodex, nil),
 		"a -v swallowed by a bare -l installs no mount and must not be refused")
 	// -h swallows --mount as its value: --mount is NOT a mount on this path.
-	require.NoErrorf(t, validateCredentialDockerRunArgs([]string{"-h", "--mount", "-e", "TZ=UTC"}, tmux.ProgramCodex),
+	require.NoErrorf(t, validateCredentialDockerRunArgs([]string{"-h", "--mount", "-e", "TZ=UTC"}, tmux.ProgramCodex, nil),
 		"a --mount swallowed by a bare -h installs no mount and must not be refused")
 
 	// A -v consumes the next arg as its value too: a following -e is the value
 	// of -v, not a fresh env flag. The walk must NOT mis-read that -e as an env
 	// and refuse it (the over-refusal mirror). -v itself installs a mount af
 	// does not guard on this path.
-	require.NoErrorf(t, validateCredentialDockerRunArgs([]string{"-v", "-e", "-e", "TZ=UTC"}, tmux.ProgramCodex),
+	require.NoErrorf(t, validateCredentialDockerRunArgs([]string{"-v", "-e", "-e", "TZ=UTC"}, tmux.ProgramCodex, nil),
 		"a -e swallowed by a bare -v is -v's value, not a fresh env flag")
 
 	// A bare boolean (-i) consumes nothing, so the following -e is a real env
 	// flag setting a harmless name and must still be allowed (fail-closed
 	// side, not over-refused).
-	require.NoErrorf(t, validateCredentialDockerRunArgs([]string{"-i", "-e", "TZ=UTC"}, tmux.ProgramCodex),
+	require.NoErrorf(t, validateCredentialDockerRunArgs([]string{"-i", "-e", "TZ=UTC"}, tmux.ProgramCodex, nil),
 		"a -e after a bare boolean must still be examined as a real env flag")
 }
 

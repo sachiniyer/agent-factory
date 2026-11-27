@@ -47,12 +47,12 @@ func TestDockerCredentialRunArgs_RefusesProgramChoiceNames(t *testing.T) {
 // the re-assertion remedy), the loader names' names library injection — the
 // operator reading the refusal must be told why, not just what.
 func TestDockerCredentialRunArgs_ProgramChoiceReasonNamesTheMechanism(t *testing.T) {
-	err := validateCredentialDockerRunArgs([]string{"-e", "PATH=/workspace/.x"}, tmux.ProgramClaude)
+	err := validateCredentialDockerRunArgs([]string{"-e", "PATH=/workspace/.x"}, tmux.ProgramClaude, nil)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "which program", "PATH's refusal must name the program-choosing mechanism")
 
 	for _, name := range []string{"LD_PRELOAD", "LD_LIBRARY_PATH", "LD_AUDIT"} {
-		err := validateCredentialDockerRunArgs([]string{"-e", name + "=/workspace/.x/x.so"}, tmux.ProgramClaude)
+		err := validateCredentialDockerRunArgs([]string{"-e", name + "=/workspace/.x/x.so"}, tmux.ProgramClaude, nil)
 		require.Error(t, err)
 		require.Contains(t, err.Error(), "library", "%s's refusal must name the library-injection mechanism", name)
 	}
@@ -333,7 +333,7 @@ func TestCredentialMountProgramLoaderNames_RefusesTheDerivedSet(t *testing.T) {
 			require.Truef(t, ok, "accountDockerProgramChoiceReason(%q) must refuse for %s", name, agent)
 			require.NotEmptyf(t, reason,
 				"%s's account refusal must name the mechanism", name)
-			err := validateAccountDockerRunArgs([]string{"-e", name + "=/workspace/.x/x.so"}, agent)
+			err := validateAccountDockerRunArgs([]string{"-e", name + "=/workspace/.x/x.so"}, agent, nil)
 			require.Errorf(t, err, "account %s: -e %s=… must be refused", agent, name)
 			require.Containsf(t, err.Error(), name, "account %s: the refusal must name %s", agent, name)
 			require.Containsf(t, err.Error(), "session_env_passthrough",
@@ -341,7 +341,7 @@ func TestCredentialMountProgramLoaderNames_RefusesTheDerivedSet(t *testing.T) {
 		}
 		// The credential-mount path must refuse too, with its own wording.
 		for _, name := range wantLoaderEnvNames() {
-			err := validateCredentialDockerRunArgs([]string{"-e", name + "=/workspace/.x/x.so"}, agent)
+			err := validateCredentialDockerRunArgs([]string{"-e", name + "=/workspace/.x/x.so"}, agent, nil)
 			require.Errorf(t, err, "credential-mount %s: -e %s=… must be refused", agent, name)
 			require.Containsf(t, err.Error(), name, "credential-mount %s: the refusal must name %s", agent, name)
 		}
@@ -351,10 +351,10 @@ func TestCredentialMountProgramLoaderNames_RefusesTheDerivedSet(t *testing.T) {
 	// behind a -t must be refused the same way on both paths, so the
 	// cluster-walk the shared map feeds cannot miss the derived names
 	// either.
-	err := validateAccountDockerRunArgs([]string{"-te", "GCONV_PATH=/workspace/.x"}, "codex")
+	err := validateAccountDockerRunArgs([]string{"-te", "GCONV_PATH=/workspace/.x"}, "codex", nil)
 	require.Error(t, err, "an -e GCONV_PATH inside a combined short option must be refused on the account path")
 	require.Contains(t, err.Error(), "GCONV_PATH")
-	err = validateCredentialDockerRunArgs([]string{"-te", "BASH_FUNC_cat%%=/workspace/.x/fn"}, tmux.ProgramClaude)
+	err = validateCredentialDockerRunArgs([]string{"-te", "BASH_FUNC_cat%%=/workspace/.x/fn"}, tmux.ProgramClaude, nil)
 	require.Error(t, err, "an -e BASH_FUNC_* inside a combined short option must be refused on the credential-mount path")
 	require.Contains(t, err.Error(), "BASH_FUNC_cat%%")
 }
@@ -415,7 +415,7 @@ func TestDockerAccountRunArgs_RefusesProgramChoiceNames(t *testing.T) {
 // name library injection — the operator reading the refusal must be told
 // why, not just what.
 func TestDockerAccountRunArgs_ProgramChoiceReasonNamesTheMechanism(t *testing.T) {
-	err := validateAccountDockerRunArgs([]string{"-e", "PATH=/workspace/.x"}, "codex")
+	err := validateAccountDockerRunArgs([]string{"-e", "PATH=/workspace/.x"}, "codex", nil)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "which program", "PATH's refusal must name the program-choosing mechanism")
 	// #7571 review R9: the refusal must name the remedy too — the image's
@@ -429,7 +429,7 @@ func TestDockerAccountRunArgs_ProgramChoiceReasonNamesTheMechanism(t *testing.T)
 	// /bin/sh after run_args, so the image's ENV cannot supply it — the
 	// refusal must steer the operator to session_env_passthrough alone and
 	// must NOT offer the image-ENV remedy that PATH's refusal names.
-	err = validateAccountDockerRunArgs([]string{"-e", "SHELL=/workspace/.pane-runner"}, "codex")
+	err = validateAccountDockerRunArgs([]string{"-e", "SHELL=/workspace/.pane-runner"}, "codex", nil)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "SHELL", "SHELL's refusal must name the variable")
 	require.Contains(t, err.Error(), "default-shell", "SHELL's refusal must name the tmux default-shell -c mechanism")
@@ -440,7 +440,7 @@ func TestDockerAccountRunArgs_ProgramChoiceReasonNamesTheMechanism(t *testing.T)
 	require.NotContains(t, err.Error(), "defined-empty", "SHELL takes the re-asserted value, never a defined-empty pin")
 
 	for _, name := range []string{"LD_PRELOAD", "LD_LIBRARY_PATH", "LD_AUDIT"} {
-		err := validateAccountDockerRunArgs([]string{"-e", name + "=/workspace/.x/x.so"}, "codex")
+		err := validateAccountDockerRunArgs([]string{"-e", name + "=/workspace/.x/x.so"}, "codex", nil)
 		require.Error(t, err)
 		require.Contains(t, err.Error(), "library", "%s's refusal must name the library-injection mechanism", name)
 		require.Contains(t, err.Error(), "session_env_passthrough", "%s's refusal must name the remedy too", name)
