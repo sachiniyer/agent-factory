@@ -5,6 +5,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -69,6 +70,10 @@ func TestArchiveSession_DestPresentRefusesSurvivingSourceQuarantine(t *testing.T
 		"the refusal must name the surviving quarantine")
 	assert.Contains(t, err.Error(), "complete original",
 		"the refusal must name the .af-source-* tree as the complete original, not an anonymous residue")
+	assert.Contains(t, err.Error(), "bound to this session's git registration",
+		"the refusal must say what af proves — the registration binding — not which attempt left the tree (#7816 R4)")
+	assert.Contains(t, err.Error(), "compare",
+		"the refusal must tell the operator to compare the bound tree with dest before restoring anything from it (#7816 R4)")
 
 	// The session was NOT archived: the fence is down and the durable row was
 	// not committed over the retained tree.
@@ -202,4 +207,118 @@ func TestArchiveSession_DestPresentAdoptsWithStagingCopyResidue(t *testing.T) {
 	require.NoError(t, rerr, "the landed bytes must be kept where they are")
 	assert.Equal(t, "uncommitted", string(dirty))
 	assert.DirExists(t, staging, "the stray staging copy must be left untouched")
+}
+
+// TestArchiveSession_DestPresentRefusesQuarantineBoundToUnrepairedSource is the
+// earlier of the two crash windows on this branch (#7816 R2, crash point A):
+// the cross-device move published the staged copy at dest but the daemon died
+// BEFORE `git worktree repair`, so git still registers the vacated source
+// (prunable) and nothing registers dest. The retained quarantine's
+// registration leaf backpoints at <source>/.git — it binds Foreign against
+// dest but Ours against the recorded source, so anchoring only at dest misses
+// it. Adoption cannot succeed here either (VerifyLandedMove refuses an
+// unregistered dest), but the refusal must come from the quarantine
+// arbitration and name the complete original: the bare adopt-refusal's
+// "inspect dest and remove or restore it" remedy is exactly how the retained
+// tree gets orphaned — `mv dest source` puts the incomplete copy back at the
+// recorded path and archives it with an empty report while the only complete
+// tree stays untracked beside it.
+func TestArchiveSession_DestPresentRefusesQuarantineBoundToUnrepairedSource(t *testing.T) {
+	manager, logs, repoID, repoPath := newStatusTestManagerCapturingLogs(t)
+	inst, wtPath := registerArchivable(t, manager, repoID, repoPath, "dest-unrepaired")
+	dest, err := archivedWorktreePath(repoID, "dest-unrepaired")
+	require.NoError(t, err)
+	require.NoError(t, os.MkdirAll(filepath.Dir(dest), 0o755))
+
+	// The crash footprint: the source worktree was renamed to its
+	// `.af-source-<32hex>` quarantine (git still registers the vacated source
+	// path, shown prunable), and the staged copy was published at dest — a
+	// verbatim copy whose `.git` names the same registration leaf, which
+	// still backpoints at <source>/.git because repair never ran.
+	quarantine := filepath.Join(filepath.Dir(wtPath), ".af-source-"+strings.Repeat("a", 32))
+	require.NoError(t, os.Rename(wtPath, quarantine))
+	out, err := exec.Command("cp", "-a", quarantine, dest).CombinedOutput()
+	require.NoError(t, err, string(out))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(quarantine, "skipped-unreadable.txt"), []byte("only in the complete original"), 0o644))
+
+	_, _, err = manager.ArchiveSession(ArchiveSessionRequest{Title: "dest-unrepaired", RepoID: repoID})
+	require.Error(t, err,
+		"a published-but-unrepaired destination must refuse while this session's source quarantine survives")
+	assert.ErrorIs(t, err, sessiongit.ErrRelocateStateUnknown,
+		"the refusal must be the unresolved-relocation refusal, not the landed-move adoption failure")
+	assert.Contains(t, err.Error(), quarantine,
+		"the refusal must name the surviving quarantine — the bare adopt-refusal names only dest and advises a remedy that orphans it")
+	assert.Contains(t, err.Error(), "complete original",
+		"the refusal must name the .af-source-* tree as the complete original")
+	assert.NotContains(t, err.Error(), "remove or restore it",
+		"the landed-move refusal whose remedy would orphan the quarantine must not be what the operator sees")
+
+	// Nothing was adopted, archived, or dropped.
+	assert.NotEqual(t, session.LiveArchived, inst.GetLiveness())
+	assert.Equal(t, session.OpNone, inst.GetInFlightOp())
+	rec := recordFor(t, repoID, "dest-unrepaired")
+	require.NotNil(t, rec)
+	assert.NotEqual(t, session.Archived, rec.Status)
+	skipped, rerr := os.ReadFile(filepath.Join(quarantine, "skipped-unreadable.txt"))
+	require.NoError(t, rerr, "the only complete tree must survive the refused archive")
+	assert.Equal(t, "only in the complete original", string(skipped))
+	assert.DirExists(t, dest, "the published destination stays put for the operator")
+	assert.Contains(t, logs.warnings.String(), ".af-source-",
+		"the daemon warning must name the stranded quarantine")
+}
+
+// TestArchiveSession_DestPresentAdoptsQuarantineTheReportAlreadyTracks pins
+// #7816 R1: an `.af-source-*` tree the session's LOADED ArchiveReport already
+// retains — the same recorded path and the same on-disk identity its durable
+// entry pinned — must neither block adopting the landed destination nor drop
+// out of the committed report. This is the re-archive-after-restore shape: a
+// skip archive retained the quarantine, the restore kept the report, and this
+// archive's crash left dest landed with the quarantine still tracked. An
+// uninterrupted archive would commit that same report — and so does the
+// adoption.
+func TestArchiveSession_DestPresentAdoptsQuarantineTheReportAlreadyTracks(t *testing.T) {
+	manager, _, repoID, repoPath := newStatusTestManagerCapturingLogs(t)
+	inst, wtPath := registerArchivable(t, manager, repoID, repoPath, "dest-tracked")
+	dest, err := archivedWorktreePath(repoID, "dest-tracked")
+	require.NoError(t, err)
+	quarantine := landDestWithRetainedQuarantine(t, repoPath, wtPath, dest)
+
+	// Install the loaded report a restore kept: the quarantine is already
+	// durably retained by THIS session — same recorded path, same on-disk
+	// device/inode identity.
+	info, err := os.Lstat(quarantine)
+	require.NoError(t, err)
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	require.True(t, ok)
+	gw, err := inst.GetGitWorktree()
+	require.NoError(t, err)
+	gw.RestoreArchiveReport(sessiongit.ArchiveReport{RetainedTrees: []sessiongit.ArchiveRetainedTree{{
+		Path: quarantine, IdentityKnown: true,
+		Device:   uint64(stat.Dev),
+		Inode:    uint64(stat.Ino),
+		FileType: uint32(stat.Mode & syscall.S_IFMT),
+		Skipped: []sessiongit.ArchiveSkippedEntry{{
+			Path: "skipped-unreadable.txt", Reason: sessiongit.ArchiveSkipPermissionDenied,
+		}},
+	}}})
+
+	archivedPath, data, err := manager.ArchiveSession(ArchiveSessionRequest{Title: "dest-tracked", RepoID: repoID})
+	require.NoError(t, err,
+		"a quarantine the loaded report already retains must not block adopting the landed destination")
+	assert.Equal(t, dest, archivedPath)
+	assert.Equal(t, dest, data.Worktree.WorktreePath)
+	assert.Equal(t, session.LiveArchived, data.Liveness)
+	assert.False(t, inst.Started())
+
+	// The committed report still retains the tracked tree — adoption carries
+	// the loaded report forward untouched, exactly as an uninterrupted
+	// archive would commit it.
+	rec := recordFor(t, repoID, "dest-tracked")
+	require.NotNil(t, rec)
+	require.NotNil(t, rec.ArchiveReport,
+		"the tracked quarantine must not drop out of the committed report")
+	require.Len(t, rec.ArchiveReport.RetainedTrees, 1)
+	assert.Equal(t, quarantine, rec.ArchiveReport.RetainedTrees[0].Path)
+	assert.DirExists(t, quarantine, "the tracked quarantine stays where the report names it")
 }

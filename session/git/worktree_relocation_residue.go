@@ -206,15 +206,21 @@ const (
 // move is a raw rename, not `git worktree move`, so git's registration keeps
 // pointing at the recorded (now-absent) source; the candidate's .git pointer
 // resolves into the repo's `.git/worktrees/<name>/` leaf whose `gitdir`
-// backpointer names `<source>/.git` exactly when the candidate is this
-// session's stranded tree. A candidate belonging to another session (another
-// session's interrupted move, or a tree another session's archive retained on
-// purpose) backpoints at that other session's path and reads as foreign, so it
-// does not block this archive. A candidate whose binding cannot be read is
-// unknown: the caller refuses fail-closed but must not claim it is this
-// session's work.
-func BindAFRelocationResidue(candidate, source, repoPath string) (ResidueBinding, error) {
-	encoded, err := boundedPointerCheckValue("residue-bind\x00"+source, candidate, func(path string) (string, error) {
+// backpointer names `<anchor>/.git` exactly when the candidate is this
+// session's stranded tree. anchor is the path the caller expects that
+// backpointer to name: the recorded source where a quarantine of it is
+// checked, or the published destination where a crash after `git worktree
+// repair` would leave it pointing (#7816 R2). A candidate belonging to another
+// session (another session's interrupted move, or a tree another session's
+// archive retained on purpose) backpoints at that other session's path and
+// reads as foreign, so it does not block this archive. A candidate whose
+// binding cannot be read is unknown: the caller refuses fail-closed but must
+// not claim it is this session's work. A path comparison that rests on a
+// lookup which did not complete is unknown for the same reason, never foreign:
+// the kernel may spell both sides alike under a resolution the walk could not
+// prove.
+func BindAFRelocationResidue(candidate, anchor, repoPath string) (ResidueBinding, error) {
+	encoded, err := boundedPointerCheckValue("residue-bind\x00"+anchor, candidate, func(path string) (string, error) {
 		target, pErr := verifyResidueCandidatePointerShape(path)
 		if pErr != nil {
 			return "unknown", pErr
@@ -224,15 +230,23 @@ func BindAFRelocationResidue(candidate, source, repoPath string) (ResidueBinding
 			return "unknown", rErr
 		}
 		targetRoot := filepath.Dir(filepath.Dir(target))
-		if pathutil.ResolveForCompare(targetRoot) != pathutil.ResolveForCompare(expectedRoot) {
+		sameRepo, err := residuePathsEqual(targetRoot, expectedRoot)
+		if err != nil {
+			return "unknown", err
+		}
+		if !sameRepo {
 			return "foreign", nil
 		}
 		backpointer, bErr := readWorktreeBackpointer(target)
 		if bErr != nil {
 			return "unknown", bErr
 		}
-		wantPointer := filepath.Join(source, ".git")
-		if pathutil.ResolveForCompare(backpointer) != pathutil.ResolveForCompare(wantPointer) {
+		wantPointer := filepath.Join(anchor, ".git")
+		sameAnchor, err := residuePathsEqual(backpointer, wantPointer)
+		if err != nil {
+			return "unknown", err
+		}
+		if !sameAnchor {
 			return "foreign", nil
 		}
 		return "ours", nil
@@ -248,6 +262,28 @@ func BindAFRelocationResidue(candidate, source, repoPath string) (ResidueBinding
 	default:
 		return ResidueUnknown, nil
 	}
+}
+
+// residuePathsEqual is the path-identity comparison behind the foreign/ours
+// verdict, kept honest about lookups that did not happen. ResolveForCompare
+// resolves the deepest existing ancestor and re-joins the missing remainder;
+// the With variant additionally reports every component it could only fall
+// back past — an EIO, ESTALE or EACCES on a mount component, or a dangling
+// symlink lstat still sees (#7286/#7295) — where the plain helper drops that
+// report and returns a lexical spelling. A comparison built on a dropped
+// error would read a lexical mismatch as PROVEN foreign while the kernel may
+// spell both sides alike, and this arbitration must treat that case as
+// unknown, never foreign (#7816 R3).
+func residuePathsEqual(a, b string) (bool, error) {
+	resolvedA, err := pathutil.ResolveForCompareWith(a, filepath.EvalSymlinks, os.Lstat)
+	if err != nil {
+		return false, err
+	}
+	resolvedB, err := pathutil.ResolveForCompareWith(b, filepath.EvalSymlinks, os.Lstat)
+	if err != nil {
+		return false, err
+	}
+	return resolvedA == resolvedB, nil
 }
 
 // verifyResidueCandidatePointerShape verifies a residue candidate's

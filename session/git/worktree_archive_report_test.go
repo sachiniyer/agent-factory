@@ -151,3 +151,36 @@ func TestCleanupRetainedArchiveTreesRefusesReplacement(t *testing.T) {
 	assert.DirExists(t, path+"-original", "the original retained tree remains recoverable under its raced name")
 	assert.False(t, gw.GetArchiveReport().Empty(), "cleanup refusal must keep the only durable ownership handle")
 }
+
+// TestArchiveReport_RetainedTreeAtPath pins #7816 R1's durable-ownership
+// question: a `.af-source-*` tree the loaded report already retains — the same
+// recorded path AND the same on-disk identity the durable entry pinned — is
+// durably owned, so the dest-present arbitration neither blocks on it nor
+// drops it. A matching pathname carrying different data, or an entry whose
+// identity was never recorded, is NOT the report's tree.
+func TestArchiveReport_RetainedTreeAtPath(t *testing.T) {
+	parent := t.TempDir()
+	path := filepath.Join(parent, ".af-source-0123456789abcdef0123456789abcdef")
+	require.NoError(t, os.Mkdir(path, 0o700))
+	identity, err := inspectRelocationPathIdentity(path)
+	require.NoError(t, err)
+	report := ArchiveReport{RetainedTrees: []ArchiveRetainedTree{
+		newArchiveRetainedTree(path, identity, nil),
+	}}
+
+	tracked, err := report.RetainedTreeAtPath(path)
+	require.NoError(t, err)
+	assert.True(t, tracked, "the entry names the same path and the identity still matches the tree on disk")
+
+	tracked, err = report.RetainedTreeAtPath(filepath.Join(parent, ".af-source-fedcba9876543210fedcba9876543210"))
+	require.NoError(t, err)
+	assert.False(t, tracked, "a residue at a path the report does not name is not the report's tree")
+
+	// A different tree raced in under the tracked pathname is not owned: the
+	// durable identity names different data than what sits there now.
+	require.NoError(t, os.Rename(path, path+"-original"))
+	require.NoError(t, os.Mkdir(path, 0o700))
+	tracked, err = report.RetainedTreeAtPath(path)
+	require.NoError(t, err)
+	assert.False(t, tracked, "a replacement at the tracked pathname is different data, not the report's tree")
+}
