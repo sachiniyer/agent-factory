@@ -929,6 +929,20 @@ func TestOffBoxAccountSwapRefusalRemediesFollowRoutingPredicates(t *testing.T) {
 			wantNotContains: []string{"resends it", "retires it", "--delivered"},
 		},
 		{
+			name: "not-delivered on a running row names automatic resubmit, no operator verb",
+			// ResumePendingHandoffs resubmits a not-delivered mission on a
+			// running/ready row directly (it transfers only at the limit wall),
+			// so the remedy names no operator verb and must not promise the
+			// limit-wall transfer or a resend.
+			verdict:         PromptNotDelivered,
+			liveness:        LiveRunning,
+			autoRetryable:   true,
+			canRetry:        false,
+			canConfirm:      false,
+			wantContains:    []string{"resubmits the mission automatically", "no operator action is needed"},
+			wantNotContains: []string{"transfers the mission", "send it with", "retry-limit", "--delivered", "resends it", "retires it"},
+		},
+		{
 			name:            "ambiguous at the limit wall names --delivered and un-stall, not resend",
 			verdict:         PromptCouldNotConfirm,
 			liveness:        LiveLimitReached,
@@ -984,6 +998,104 @@ func TestOffBoxAccountSwapRefusalRemediesFollowRoutingPredicates(t *testing.T) {
 			require.Error(t, runtimeActionErr)
 			require.Contains(t, runtimeActionErr.Error(), pendingHandoffMissionRemedy(f.inst.LifecycleView()),
 				"the runtime-action refusal uses the same shared remedy as the off-box swap refusal")
+		})
+	}
+}
+
+// TestPendingHandoffMissionRemedyDescribesEveryReachableState pins that
+// pendingHandoffMissionRemedy describes what actually happens to THIS row for
+// every state the owed-mission refusal can fire on, naming only the verbs the
+// daemon would admit there. The states are the property from the independent
+// review (PR #7864): not-delivered at the limit wall transfers; not-delivered on
+// a running/ready row resubmits automatically; ambiguous on a running row
+// resends and retires; ambiguous at the limit wall retires or only un-stalls;
+// a live row whose delivery is still being verified (no verdict, or an op in
+// flight) names no verb; a dead row names restore/kill. Rows 2 and 5 fail on
+// 9e295c227: state 2 printed the limit-wall transfer text on a running row, and
+// state 5 printed the dead-row "restore" text on a live row.
+func TestPendingHandoffMissionRemedyDescribesEveryReachableState(t *testing.T) {
+	for _, tc := range []struct {
+		name            string
+		view            LifecycleView
+		autoRetryable   bool
+		canRetry        bool
+		canConfirm      bool
+		wantContains    []string
+		wantNotContains []string
+	}{
+		{
+			name: "not-delivered at the limit wall names the transfer and the manual resume",
+			view: LifecycleView{Title: "s", Liveness: LiveLimitReached, Started: true,
+				PendingHandoffMission: true, HandoffDeliveryStatus: PromptNotDelivered},
+			autoRetryable: true, canRetry: false, canConfirm: false,
+			wantContains:    []string{"handoff recovery transfers the mission", "send it with", "retry-limit", "automatic retry is off by default"},
+			wantNotContains: []string{"resends it", "retires it", "--delivered"},
+		},
+		{
+			name: "not-delivered on a running row names automatic resubmit, no operator verb",
+			view: LifecycleView{Title: "s", Liveness: LiveRunning, Started: true,
+				PendingHandoffMission: true, HandoffDeliveryStatus: PromptNotDelivered},
+			autoRetryable: true, canRetry: false, canConfirm: false,
+			wantContains:    []string{"resubmits the mission automatically", "no operator action is needed"},
+			wantNotContains: []string{"transfers the mission", "send it with", "retry-limit", "--delivered", "resends it", "retires it"},
+		},
+		{
+			name: "ambiguous on a running row names resend and retire",
+			view: LifecycleView{Title: "s", Liveness: LiveRunning, Started: true,
+				PendingHandoffMission: true, HandoffDeliveryStatus: PromptCouldNotConfirm},
+			autoRetryable: false, canRetry: true, canConfirm: true,
+			wantContains:    []string{"resends it", "retires it"},
+			wantNotContains: []string{"only un-stalls the agent"},
+		},
+		{
+			name: "ambiguous at the limit wall names retire and un-stall, not resend",
+			view: LifecycleView{Title: "s", Liveness: LiveLimitReached, Started: true,
+				PendingHandoffMission: true, HandoffDeliveryStatus: PromptCouldNotConfirm},
+			autoRetryable: false, canRetry: false, canConfirm: true,
+			wantContains:    []string{"retires it if it already landed", "only un-stalls the agent", "leaves the mission owed"},
+			wantNotContains: []string{"resends it"},
+		},
+		{
+			name: "live row with no recorded verdict names no verb, not restore",
+			view: LifecycleView{Title: "s", Liveness: LiveRunning, Started: true,
+				PendingHandoffMission: true, HandoffDeliveryStatus: ""},
+			autoRetryable: false, canRetry: false, canConfirm: false,
+			wantContains:    []string{"still being verified", "clears once it settles"},
+			wantNotContains: []string{"retry-limit", "--delivered", "restore", "resends it", "retires it", "transfers the mission"},
+		},
+		{
+			name: "live row with an op in flight names no verb, not restore",
+			view: LifecycleView{Title: "s", Liveness: LiveRunning, Started: true,
+				PendingHandoffMission: true, HandoffDeliveryStatus: PromptCouldNotConfirm,
+				InFlightOp: OpKilling},
+			autoRetryable: false, canRetry: false, canConfirm: false,
+			wantContains:    []string{"still being verified", "clears once it settles"},
+			wantNotContains: []string{"retry-limit", "--delivered", "restore", "resends it", "retires it", "transfers the mission"},
+		},
+		{
+			name: "dead row names restore, no resend",
+			view: LifecycleView{Title: "s", Liveness: LiveLost, Started: true,
+				PendingHandoffMission: true, HandoffDeliveryStatus: PromptCouldNotConfirm},
+			autoRetryable: false, canRetry: false, canConfirm: false,
+			wantContains:    []string{"restore"},
+			wantNotContains: []string{"retry-limit", "--delivered", "resends it", "still being verified"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			require.Equal(t, tc.autoRetryable, tc.view.pendingHandoffMissionAutoRetryableView(),
+				"PendingHandoffMissionAutoRetryable")
+			require.Equal(t, tc.canRetry, tc.view.canRetryPendingHandoffMissionDeliveryView(),
+				"CanRetryPendingHandoffMissionDelivery")
+			require.Equal(t, tc.canConfirm, tc.view.canConfirmPendingHandoffDeliveryView(),
+				"CanConfirmPendingHandoffDelivery")
+
+			got := pendingHandoffMissionRemedy(tc.view)
+			for _, want := range tc.wantContains {
+				require.Contains(t, got, want)
+			}
+			for _, notWant := range tc.wantNotContains {
+				require.NotContains(t, got, notWant)
+			}
 		})
 	}
 }
