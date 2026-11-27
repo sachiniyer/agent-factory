@@ -2,6 +2,7 @@ package session
 
 import (
 	"encoding/json"
+	"errors"
 	"path/filepath"
 	"strings"
 	"syscall"
@@ -279,4 +280,51 @@ func TestMoveUnknownRecord_RoundTripsWithResidueNames(t *testing.T) {
 	assert.Equal(t, quarantine, rec.QuarantinePath,
 		"move_unknown's residue names must round-trip too")
 	assert.Equal(t, staging, rec.StagingPath)
+}
+
+// TestRenameArchived_RecordCheckpointSnapshotsUnderHeldMu is the R4 property:
+// RenameArchived is the one relocate route that runs the cross-device move
+// while holding i.mu, so its durable checkpoint must be handed the row
+// snapshot rather than take i.mu itself. On this head an ordinary checkpoint
+// callback that called ToInstanceData would self-deadlock the daemon under
+// reserveCreate's m.mu; the Locked variant proves the snapshot is produced
+// under the already-held lock — a revert wedges this test outright (it hangs
+// inside RenameArchived) rather than merely failing an assertion.
+func TestRenameArchived_RecordCheckpointSnapshotsUnderHeldMu(t *testing.T) {
+	repoRoot := residueTestRepo(t)
+	wtParent := t.TempDir()
+	src := filepath.Join(wtParent, "wt-rename")
+	gitOut(t, repoRoot, "worktree", "add", "-b", "af/rename-mu", src)
+	dest := filepath.Join(t.TempDir(), "renamed-archive")
+
+	inst, _ := arbitrationInstance(t, repoRoot, src, "old-title", "af/rename-mu", "id-rename")
+	inst.liveness = LiveArchived
+
+	// Force the cross-device path inside the locked relocate, same as the
+	// crash matrix — every write stays inside this test's temp dirs.
+	restoreSeams := git.SetMoveDirCrashSeamsForTest(git.MoveDirCrashSeams{
+		FastMove: func(*git.GitWorktree, string, string) error {
+			return errors.New("invalid cross-device link")
+		},
+		FirstRename: func(string, string) error { return syscall.EXDEV },
+	})
+	defer restoreSeams()
+
+	var snapshots []InstanceData
+	restoreCheckpoint := inst.SetRelocationRecordCheckpointLocked(func(data InstanceData) error {
+		snapshots = append(snapshots, data)
+		return nil
+	})
+	defer restoreCheckpoint()
+
+	require.NoError(t, inst.RenameArchived("new-title", dest, ""))
+	require.NotEmpty(t, snapshots,
+		"the locked checkpoint must have produced a row snapshot mid-move")
+	first := snapshots[0].Worktree.RelocationRecovery
+	require.NotNil(t, first, "the V1 snapshot carries the in-flight record")
+	assert.Equal(t, git.RelocationRecoveryMoveInFlight, first.State)
+	assert.NotEmpty(t, first.QuarantinePath)
+	assert.NotEmpty(t, first.StagingPath)
+	assert.Equal(t, "new-title", inst.Title)
+	assert.DirExists(t, dest)
 }

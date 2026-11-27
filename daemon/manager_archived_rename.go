@@ -136,11 +136,15 @@ func (m *Manager) renameArchivedForReuseLocked(repoID, repoPath, title, program 
 	// prefix would mislabel a branch-rename failure as a worktree one (the P3 on
 	// #2465).
 	// Arm the move_in_flight durable record before the relocate (#7819): a
-	// cross-device rename names its residue before any exists. The row write
-	// goes through persistInstanceData directly, never m.persistInstance —
-	// reserveCreate's stack holds m.mu across this call (see below).
-	restoreRelocationRecordCheckpoint := archived.SetRelocationRecordCheckpoint(func() error {
-		return persistInstanceData(repoID, archived.ToInstanceData())
+	// cross-device rename names its residue before any exists. The Locked
+	// checkpoint variant hands the writer a ready InstanceData snapshot —
+	// RenameArchived is the one relocate that runs under i.mu, so an ordinary
+	// checkpoint's ToInstanceData would re-enter i.mu.RLock and self-deadlock
+	// the holder (R4); and the row write is persistInstanceData directly,
+	// never m.persistInstance — reserveCreate's stack holds m.mu across this
+	// call (see below).
+	restoreRelocationRecordCheckpoint := archived.SetRelocationRecordCheckpointLocked(func(data session.InstanceData) error {
+		return persistInstanceData(repoID, data)
 	})
 	defer restoreRelocationRecordCheckpoint()
 	if err := archived.RenameArchived(newTitle, newDest, newBranch); err != nil {

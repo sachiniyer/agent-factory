@@ -493,8 +493,13 @@ func (m *Manager) moveArchivedWorktreeBack(repoID, title string, instance *sessi
 	// Arm the move_in_flight durable record before the relocate (#7819): a
 	// cross-device restore names its residue before any exists, and this
 	// checkpoint is the session row's fsynced write that makes it durable.
+	// The write is persistUnderAdmission, never persistInstanceErr (#7819 R8):
+	// this whole route holds worktree admission, and the start lock
+	// persistInstanceErr takes sits LEFT of admission in the documented
+	// order — taking it here inverts against create's start -> admission
+	// wait (#6197).
 	restoreRelocationRecordCheckpoint := instance.SetRelocationRecordCheckpoint(func() error {
-		return m.persistInstanceErr(repoID, instance)
+		return m.persistUnderAdmission(repoID, instance)
 	})
 	defer restoreRelocationRecordCheckpoint()
 	claimTransferred = true

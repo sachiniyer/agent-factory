@@ -82,8 +82,10 @@ func (i *Instance) SetRepoGoneFinalizationCheckpoint(checkpoint func() error) fu
 
 // SetRelocationRecordCheckpoint installs the daemon's durable writer for the
 // move_in_flight record the cross-device move persists before any residue can
-// exist (#7819). Archive/restore/rename run the move outside i.mu, so the
-// callback may safely snapshot and persist this instance's row.
+// exist (#7819). Archive and restore run the move outside i.mu, so the
+// callback may safely snapshot and persist this instance's row. The rename
+// route is the exception — it relocates under i.mu — and must use
+// SetRelocationRecordCheckpointLocked instead.
 func (i *Instance) SetRelocationRecordCheckpoint(checkpoint func() error) func() {
 	i.mu.RLock()
 	gw := i.gitWorktree
@@ -92,6 +94,26 @@ func (i *Instance) SetRelocationRecordCheckpoint(checkpoint func() error) func()
 		return func() {}
 	}
 	return gw.SetRelocationRecordCheckpoint(checkpoint)
+}
+
+// SetRelocationRecordCheckpointLocked is the RenameArchived variant: rename is
+// the one relocate route that runs the cross-device move while holding i.mu
+// (instance_backend.go keeps title, path update and probe epoch atomic with
+// it). Its checkpoint therefore cannot snapshot via ToInstanceData — that
+// RLock would self-deadlock the lock holder, on reserveCreate's stack which
+// simultaneously holds m.mu, hanging the whole daemon (#7819 R4). Here the
+// writer receives the InstanceData snapshot taken under the already-held i.mu
+// and never takes a lock its caller can hold.
+func (i *Instance) SetRelocationRecordCheckpointLocked(checkpoint func(InstanceData) error) func() {
+	i.mu.RLock()
+	gw := i.gitWorktree
+	i.mu.RUnlock()
+	if gw == nil {
+		return func() {}
+	}
+	return gw.SetRelocationRecordCheckpoint(func() error {
+		return checkpoint(i.toInstanceDataLocked())
+	})
 }
 
 // WorktreeRelocationRecovery snapshots the durable relocation lifecycle — a
