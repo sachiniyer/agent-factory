@@ -112,6 +112,23 @@ func (b *LocalBackend) respawnWithConversation(i *Instance, resume bool, prepare
 					i.Title, recovery.State, location, claimErr,
 				)
 			}
+			// A move_in_flight claim can only select the published
+			// destination when the crash landed AFTER publication — and the
+			// cross-device engine's registration and submodule repairs
+			// (repairDestination inside relocateWorktreeTo) then never ran
+			// for it. Settling here would clear the record durably and
+			// start the agent in an unrepaired worktree, so preserve the
+			// claim — its record re-materializes naming the residue — and
+			// keep the refusal for a relocation-capable consumer (#7819
+			// round four). A primary-selected claim needs no repair: the
+			// worktree provably still sits where the row records it.
+			if claim.Path != workDir {
+				i.PreserveWorktreeRelocationClaimForRetry(claim)
+				return fmt.Errorf(
+					"recover: session %q's interrupted move published to %s but never completed its relocation repair; refusing to rebuild or start an agent until an archive/restore retry completes it",
+					i.Title, claim.Path,
+				)
+			}
 			if err := i.SettleWorktreeRelocationClaim(claim); err != nil {
 				return fmt.Errorf(
 					"recover: session %q resolved worktree recovery at %s but could not settle its identity: %w",

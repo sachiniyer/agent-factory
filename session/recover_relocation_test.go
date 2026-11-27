@@ -165,6 +165,70 @@ func TestRecover_ResolvesMoveInFlightWorktreeRelocation(t *testing.T) {
 	assert.False(t, hasRecovery, "a resolved record must be consumed, not left to refuse the next operation")
 }
 
+// TestRecover_MoveInFlightDestSelectedClaimRefusesUntilRepaired is the #7819
+// round-four hole the respawn gate closes: a crash AFTER cross-device
+// publication but before repairDestination leaves a move_in_flight record
+// whose claim selects the PUBLISHED destination — settling that claim
+// repair-free would clear the record durably and start the agent in a
+// worktree whose git registration and submodule pointers were never
+// repaired. The respawn must preserve the claim — re-materializing a
+// durable record that still names the residue — and keep refusing for a
+// relocation-capable consumer.
+func TestRecover_MoveInFlightDestSelectedClaimRefusesUntilRepaired(t *testing.T) {
+	log.Initialize(false)
+	defer log.Close()
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+
+	const agentName = "af_recover_move_published"
+	shellName := agentName + tmuxTabSeparator + shellTabName
+	var newSessions int
+	exec := countingExec(map[string]bool{}, &newSessions)
+	restored := lostInstanceForRecover(t, agentName, shellName, exec)
+
+	worktree, err := restored.GetGitWorktree()
+	require.NoError(t, err)
+	worktreePath, _, _ := worktree.RelocationSnapshot()
+	var srcStat syscall.Stat_t
+	require.NoError(t, syscall.Stat(worktreePath, &srcStat))
+
+	// The post-publication shape: the source path is gone (its tree was
+	// renamed into the quarantine, then cleaned), the quarantine and
+	// staging names are absent, and the published destination holds the
+	// identity the second checkpoint recorded.
+	require.NoError(t, os.RemoveAll(worktreePath))
+	destParent := t.TempDir()
+	dest := filepath.Join(destParent, "archive-dest")
+	require.NoError(t, os.MkdirAll(dest, 0o755))
+	var dstStat syscall.Stat_t
+	require.NoError(t, syscall.Stat(dest, &dstStat))
+	require.NoError(t, worktree.RestoreRelocationRecovery(sessiongit.RelocationRecovery{
+		State:             sessiongit.RelocationRecoveryMoveInFlight,
+		AlternatePath:     dest,
+		IdentityKnown:     true,
+		Device:            uint64(srcStat.Dev),
+		Inode:             uint64(srcStat.Ino),
+		FileType:          uint32(srcStat.Mode & syscall.S_IFMT),
+		DestIdentityKnown: true,
+		DestDevice:        uint64(dstStat.Dev),
+		DestInode:         uint64(dstStat.Ino),
+		DestFileType:      uint32(dstStat.Mode & syscall.S_IFMT),
+		QuarantinePath:    filepath.Join(filepath.Dir(worktreePath), ".af-source-0123456789abcdef0123456789abcdef"),
+		StagingPath:       filepath.Join(destParent, ".af-copy-0123456789abcdef0123456789abcdef"),
+	}))
+
+	err = restored.Recover()
+	require.Error(t, err,
+		"a destination-selected claim must not settle repair-free")
+	assert.Contains(t, err.Error(), "never completed its relocation repair")
+	assert.Equal(t, 0, newSessions,
+		"no respawn may start ahead of the relocation repair")
+	assert.DirExists(t, dest,
+		"the refused claim must not consume the published destination")
+	_, hasRecovery := worktree.GetRelocationRecovery()
+	assert.True(t, hasRecovery,
+		"the preserved claim re-materializes a durable record that still names the residue")
+}
+
 // TestRecover_SettlePersistsBeforeSpawn is the #5295-review regression: the
 // respawn's settle is in-memory only, so the daemon installs a persist
 // callback that MUST fire before the spawn — otherwise a daemon exit in the
