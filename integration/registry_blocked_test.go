@@ -26,18 +26,26 @@ const dindImage = "docker:28-dind"
 // Everything else about the fix is observable only as an absence — no request
 // went out — and an absence is exactly what a passing test cannot normally
 // distinguish from a healthy network. So this stands up a second docker daemon
-// with its egress dropped and measures the property directly, in three parts:
+// with its egress dropped and measures the property directly, in four parts:
 //
-//	the block is real  — a pull of a not-local tag must FAIL, or the check is vacuous
-//	the bug is real    — FROM the public base, absent locally, must fail in `load
-//	                     metadata` with the exact signature that reddened master
-//	                     and the v1.0.211 release
-//	the fix works      — the REAL round-trip Dockerfiles, FROM the local-only
-//	                     base, must BUILD with the registry unreachable
+//	the block is real        — a pull of a not-local tag must FAIL, or the
+//	                           check is vacuous
+//	the forwarding block too — a build-step package fetch must FAIL, or
+//	                           "the subject builds fetched nothing" is
+//	                           measured against a network that still works
+//	the bug is real          — FROM the public base, absent locally, must
+//	                           fail in `load metadata` with the exact
+//	                           signature that reddened master and the
+//	                           v1.0.211 release
+//	the fix works            — the REAL round-trip Dockerfiles, FROM the
+//	                           local-only base, must BUILD with the registry
+//	                           unreachable AND forwarded egress dropped
+//	                           (#7896), i.e. fetching literally nothing over
+//	                           the network
 //
-// The middle part is the one worth keeping honest about: it is this bug's
-// reproduction, run every time, so the check can never pass by measuring
-// nothing. It also encodes the correction to the original diagnosis — the
+// The bug-is-real part is the one worth keeping honest about: it is this
+// bug's reproduction, run every time, so the check can never pass by
+// measuring nothing. It also encodes the correction to the original diagnosis — the
 // round trip is caused by the base being ABSENT, not by buildkit re-resolving a
 // tag it already holds. A build whose base is in the local store completes with
 // no registry request at all, which is why the pre-pull in #2525 was the right
@@ -50,18 +58,30 @@ func TestImageBuildsWithRegistryBlocked(t *testing.T) {
 		t.Skipf("set %s=1 to run the registry-blocked build check (make registry-free-check); it needs a privileged docker-in-docker container", registryBlockedEnv)
 	}
 	requireDocker(t)
+	// The base — with the packages already installed — is built on the HOST
+	// daemon: its apk layer is the one fetch left in these tests, and it runs
+	// before the isolated daemon exists (#7896). Only the fetch-free overlays
+	// are built below.
 	base := requireRoundTripBaseImage(t)
 
 	d := startIsolatedDaemon(t)
 	d.seedImage(t, base)
 
-	// Drop the daemon's OWN egress. Locally-generated packets traverse OUTPUT,
-	// so this kills registry resolution; a build's RUN steps are forwarded
-	// instead of locally generated, so `apk add` still reaches the network and
-	// the REAL Dockerfiles remain buildable. That asymmetry is what lets this
-	// check exercise the actual images rather than a network-free stand-in.
-	d.mustRun(t, 30*time.Second, "drop the isolated daemon's egress",
-		"iptables -A OUTPUT -o lo -j ACCEPT && iptables -P OUTPUT DROP")
+	// Drop the daemon's OWN egress AND its forwarded traffic. Locally-
+	// generated packets traverse OUTPUT, so OUTPUT DROP kills registry
+	// resolution — the #2521 property. A build's RUN steps are forwarded
+	// rather than locally generated, which is the hole that used to let
+	// `apk add` reach a package mirror anyway (#3779). The drop for THAT
+	// has to live in DOCKER-USER: dockerd's own FORWARD-chain rules ACCEPT
+	// docker0 egress before the chain policy is ever consulted, so a
+	// `FORWARD DROP` policy would leave build containers' network fully
+	// working — while DOCKER-USER is jumped to first, for every forwarded
+	// packet. With the packages baked into the seeded base (#7896) the
+	// subject builds need nothing forwarded, so this upgrades the check
+	// from "resolves no registry" to "fetches nothing at all" — proven,
+	// not asserted.
+	d.mustRun(t, 30*time.Second, "drop the isolated daemon's egress and forwarding",
+		"iptables -A OUTPUT -o lo -j ACCEPT && iptables -P OUTPUT DROP && iptables -I DOCKER-USER -j DROP")
 
 	// The block is real. Without this the whole check could pass by measuring a
 	// daemon that was never actually cut off.
@@ -70,11 +90,31 @@ func TestImageBuildsWithRegistryBlocked(t *testing.T) {
 	}
 	t.Logf("registry block verified: %s cannot be pulled inside the isolated daemon", roundTripBaseUpstream)
 
+	// The forwarding block is real too — the proof that covers the RUN steps,
+	// which OUTPUT rules never see. A build whose RUN fetches a package from a
+	// mirror MUST fail inside this daemon; dnsmasq is definitely not in the
+	// seeded base, so the fetch is real, and `timeout` bounds the probe on a
+	// daemon whose DROP means "wait for it" rather than "connection refused".
+	// And the failure has to carry a NETWORK signature (#7896 R5): any
+	// non-zero exit — an apk that is broken for some other reason, say —
+	// would "pass" the probe while proving nothing about egress.
+	probe := d.buildContext(t, "egress-probe",
+		"FROM "+base+"\nRUN timeout 20 apk add --no-cache dnsmasq\n", nil)
+	out, err := d.run(180*time.Second, "docker build -t af-registry-blocked-probe "+probe)
+	switch {
+	case err == nil:
+		t.Fatalf("the forwarding block is not in effect — a build step fetched a package from a mirror inside the isolated daemon, so the subject builds below could fetch too and this check proves nothing:\n%s", out)
+	case egressProbeFailedOnNetwork(out):
+		t.Logf("forwarding block verified: a build-step package fetch cannot reach a mirror inside the isolated daemon")
+	default:
+		t.Fatalf("the egress probe failed, but not on a network signature, so the state of the forwarding block is unproven and the subject builds below would prove nothing:\n%s", out)
+	}
+
 	// The bug is real. Nothing seeded `alpine:3.20` into this daemon — only the
-	// local-only retag — so a Dockerfile naming the public base has to resolve
-	// it remotely, and cannot.
+	// built local-only base — so a Dockerfile naming the public base has to
+	// resolve it remotely, and cannot.
 	ctl := d.buildContext(t, "control", dockerRoundTripDockerfile(roundTripBaseUpstream), nil)
-	out, err := d.run(300*time.Second, "docker build -t af-registry-blocked-control "+ctl)
+	out, err = d.run(300*time.Second, "docker build -t af-registry-blocked-control "+ctl)
 	if err == nil {
 		t.Fatalf("FROM %s built with the registry blocked and the base absent — the reproduction no longer reproduces, so this check is no longer measuring #2521:\n%s", roundTripBaseUpstream, out)
 	}
@@ -84,7 +124,8 @@ func TestImageBuildsWithRegistryBlocked(t *testing.T) {
 	t.Logf("reproduction confirmed: FROM %s fails in `load metadata` exactly as it did on master and on the v1.0.211 release", roundTripBaseUpstream)
 
 	// The fix works: the real images, from the local-only base, with the
-	// registry unreachable.
+	// registry unreachable and forwarded egress dropped — i.e. a build that
+	// could fetch nothing at all still completes.
 	for _, tc := range []struct {
 		name       string
 		dockerfile string
@@ -101,8 +142,29 @@ func TestImageBuildsWithRegistryBlocked(t *testing.T) {
 		if strings.Contains(out, "registry-1.docker.io") {
 			t.Fatalf("the %s built, but its output names registry-1.docker.io, so something still reached for it:\n%s", tc.name, out)
 		}
-		t.Logf("%s built with registry-1.docker.io unreachable", tc.name)
+		t.Logf("%s built with registry-1.docker.io unreachable and forwarded egress dropped", tc.name)
 	}
+}
+
+// egressProbeFailedOnNetwork reports whether the probe build's failure carries
+// a signature that only reaching for the network can produce (#7896 R5):
+//
+//   - exit code 124/143 — busybox `timeout` killed the apk fetch. A DROP does
+//     not refuse connections, it swallows them, so the honest symptom of
+//     blocked egress is a fetch that hangs until killed;
+//   - "WARNING: fetching" / "temporary error" — apk's own report that the
+//     fetch could not complete (e.g. DNS or connect gave up first).
+//
+// Any other non-zero exit — apk missing, a typo'd package name the index
+// somehow resolved, a broken base — says nothing about forwarding, so the
+// caller fails the check as unproven rather than counting it.
+func egressProbeFailedOnNetwork(out string) bool {
+	for _, sig := range []string{"exit code: 124", "exit code: 143", "WARNING: fetching", "temporary error"} {
+		if strings.Contains(out, sig) {
+			return true
+		}
+	}
+	return false
 }
 
 // --- isolated daemon helpers ------------------------------------------------
@@ -220,4 +282,28 @@ func dockerCLIOutput(timeout time.Duration, args ...string) (string, error) {
 	cmd.WaitDelay = 10 * time.Second
 	out, err := cmd.CombinedOutput()
 	return string(out), err
+}
+
+// The egress probe must only count a network signature as blocked — any other
+// non-zero exit proves nothing about forwarding (#7896 R5). The signatures are
+// the busybox `timeout` kill (a DROP swallows connections, so blocked egress
+// hangs until killed) and apk's own fetch errors.
+func TestEgressProbeNeedsANetworkSignature(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		out  string
+		want bool
+	}{
+		{"timeout kill 124", "ERROR: process \"/bin/sh -c timeout 20 apk add --no-cache dnsmasq\" did not complete successfully: exit code: 124", true},
+		{"timeout kill 143", "did not complete successfully: exit code: 143", true},
+		{"apk fetch warning", "WARNING: fetching https://dl-cdn.alpinelinux.org/alpine/v3.20/main: temporary error (try again later)", true},
+		{"apk temporary error", "fetch https://dl-cdn.alpinelinux.org: temporary error", true},
+		{"nonzero for another reason", "did not complete successfully: exit code: 1\nERROR: unable to select packages: dnsmasq (no such package)", false},
+		{"command not found", "/bin/sh: apk: not found\nexit code: 127", false},
+		{"plain failure", "did not complete successfully: exit code: 2", false},
+	} {
+		if got := egressProbeFailedOnNetwork(tc.out); got != tc.want {
+			t.Errorf("%s: egressProbeFailedOnNetwork = %v, want %v", tc.name, got, tc.want)
+		}
+	}
 }

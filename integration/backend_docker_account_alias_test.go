@@ -136,14 +136,20 @@ func TestDockerBackendAccountMountAliasRefused(t *testing.T) {
 	assertAccountDirectoryUntouched(t, accountDir, accountSettings)
 }
 
-// buildAccountAliasImage is the round-trip image plus the issue's symlink: an
-// image that can carry a session AND aliases the account boundary.
+// accountAliasDockerfile is the round-trip image plus the issue's symlink: an
+// image that can carry a session AND aliases the account boundary. No fetch —
+// the packages come from the base (#7896).
+func accountAliasDockerfile(base string) string {
+	return dockerRoundTripDockerfile(base) +
+		"RUN mkdir -p /af-account && ln -s /af-account /device-target\n"
+}
+
+// buildAccountAliasImage builds accountAliasDockerfile and returns its tag.
 func buildAccountAliasImage(t *testing.T) string {
 	t.Helper()
 	const tag = "af-docker-account-alias:test"
 	dir := t.TempDir()
-	dockerfile := dockerRoundTripDockerfile(requireRoundTripBaseImage(t)) +
-		"RUN mkdir -p /af-account && ln -s /af-account /device-target\n"
+	dockerfile := accountAliasDockerfile(requireRoundTripBaseImage(t))
 	if err := os.WriteFile(filepath.Join(dir, "Dockerfile"), []byte(dockerfile), 0644); err != nil {
 		t.Fatalf("write Dockerfile: %v", err)
 	}
@@ -151,7 +157,7 @@ func buildAccountAliasImage(t *testing.T) string {
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "docker", "build", "-t", tag, dir)
 	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("building the aliasing image failed. Its base is already in the local image store and its FROM names no registry, so this is a real build error, not a registry outage: %v\n%s", err, out)
+		t.Fatalf("building the aliasing image failed. Its base (with the packages already installed) is in the local image store, its FROM names no registry, and the build fetches nothing over the network — so this is a real build error, not a registry or mirror outage: %v\n%s", err, out)
 	}
 	return tag
 }

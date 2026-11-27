@@ -105,13 +105,14 @@ backend-ssh-roundtrip:
 backend-sandbox-e2e:
 	go test ./integration -run "TestSandbox(Daemon|Disruptions)E2E" -v -count=1 -timeout 30m
 
-# Registry-free build check (#2521): proves the round-trip image builds above
-# resolve NOTHING against a registry, by standing up a second docker daemon with
-# its egress dropped and building the real Dockerfiles inside it. It also runs
-# the bug's own reproduction every time — FROM the public base, with that base
-# absent, must still fail in `load metadata` — so the check can never pass by
-# measuring a network that was quietly reachable. Runs ON THE HOST (needs a real
-# docker daemon and privileged containers); SKIPS where docker is unavailable.
+# Registry-free build check (#2521, #7896): proves the round-trip image builds
+# above fetch NOTHING over the network — no registry, no package mirror — by
+# standing up a second docker daemon with its egress AND forwarding dropped and
+# building the real Dockerfiles inside it. It also runs the bug's own
+# reproduction every time — FROM the public base, with that base absent, must
+# still fail in `load metadata` — so the check can never pass by measuring a
+# network that was quietly reachable. Runs ON THE HOST (needs a real docker
+# daemon and privileged containers); SKIPS where docker is unavailable.
 registry-free-check:
 	AF_REGISTRY_BLOCKED_CHECK=1 go test ./integration -run TestImageBuildsWithRegistryBlocked -v -count=1 -timeout 20m
 

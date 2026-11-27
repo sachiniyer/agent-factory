@@ -350,15 +350,18 @@ jobs:
         timeout-minutes: 25
         run: scripts/ci-apt-install.sh zsh
 
-      # There is deliberately no "warm alpine:3.20" step here any more (#2521).
-      # It used to live in this job alone, which was the whole problem: FOUR
+      # There is deliberately no "warm alpine:3.20" step here any more (#2521),
+      # and no "build the integration base image" step either (#7896). A warm
+      # step used to live in this job alone, which was the whole problem: FOUR
       # lanes run the full suite — this one, build.yml, auto-release.yml and
-      # stable-release.yml — and the warm only ever reached this one. Both
-      # observed failures landed on lanes that never had it, and the test's own
-      # "base image is pre-pulled by CI" message then misattributed them to
-      # buildkit re-resolving a cached tag. The base is now obtained by the test
-      # binary itself (integration/base_image_test.go), once, with retry, so
-      # every lane and every developer machine gets the same guarantee and no
+      # stable-release.yml (plus sandbox-e2e.yml and the registry-free job) —
+      # and the warm only ever reached this one. Both observed failures landed
+      # on lanes that never had it, and the test's own "base image is
+      # pre-pulled by CI" message then misattributed them to buildkit
+      # re-resolving a cached tag. The base is now obtained AND built by the
+      # test binary itself (integration/base_image_test.go), once, with retry
+      # and the packages installed under its own labelled budget, so every
+      # lane and every developer machine gets the same guarantee and no
       # future workflow can forget it.
 
       # -timeout is explicit rather than Go's default 10m per package (#3580).
@@ -509,15 +512,18 @@ jobs:
       - name: Run tests
         run: go test -v -race -count=1 -timeout 30m ./...
 
-  # The round-trip image builds must resolve NOTHING against a registry (#2521).
+  # The round-trip image builds must fetch NOTHING over the network — no
+  # registry (#2521), no package mirror (#7896).
   #
   # That property is an absence — no request went out — and the ordinary suite
   # cannot tell an absent request from a healthy network, which is exactly how
   # the first fix attempt shipped believing it had removed a dependency it had
-  # not. This job stands up a second docker daemon with its egress dropped and
-  # measures it directly: the block is proven real, the bug's own reproduction
-  # is re-run (the public base, absent locally, must still fail in `load
-  # metadata`), and only then are the real Dockerfiles built.
+  # not. This job stands up a second docker daemon with its egress AND its
+  # forwarding dropped and measures it directly: the block is proven real, the
+  # bug's own reproduction is re-run (the public base, absent locally, must
+  # still fail in `load metadata`), and only then are the real Dockerfiles
+  # built — with the packages already baked into the seeded base, so a build
+  # that could reach nothing at all still completes.
   #
   # It runs on every PR rather than behind an `integration/**` filter: the thing
   # it protects is a property of the whole test harness, and the change most

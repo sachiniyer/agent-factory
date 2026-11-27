@@ -145,17 +145,13 @@ func TestSSHBackendSymlinkedHomeRoundTrip(t *testing.T) {
 	t.Logf("remote process reaped + session dir removed on Kill — no orphan with a symlinked home. symlink round-trip complete.")
 }
 
-// buildSymlinkedHomeSSHDImage builds an sshd image whose /root is a symlink to
-// /realroot, exactly the trigger from the bug report (a symlinked $HOME).
-func buildSymlinkedHomeSSHDImage(t *testing.T) string {
-	t.Helper()
-	const tag = "af-sshd-symlink:test"
-	dir := t.TempDir()
-	base := requireRoundTripBaseImage(t)
-	// Same as sshdRoundTripDockerfile but with /root replaced by a symlink to
-	// /realroot BEFORE sshd's host-key generation and the entrypoint run.
-	dockerfile := "FROM " + base + "\n" +
-		apkAddRun("git", "tmux", "bash", "openssh-server") + trustBindMountedRepoRun +
+// symlinkedHomeDockerfile is the same image as sshdRoundTripDockerfile but
+// with /root replaced by a symlink to /realroot BEFORE sshd's host-key
+// generation and the entrypoint run — the automounter symlink form. openssh-
+// server comes from the base (#7896); every step below is local-only.
+func symlinkedHomeDockerfile(base string) string {
+	return "FROM " + base + "\n" +
+		trustBindMountedRepoRun +
 		// Make /root a symlink to /realroot — the automounter symlink form.
 		"RUN mkdir /realroot && rm -rf /root && ln -s /realroot /root\n" +
 		"RUN ssh-keygen -A && mkdir -p /root/.ssh && chmod 700 /root/.ssh\n" +
@@ -163,6 +159,15 @@ func buildSymlinkedHomeSSHDImage(t *testing.T) string {
 		"COPY entrypoint.sh /entrypoint.sh\n" +
 		"RUN chmod +x /entrypoint.sh\n" +
 		"ENTRYPOINT [\"/entrypoint.sh\"]\n"
+}
+
+// buildSymlinkedHomeSSHDImage builds an sshd image whose /root is a symlink to
+// /realroot, exactly the trigger from the bug report (a symlinked $HOME).
+func buildSymlinkedHomeSSHDImage(t *testing.T) string {
+	t.Helper()
+	const tag = "af-sshd-symlink:test"
+	dir := t.TempDir()
+	dockerfile := symlinkedHomeDockerfile(requireRoundTripBaseImage(t))
 	if err := os.WriteFile(filepath.Join(dir, "Dockerfile"), []byte(dockerfile), 0644); err != nil {
 		t.Fatalf("write Dockerfile: %v", err)
 	}
@@ -173,7 +178,7 @@ func buildSymlinkedHomeSSHDImage(t *testing.T) string {
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "docker", "build", "-t", tag, dir)
 	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("building the symlinked-home sshd image failed: %v\n%s", err, out)
+		t.Fatalf("building the symlinked-home sshd image failed. Its base (with the packages already installed) is in the local image store, its FROM names no registry, and the build fetches nothing over the network — so this is a real build error, not a registry or mirror outage: %v\n%s", err, out)
 	}
 	return tag
 }
