@@ -40,12 +40,21 @@ type accountSwapRecorder struct {
 // discardStaged tombstones a swap id: a request that names it afterwards can
 // only roll back. It is the server-side half of the daemon's "this swap is not
 // committed" verdict, recorded under the same serialization the swap runs in.
+//
+// It also claims the rolled_back verdict under that id in the SAME write, when
+// the slot is free (#7793 review): once the id is tombstoned it can never
+// commit, so the verdict is already determined. Publishing it now closes the
+// crash window between this save and noteStagedDiscarded's later save — a
+// restart that lost the second save rehydrates THIS swap's own rolled_back
+// rather than anonymous none, the way a bare tombstone would leave it reading
+// forever.
 func (r *accountSwapRecorder) discardStaged(id string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	defer r.persistLocked()
 	if id != "" {
 		r.cancelled = id
+		r.refuseLocked(id)
 	}
 }
 
@@ -90,6 +99,16 @@ func (r *accountSwapRecorder) run(id string, swap func() (string, error)) (strin
 	}
 	prevID, prevOutcome, prevProgram := r.id, r.outcome, r.program
 	r.id, r.outcome, r.program = id, swapOutcomeUnknown, "" // this swap's, until it is terminal
+	// Persist this swap's id under an unknown verdict BEFORE the rotation
+	// (#7793 review): the deferred save at the end of run leaves the prior
+	// swap's terminal record on disk throughout the rotation, so a crash
+	// during swap() rehydrates that stale named verdict and B's reconcile
+	// mistakes it for a queued request — discarding into a definite rollback
+	// even though the host may already run B's incoming account. Persisting
+	// B's own id as unknown makes a restart rehydrate B (not A); the
+	// reconcile fences safely the way a fresh pre-fix recorder did, instead
+	// of settling a row/host account mismatch.
+	r.persistLocked()
 	program, err := swap()
 	switch {
 	case err == nil:
