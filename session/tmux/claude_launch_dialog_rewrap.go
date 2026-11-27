@@ -161,15 +161,11 @@ var (
 type claudeLaunchDialogOptions struct {
 	labels []string
 	// pair is how many of labels, counted from the end, are the dialog's
-	// single-row inline option rows ("Yes  No" / "Yes  2. No"). Each of those
-	// IS the dialog's whole option block — the cursor's ❯ sits on it and
-	// nothing the dialog paints stacks above or below it — so the reader
-	// accepts one only as the block's lowest label, directly over the footer.
-	// Read as one more label on top of a block that already has its
-	// affirmative, the block grows upward into rows af must keep holding as
-	// the dialog's body — the reading replaced master's, which is the one
-	// thing a re-wrap reading may never do (#7453; #7661 review, R1). For the
-	// same reason the top of a pane never cuts one.
+	// single-row inline option rows ("Yes  No" / "Yes  2. No"). Each IS the
+	// dialog's whole option block, accepted only as the block's lowest label
+	// directly over the footer. Reading one atop a block grows it upward into
+	// the dialog's body — a re-wrap reading may never do that (#7453; #7661
+	// R1); the top-cut clause honors this too (#7618).
 	pair    int
 	footers []string
 	// read names the dialog that the labels read show, given which of them were
@@ -482,6 +478,11 @@ func claudeLaunchDialogTailOver(pane claudeLaunchDialogPane, options claudeLaunc
 	match := claudeLaunchDialogMatch{kind: kind}
 	// A pair label can only be the block's lowest, read first.
 	match.pair = len(read) > 0 && read[0] >= len(options.labels)-options.pair
+	// The top-cut clause offers the pair labels only with no block below (#7618, #7661 R1).
+	tailLabels := options.labels
+	if labels > 0 {
+		tailLabels = options.labels[:len(options.labels)-options.pair]
+	}
 	switch {
 	case at == 0 && labels > 0:
 		if claudeLaunchDialogRuleFrom(pane, pane.index[0]) {
@@ -489,9 +490,30 @@ func claudeLaunchDialogTailOver(pane claudeLaunchDialogPane, options claudeLaunc
 		}
 		match.saw = "only its option rows and " + shown
 		return match, true
-	case at > 0 && claudeLaunchDialogLabelTail(pane.text[:at], options.labels[:len(options.labels)-options.pair]):
+	case at > 0 && claudeLaunchDialogLabelTail(pane.text[:at], tailLabels):
 		if claudeLaunchDialogRuleFrom(pane, pane.index[0]) {
 			return claudeLaunchDialogMatch{}, false
+		}
+		// A cut tail that is a pair label can only be the legacy inline
+		// picker's: read is empty here (the fragment sat straight over the
+		// footer, so no whole label was read below it), and kind came from the
+		// footer alone, so a pair fragment read as the reworded affirmative or
+		// the stacked "Yes, proceed" is named for a pane never shown.
+		// tailLabels carries the pair labels only when labels == 0, so the
+		// index aligns with options.labels and a stacked-label tail (labels >
+		// 0) never reaches this clause (#7865 review).
+		li := claudeLaunchDialogLabelTailIndex(pane.text[:at], tailLabels)
+		if li >= len(options.labels)-options.pair {
+			// A pair-label tail drafted inside a composer's box is the
+			// draft's text (a "❯ No" row over "Enter to"), not a cut dialog
+			// row: the box's side borders survive on the raw rows, so the
+			// partial-pair path needs the same exclusion the whole-pair path
+			// applies above (#7865 Codex review).
+			if claudeLaunchDialogBoxedSpan(pane, 0, at) {
+				return claudeLaunchDialogMatch{}, false
+			}
+			match.kind = claudeLaunchDialogLegacy
+			match.pair = true
 		}
 		match.saw = "only the end of its option rows and " + shown
 		return match, true
@@ -833,92 +855,23 @@ func claudeLaunchDialogOrdinalBefore(pane claudeLaunchDialogPane, at int) int {
 // claudeLaunchDialogLabelTail reports whether text is the end of one option
 // label and not the whole of it: what the top of a pane leaves of a row it cut.
 func claudeLaunchDialogLabelTail(text string, labels []string) bool {
-	for _, label := range labels {
-		if len(text) < len(label) && strings.HasSuffix(label, text) {
-			return true
-		}
-	}
-	return false
+	return claudeLaunchDialogLabelTailIndex(text, labels) >= 0
 }
 
-// claudeLegacyTrustPaintedMin is the least of the legacy question af reads as
-// that dialog being painted: "Do you", its first row on the narrowest pane
-// that shows two words.
-const claudeLegacyTrustPaintedMin = len("Doyou")
-
-// claudeLaunchDialogPainting reports the legacy folder-trust dialog while
-// Claude Code is still painting it, on a pane too narrow for its question to
-// fit a row. claudeLegacyTrustDialogOf reads that question only as one whole
-// row, so under 38 columns every frame of the paint read clear.
-//
-// From some row down to the last content, the pane's text is the start of the
-// question, or the whole question, wrapped onto two rows or more, and then
-// only rows the dialog paints below it: body text, option rows, its closing
-// frame, its footer. A ❯ row there must begin one of the dialog's options; any
-// other, or a plain rule, is a composer, and the question is output being
-// quoted. A question on one row is left to claudeLegacyTrustDialogOf, which
-// reads it whole.
-//
-// Rows that are the later rows of a composer's draft are the composer's, not
-// the dialog's (claudeMCPTrustDraftRow, #7350).
-//
-// "Do you" alone holds, two common words though they are: on a narrow pane
-// they are the whole of the question's first row, and af does not know the
-// width Claude Code wraps this dialog at. It is narrower than the pane by a
-// margin no capture of this dialog records (#7351 review).
-func claudeLaunchDialogPainting(pane claudeLaunchDialogPane) (claudeLaunchDialogMatch, bool) {
-	question := claudeLegacyTrustQuestionSquashed
-	match := claudeLaunchDialogMatch{kind: claudeLaunchDialogLegacy}
-	for first := len(pane.starts) - 1; first >= 0; first-- {
-		if !strings.HasPrefix(question, claudeLaunchDialogRowText(pane, first)) ||
-			pane.rows[pane.index[first]].selected {
-			continue
+// claudeLaunchDialogLabelTailIndex returns the index of the first label text is
+// the end of (and not the whole of), or -1 when text is no label's tail. The
+// tail branch classifies a cut inline-pair tail by it: read is empty there, so
+// the footer alone named the dialog and match.pair stayed false, misnaming a
+// pair fragment ("es  No") as the reworded affirmative or the stacked
+// "Yes, proceed". The label that supplied the tail is the legacy pair, so the
+// refusal names the pane actually shown (#7865 review).
+func claudeLaunchDialogLabelTailIndex(text string, labels []string) int {
+	for i, label := range labels {
+		if len(text) < len(label) && strings.HasSuffix(label, text) {
+			return i
 		}
-		text := pane.text[pane.starts[first]:]
-		if len(text) < len(question) {
-			// The question is still being painted.
-			if len(text) >= claudeLegacyTrustPaintedMin && strings.HasPrefix(question, text) &&
-				!claudeLaunchDialogAnySelected(pane, first, len(pane.starts)) {
-				if claudeMCPTrustDraftRow(pane.lines, pane.rows, pane.index[first], pane.index[len(pane.index)-1]) {
-					// The later rows of a composer's draft: the composer
-					// explains them (#7344, #7350).
-					continue
-				}
-				match.saw = "the start of its question, with nothing painted below it yet"
-				if strings.HasPrefix(claudeMCPTrustQuestionSquashed, text) {
-					match.kind = claudeLaunchDialogEither
-					match.saw = "the first words of a trust question, which the legacy folder-trust dialog and the MCP-server dialog share"
-				}
-				return match, true
-			}
-			continue
-		}
-		if !strings.HasPrefix(text, question) {
-			continue
-		}
-		below, ok := pane.rowStart(pane.starts[first] + len(question))
-		if len(text) == len(question) {
-			below, ok = len(pane.starts), true
-		}
-		if !ok || below-first < 2 || claudeLaunchDialogAnySelected(pane, first, below) {
-			// The question ends inside a row, or sits on one row.
-			continue
-		}
-		if claudeLaunchDialogComposerBelow(pane, first, below) ||
-			claudeMCPTrustDraftRow(pane.lines, pane.rows, pane.index[first], pane.index[len(pane.index)-1]) {
-			continue
-		}
-		match.saw = "its question wrapped onto several rows"
-		for i := pane.index[first]; i < len(pane.lines); i++ {
-			if claudeLegacyInlinePair(strings.Fields(strings.ToLower(pane.rows[i].label))) {
-				// The dialog's option row is the inline pair: name its "Yes",
-				// not the stacked form's "Yes, proceed" (#7661 review, R4).
-				match.pair = true
-			}
-		}
-		return match, true
 	}
-	return claudeLaunchDialogMatch{}, false
+	return -1
 }
 
 // claudeLaunchDialogBoxedSpan reports whether the text span [from, to) sits on

@@ -584,6 +584,131 @@ func TestCheckAndHandleTrustPrompt_InlinePairSelectedBoxFirstRowStaysClear(t *te
 	}
 }
 
+// TestCheckAndHandleTrustPrompt_InlinePairTopCutTailOverFooterStartHolds pins
+// the fix for the top-cut clause gap the bug report flags: a pane whose first
+// content row is a tail of the inline-pair row (e.g. "es  No", "No",
+// "es  2. No") over a footer still being painted — a footer PREFIX such as
+// "Enter to" or "Enter to confirm" — must hold the way a cut stacked-label
+// tail does (TestCheckAndHandleTrustPrompt_FolderTrustTailHolds, "the top of
+// the pane cuts the exit row"). Commit ec87f941 (#7661) added the pair labels
+// to claudeLaunchDialogLabels but passed only the stacked labels to the
+// top-cut clause in claudeLaunchDialogTailOver, on the unexamined claim that
+// "the top of a pane never cuts one" — so every such frame read CLEAR, the
+// create path's permission to type the user's prompt and press Enter, which
+// the legacy dialog takes on its preselected "Yes" (#3579-class failure).
+func TestCheckAndHandleTrustPrompt_InlinePairTopCutTailOverFooterStartHolds(t *testing.T) {
+	for _, tt := range []struct{ name, content string }{
+		// Plain pair tails over the footer's start.
+		{"the plain pair tail 'es  No' over 'Enter to'", "es  No\n\nEnter to"},
+		{"the plain pair tail 's  No' over 'Enter to'", "s  No\n\nEnter to"},
+		{"the plain pair tail 'No' over 'Enter to'", "No\n\nEnter to"},
+		{"the plain pair tail 'es  No' over 'Enter to confirm'", "es  No\n\nEnter to confirm"},
+		{"the plain pair tail 'No' over 'Enter'", "No\n\nEnter"},
+		{"the plain pair tail 'es  No' with no blank row over 'Enter to'", "es  No\nEnter to"},
+		// Ordinal pair tails over the footer's start. "2. No" loses its
+		// leading ordinal to trimClaudeTrustOrdinal, leaving the bare "No"
+		// that is a tail of the squashed pair "Yes2.No".
+		{"the ordinal pair tail 'es  2. No' over 'Enter to'", "es  2. No\n\nEnter to"},
+		{"the ordinal pair tail '2. No' over 'Enter to'", "2. No\n\nEnter to"},
+		{"the ordinal pair tail 's  2. No' over 'Enter to'", "s  2. No\n\nEnter to"},
+		{"the ordinal pair tail 'es  2. No' over 'Enter to confirm'", "es  2. No\n\nEnter to confirm"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			_, _, errLog := captureTrustPromptLogs(t)
+			handled, cmds := pollStaticPane(t, tt.content, 4)
+			require.True(t, handled,
+				"a top-cut inline-pair tail over a footer start must hold; it had read clear "+
+					"(the create path would type the prompt into the trust dialog):\n%s", tt.content)
+			require.Empty(t, sentKeystrokes(cmds),
+				"a dialog af cannot read whole gets no key; got %v", cmds)
+			require.Equal(t, 1, strings.Count(errLog.String(), "refusing to answer"),
+				"the hold is reported once, not once per poll; got:\n%s", errLog.String())
+		})
+	}
+}
+
+// TestCheckAndHandleTrustPrompt_InlinePairTopCutTailOverFooterFragmentStaysClear
+// pins the boundary the bug report draws: the fix holds a cut pair tail only
+// over a footer PREFIX (a footer still being painted from its start). A footer
+// FRAGMENT that is not a prefix — "Esc to", "Esc to exit" (the footer's tail
+// from the middle) — is no footer start claudeLaunchDialogFooterPainting reads,
+// and a bare "Yes" is a PREFIX of the squashed pair "YesNo", not a SUFFIX, so
+// claudeLaunchDialogLabelTail declines it. None of those holds. The settled
+// whole-footer frames are backstopped by the remnant reader
+// (claudeLaunchDialogUnderGuideOf) and already hold, so they are included
+// here as a control: the fix changes only the partial-footer intersection.
+func TestCheckAndHandleTrustPrompt_InlinePairTopCutTailOverFooterFragmentStaysClear(t *testing.T) {
+	for _, tt := range []struct {
+		name    string
+		content string
+		hold    bool
+	}{
+		// Footer fragments that are not a prefix of either footer stay clear.
+		{"the pair tail over a footer fragment 'Esc to'", "es  No\n\nEsc to", false},
+		{"the pair tail over a footer fragment 'Esc to exit'", "es  No\n\nEsc to exit", false},
+		{"the pair tail over a footer fragment 'confirm · Esc to exit'", "es  No\n\nconfirm · Esc to exit", false},
+		// A bare "Yes" is a prefix of "YesNo", not a suffix, so the label-tail
+		// clause declines it; no whole label matches it either.
+		{"a bare 'Yes' over the footer start", "Yes\n\nEnter to", false},
+		// Control: the same tails over the WHOLE footer hold via the remnant
+		// reader, with or without the fix.
+		{"the plain pair tail 'es  No' over the whole footer", "es  No\n\nEnter to confirm · Esc to exit", true},
+		{"the plain pair tail 'No' over the whole footer", "No\n\nEnter to confirm · Esc to exit", true},
+		{"the ordinal pair tail 'es  2. No' over the whole footer", "es  2. No\n\nEnter to confirm · Esc to exit", true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			handled, cmds := pollStaticPane(t, tt.content, 4)
+			require.Equal(t, tt.hold, handled,
+				"%s:\n%s", tt.name, tt.content)
+			require.Empty(t, sentKeystrokes(cmds),
+				"no key may reach a pane that shows no dialog; got %v", cmds)
+		})
+	}
+}
+
+// TestCheckAndHandleTrustPrompt_InlinePairTopCutTailInAComposerBoxStaysClear
+// pins the boxed-composer exclusion the partial-pair tail path shares with the
+// whole-pair path (#7865 Codex review): a composer whose draft is the two-line
+// "❯ No" / "Enter to" — the ❯ its prompt cursor, "No" a tail of the squashed
+// pair "YesNo", "Enter to" a partial footer prefix — is a working composer, not
+// the legacy picker cut by the top of the pane. Canonicalization leaves the box
+// ("No" may be a dialog option); the parser strips the borders and cursor, and
+// the tail branch would hold it as the cut picker, typing the prompt into the
+// open composer. The partial-pair path now applies claudeLaunchDialogBoxedSpan
+// the whole-pair path does, so it stays clear. The same tail unboxed holds: only
+// the box's borders distinguish a composer's draft from the dialog's cut row.
+func TestCheckAndHandleTrustPrompt_InlinePairTopCutTailInAComposerBoxStaysClear(t *testing.T) {
+	for _, v := range inlineVariants {
+		tail := "No"
+		if v.ordinal {
+			tail = "2. No"
+		}
+		t.Run(v.name+"/the boxed composer draft '❯ "+tail+"' over 'Enter to'", func(t *testing.T) {
+			content := "╭──────────────────────────────────╮\n" +
+				fmt.Sprintf("│ %-32s │", "❯ "+tail) + "\n" +
+				"│ Enter to                         │\n" +
+				"╰──────────────────────────────────╯\n"
+			handled, cmds := pollStaticPane(t, content, 4)
+			require.False(t, handled,
+				"a composer-proven box's draft tail over a partial footer is the composer's, "+
+					"not the cut legacy picker (#7865 Codex review):\n%s", content)
+			require.Empty(t, sentKeystrokes(cmds),
+				"no key may reach a working composer; got %v", cmds)
+		})
+		// Control: the same tail over a partial footer with no box holds as the
+		// cut picker — the fix excludes only the boxed composer.
+		t.Run(v.name+"/the bare tail '"+tail+"' over 'Enter to' holds", func(t *testing.T) {
+			content := tail + "\n\nEnter to"
+			handled, cmds := pollStaticPane(t, content, 4)
+			require.True(t, handled,
+				"a cut inline-pair tail over a footer start with no composer box holds "+
+					"(the fix excludes only the boxed case):\n%s", content)
+			require.Empty(t, sentKeystrokes(cmds),
+				"a dialog af cannot read whole gets no key; got %v", cmds)
+		})
+	}
+}
+
 // TestCheckAndHandleTrustPrompt_InlinePairQuotedAboveAComposerStaysClear
 // pins the larger #7584 guarantee with the inline pair: a draft quoting the
 // pair (or the dialog's question + pair, or the block on one row) drawn
