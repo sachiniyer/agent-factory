@@ -146,8 +146,9 @@ func TestAccountDockerRunArgs_RoutingReasonNamesTheMechanism(t *testing.T) {
 // does not cover, and offers "drop the entry" the way the credential-mount
 // path's refusal does. An endpoint or proxy name keeps the forward-only
 // remedy. SSL_CERT_DIR is a directory-valued routing name alongside
-// SSL_CERT_FILE, so it gets the same mount-naming remedy rather than the
-// forward-only one forwarding alone leaves the host CAs unreachable.
+// SSL_CERT_FILE, and GH_CONFIG_DIR is a directory-valued routing name for gh's
+// stored config, so both get the same mount-naming remedy rather than the
+// forward-only one forwarding alone leaves the host contents unreachable.
 func TestAccountDockerRunArgs_RoutingRemedyNamesTheMountForPathValues(t *testing.T) {
 	for _, tt := range []struct {
 		agent string
@@ -159,6 +160,7 @@ func TestAccountDockerRunArgs_RoutingRemedyNamesTheMountForPathValues(t *testing
 		{tmux.ProgramClaude, "REQUESTS_CA_BUNDLE"},
 		{tmux.ProgramClaude, "CURL_CA_BUNDLE"},
 		{tmux.ProgramCodex, "CODEX_CA_CERTIFICATE"},
+		{tmux.ProgramClaude, "GH_CONFIG_DIR"},
 	} {
 		t.Run(tt.agent+"/"+tt.name, func(t *testing.T) {
 			err := validateAccountDockerRunArgs([]string{"-e", tt.name + "=/workspace/.ca.pem"}, tt.agent)

@@ -418,9 +418,10 @@ func accountDockerRoutingReason(agent, name string) (string, bool) {
 // enough on its own — the file or directory the operator points at must also be
 // mounted at the same container path — so the refusal's remedy names the mount
 // alongside the forward and offers "drop the entry" the way the credential-mount
-// path does. SSL_CERT_DIR sits here alongside SSL_CERT_FILE: forwarding the
-// directory does not make its host CAs available inside the container, so the
-// remedy has to name the mount.
+// path does. SSL_CERT_DIR sits here alongside SSL_CERT_FILE, and GH_CONFIG_DIR
+// alongside them: forwarding a directory does not make its host contents (the
+// host CAs, or gh's stored config and authentication) available inside the
+// container, so the remedy has to name the mount.
 var accountRoutingPathValuedNames = map[string]struct{}{
 	"SSL_CERT_FILE":        {},
 	"SSL_CERT_DIR":         {},
@@ -428,6 +429,7 @@ var accountRoutingPathValuedNames = map[string]struct{}{
 	"REQUESTS_CA_BUNDLE":   {},
 	"CURL_CA_BUNDLE":       {},
 	"CODEX_CA_CERTIFICATE": {},
+	"GH_CONFIG_DIR":        {},
 }
 
 // dockerEngineEndpoint resolves the endpoint this provisioner's docker CLI will
