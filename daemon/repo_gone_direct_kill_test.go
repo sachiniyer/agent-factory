@@ -798,18 +798,23 @@ func TestKillSession_DirectRepoGoneMoveInFlightConverges(t *testing.T) {
 	// record names sits at .af-copy-* beside the never-published destination.
 	staging := filepath.Join(t.TempDir(), ".af-copy-0123456789abcdef0123456789abcdef")
 	require.NoError(t, os.MkdirAll(staging, 0o755))
+	// The quarantine name is recorded before the source rename runs, so a
+	// pre-publish crash record names an .af-source-* sibling that is absent —
+	// resolution falls through it to the primary-identity match.
+	quarantine := filepath.Join(filepath.Dir(archivedPath), ".af-source-0123456789abcdef0123456789abcdef")
 	info, err := os.Stat(archivedPath)
 	require.NoError(t, err)
 	stat, ok := info.Sys().(*syscall.Stat_t)
 	require.True(t, ok)
 	require.NoError(t, gw.RestoreRelocationRecovery(sessiongit.RelocationRecovery{
-		State:         sessiongit.RelocationRecoveryMoveInFlight,
-		AlternatePath: filepath.Join(t.TempDir(), "archived-move-dest"),
-		IdentityKnown: true,
-		Device:        uint64(stat.Dev),
-		Inode:         uint64(stat.Ino),
-		FileType:      uint32(stat.Mode & syscall.S_IFMT),
-		StagingPath:   staging,
+		State:          sessiongit.RelocationRecoveryMoveInFlight,
+		AlternatePath:  filepath.Join(t.TempDir(), "archived-move-dest"),
+		IdentityKnown:  true,
+		Device:         uint64(stat.Dev),
+		Inode:          uint64(stat.Ino),
+		FileType:       uint32(stat.Mode & syscall.S_IFMT),
+		QuarantinePath: quarantine,
+		StagingPath:    staging,
 	}))
 	require.NoError(t, persistInstanceData(repoID, inst.ToInstanceData()))
 
