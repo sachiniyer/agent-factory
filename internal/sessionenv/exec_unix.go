@@ -320,10 +320,13 @@ func execInvocation(args []string) error {
 // that exists in the container (resolveTrustPathPin). The name stays
 // claimed either way, so a repo .env loader cannot take it, and a
 // store-less image keeps the defined-empty pin rather than going unset.
-// The one exception is SSL_CERT_DIR next to a forwarded SSL_CERT_FILE:
-// resolving the dir would add the image's hashed roots to a rustls reader
-// that, with the dir unset, trusts only the operator's file — the dir
-// keeps its defined-empty claim instead (#7889 R5).
+// The one exception is a forwarded sibling: SSL_CERT_FILE and SSL_CERT_DIR
+// are independent slots every reader loads — resolving the pinned slot
+// beside an operator-forwarded one would silently widen the operator's
+// trust with the image's roots (file-forwarded → the image's hashed dirs;
+// dir-forwarded → the image's bundle). The pinned slot keeps its
+// defined-empty claim instead — the only spelling that contributes no
+// roots — so the operator's value is the whole store (#7889 R5).
 func reapplyEmptyPins(environ, pins []string) []string {
 	if len(pins) == 0 {
 		return environ
@@ -333,6 +336,7 @@ func reapplyEmptyPins(environ, pins []string) []string {
 		pinned[name] = struct{}{}
 	}
 	_, filePinned := pinned["SSL_CERT_FILE"]
+	_, dirPinned := pinned["SSL_CERT_DIR"]
 	out := make([]string, 0, len(environ)+len(pins))
 	for _, entry := range environ {
 		name, _, _ := strings.Cut(entry, "=")
@@ -341,13 +345,15 @@ func reapplyEmptyPins(environ, pins []string) []string {
 		}
 		out = append(out, entry)
 	}
+	// A sibling counts as claimed only when it is NOT itself a pin — a
+	// pinned sibling re-resolves below, so whatever stale value the environ
+	// holds is being replaced and both slots resolve as one consistent
+	// platform root set.
+	fileClaimed := !filePinned && envNonEmpty(environ, "SSL_CERT_FILE")
+	dirClaimed := !dirPinned && envNonEmpty(environ, "SSL_CERT_DIR")
 	for _, name := range pins {
-		// A forwarded SSL_CERT_FILE claims the file slot for the operator's
-		// CA; a resolved hashed dir would silently widen that trust. Only a
-		// FILE that is NOT itself a pin counts — a pinned FILE re-resolves
-		// below, so whatever stale value the environ holds is being replaced
-		// and the dir resolves beside it as one consistent platform root set.
-		if name == "SSL_CERT_DIR" && !filePinned && envNonEmpty(environ, "SSL_CERT_FILE") {
+		if name == "SSL_CERT_DIR" && fileClaimed ||
+			name == "SSL_CERT_FILE" && dirClaimed {
 			out = append(out, name+"=")
 			continue
 		}

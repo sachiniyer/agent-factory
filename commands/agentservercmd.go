@@ -74,8 +74,10 @@ branch before shutdown), not this server's.`,
 		// unset an image ENV — but this process is the parent of every
 		// non-pane child af starts inside (post-worktree hooks, helpers),
 		// and an OpenSSL/rustls reader among them would load the empty
-		// value as a path and drop every root. Re-point the names to a real
-		// bundle or drop them before anything spawns (#7889 R1).
+		// value as a path and drop every root. Neutralize before anything
+		// spawns: re-point to a real bundle, drop when the image has none,
+		// or keep the pin where a forwarded sibling claims the other slot
+		// (#7889 R1).
 		sessionenv.NeutralizeTrustPathPins()
 
 		repo, err := resolveAgentServerRepo(agentServerRepo)

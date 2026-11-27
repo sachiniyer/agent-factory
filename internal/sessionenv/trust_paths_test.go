@@ -242,6 +242,37 @@ func TestExecInvocationKeepsDirPinWhenCertFileForwarded(t *testing.T) {
 	}
 }
 
+// The mirror of the above (#7889, Codex 4722401904): a forwarded
+// SSL_CERT_DIR claims the hashed-dir slot for the operator's restricted CA
+// set — a resolved SSL_CERT_FILE beside it would add the image's bundle
+// roots the operator did not forward. The file pin keeps defined-empty.
+func TestExecInvocationKeepsFilePinWhenCertDirForwarded(t *testing.T) {
+	stubTrustPathStat(t, "/etc/ssl/certs/ca-certificates.crt", "/etc/ssl/certs/")
+	t.Setenv("SSL_CERT_DIR", "/operator/restricted.d")
+	pathDir := t.TempDir()
+	writeExecutableFixture(t, pathDir, "codex")
+	t.Setenv("PATH", pathDir)
+	wantErr := errors.New("stop before exec")
+	var gotEnvironment []string
+	previous := processExec
+	processExec = func(_ string, _ []string, environ []string) error {
+		gotEnvironment = append([]string(nil), environ...)
+		return wantErr
+	}
+	t.Cleanup(func() { processExec = previous })
+
+	// SSL_CERT_DIR rides extras (the operator's claim); SSL_CERT_FILE is a pin.
+	if err := execInvocation([]string{"codex", "1", "SSL_CERT_DIR", "1", "SSL_CERT_FILE", "codex"}); !errors.Is(err, wantErr) {
+		t.Fatalf("execInvocation() error = %v, want test sentinel", err)
+	}
+	if got, ok := envValue(gotEnvironment, "SSL_CERT_DIR"); !ok || got != "/operator/restricted.d" {
+		t.Fatalf("SSL_CERT_DIR = %q (present %v): the forwarded dir must pass verbatim", got, ok)
+	}
+	if got, ok := envValue(gotEnvironment, "SSL_CERT_FILE"); !ok || got != "" {
+		t.Fatalf("SSL_CERT_FILE = %q (present %v): beside a forwarded dir the file stays defined-empty — resolving it would widen the operator's trust", got, ok)
+	}
+}
+
 // #7889 R1: the agent-server is the parent of every non-pane child af
 // starts in the container (post-worktree hooks, helpers). At startup it
 // neutralizes the defined-empty trust pins in its OWN environment: a
@@ -266,13 +297,26 @@ func TestNeutralizeTrustPathPinsFixesTheProcessEnv(t *testing.T) {
 	if got := os.Getenv("SSL_CERT_FILE"); got != "/operator/corporate-ca.pem" {
 		t.Fatalf("SSL_CERT_FILE = %q: a forwarded value must not be re-pointed", got)
 	}
-	// …and beside that forwarded file the dir pin drops to UNSET rather
-	// than resolving — resolving it would hand rustls the image's hashed
-	// roots where the operator's file was meant to stand alone (R5).
+	// …and beside that forwarded file the dir pin keeps DEFINED-EMPTY
+	// rather than resolving or unsetting: resolving would hand rustls the
+	// image's hashed roots where the operator's file was meant to stand
+	// alone, and unset would restore the platform default dir for OpenSSL
+	// and openssl-probe alike — the empty slot must contribute NOTHING (R5).
 	t.Setenv("SSL_CERT_DIR", "")
 	NeutralizeTrustPathPins()
-	if _, ok := os.LookupEnv("SSL_CERT_DIR"); ok {
-		t.Fatalf("SSL_CERT_DIR must drop to unset beside a forwarded SSL_CERT_FILE, got %q", os.Getenv("SSL_CERT_DIR"))
+	if got, ok := os.LookupEnv("SSL_CERT_DIR"); !ok || got != "" {
+		t.Fatalf("SSL_CERT_DIR must stay defined-empty beside a forwarded SSL_CERT_FILE, got %q (present %v)", os.Getenv("SSL_CERT_DIR"), ok)
+	}
+
+	// The mirror: beside a forwarded SSL_CERT_DIR the file pin keeps
+	// defined-empty too — a resolved bundle would add the image's roots to
+	// a trust the operator bounded to the forwarded dir (#7889, Codex
+	// 4722401904).
+	t.Setenv("SSL_CERT_FILE", "")
+	t.Setenv("SSL_CERT_DIR", "/operator/certs.d")
+	NeutralizeTrustPathPins()
+	if got, ok := os.LookupEnv("SSL_CERT_FILE"); !ok || got != "" {
+		t.Fatalf("SSL_CERT_FILE must stay defined-empty beside a forwarded SSL_CERT_DIR, got %q (present %v)", os.Getenv("SSL_CERT_FILE"), ok)
 	}
 
 	// On a store-less image the pin drops to unset — these children have

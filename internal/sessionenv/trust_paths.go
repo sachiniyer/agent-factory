@@ -154,17 +154,24 @@ func resolveTrustPathPin(name string) (entry string, ok bool) {
 // value resolves to a platform bundle that exists, or drops to unset when
 // the image has no store at all — no .env-fill channel reaches these
 // children, so unset is the inert form. A name the operator forwarded
-// (non-empty) is never touched; SSL_CERT_DIR additionally drops to unset
-// rather than resolving whenever SSL_CERT_FILE carries a value, so an
-// operator-forwarded bundle file is not silently widened by the image's
-// hashed roots (rustls trusts only the file when the dir is unset).
+// (non-empty) is never touched.
+//
+// The exception is a claimed sibling: SSL_CERT_FILE and SSL_CERT_DIR are
+// independent slots every reader loads, so beside a non-empty (forwarded)
+// sibling the empty slot contributes NOTHING to the operator's trust — and
+// defined-empty is the only spelling that says so: UNSET would restore the
+// platform default for OpenSSL and openssl-probe alike, and resolved would
+// add the image's roots outright (#7889 R5 + its mirror). The empty slot
+// keeps its defined-empty shape then, deliberately.
 func NeutralizeTrustPathPins() {
+	fileSet := os.Getenv("SSL_CERT_FILE") != ""
+	dirSet := os.Getenv("SSL_CERT_DIR") != ""
 	for _, name := range TrustPathPinNames() {
 		if value, ok := os.LookupEnv(name); !ok || value != "" {
 			continue
 		}
-		if name == "SSL_CERT_DIR" && os.Getenv("SSL_CERT_FILE") != "" {
-			os.Unsetenv(name)
+		if name == "SSL_CERT_DIR" && fileSet ||
+			name == "SSL_CERT_FILE" && dirSet {
 			continue
 		}
 		if resolved := resolveTrustPathValue(name); resolved != "" {
