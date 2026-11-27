@@ -636,29 +636,20 @@ type Instance struct {
 	// durableAccountSwapStore is the agent-server-installed durable backing
 	// for the in-sandbox recorder's terminal record + discard tombstone
 	// (#7793). Set once at agent-server startup
-	// (InstallDurableAccountSwapRecord); nil for the daemon's in-process
-	// local sessions, which have no agent-server process to restart — and
-	// nil for an agent-server whose session dir failed the install's
-	// writability probe, the explicitly-unbacked posture (#7907) that keeps
-	// exactly the no-store behavior for the session's whole life. Read by
-	// agentServerLocked when it builds the localAgentServer, so the recorder
-	// rehydrates before it can serve a request. Guarded by mu.
+	// (InstallDurableAccountSwapRecord), whatever the dir's writability —
+	// an unwritable dir is surfaced loudly by the install's probe (#7907),
+	// and the recorder still rehydrates whatever it can read and
+	// checkpoints exactly as on master — and nil for the daemon's
+	// in-process local sessions, which have no agent-server process to
+	// restart. Read by agentServerLocked when it builds the
+	// localAgentServer, so the recorder rehydrates before it can serve a
+	// request. Guarded by mu.
 	durableAccountSwapStore *accountSwapStore
 	// durableAccountSwapRecord is the recorder state loaded at startup,
 	// applied to the fresh localAgentServer's recorder when it is first
 	// built. Held only so the lazy AgentServer() constructor can rehydrate
 	// without re-reading the file under the instance lock. Guarded by mu.
 	durableAccountSwapRecord accountSwapRecordData
-	// durableAccountSwapRefusal, when non-nil, is the install's decided-once
-	// refusal of every off-box swap for this session's whole life (#7907):
-	// the session dir could neither back the recorder nor be shown free of
-	// an earlier swap's record a repaired-permissions restart could reload —
-	// and an unbacked recorder may only permit a rotation while no earlier
-	// record survives, since a stale named verdict reads to a reconcile as
-	// proof the in-flight swap never ran and rolls it back without probing.
-	// Wired into the localAgentServer's recorder by agentServerLocked, next
-	// to durableAccountSwapStore. Guarded by mu.
-	durableAccountSwapRefusal error
 	// pendingAccountSwapUnwritten marks pendingAccountSwap as rewritten in memory
 	// since it last reached disk: a re-planned replacement's conversation (a
 	// re-mint, a carry demotion). It survives every re-plan for the swap and is

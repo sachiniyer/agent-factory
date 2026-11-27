@@ -21,13 +21,13 @@ import (
 // rehydrates it — otherwise the recorder forgets every verdict on a process
 // restart and answers anonymous "none", which a settled host cannot tell from
 // "still queued" and fences the row forever (#7793). nil for the daemon's
-// in-process local sessions, which have no agent-server process to restart —
-// and nil for an agent-server whose session dir failed the install's
-// writability probe (#7907): the explicitly-unbacked posture, decided once at
-// startup and kept for the session's whole life. An unbacked recorder that
-// could not rule out an earlier record surviving on disk — one a repaired-
-// permissions restart would reload as proof a later swap never ran — also
-// carries unbackedRefusal, and every swap refuses for the session's life.
+// in-process local sessions, which have no agent-server process to restart.
+// A store is wired even when the session dir cannot be written (#7907): the
+// install's probe surfaces that loudly at startup, and the recorder still
+// rehydrates whatever it can read — a record written while the dir was
+// healthy then degraded stays readable — while run()'s checkpoint keeps
+// master's semantics: unlink the old record or refuse the swap, with the
+// degrade logged at the moment it happens.
 type accountSwapRecorder struct {
 	mu      sync.Mutex
 	outcome string
@@ -38,22 +38,12 @@ type accountSwapRecorder struct {
 	// so the request is refused into rolled_back instead (#7773 R1).
 	cancelled string
 	// store, when non-nil, is the durable backing the recorder rehydrates from
-	// at startup and persists to on every terminal transition — and nil is a
-	// stable, decided-once state: a daemon's in-process session never gets a
-	// store, and an agent-server whose session dir failed the install's
-	// writability probe is explicitly unbacked for its whole life (#7907).
-	// See account_swap_recorder_store.go.
+	// at startup and persists to on every terminal transition. It is wired
+	// whatever the dir's writability — an unwritable dir fails loudly at the
+	// checkpoint where the write is needed, never silently (#7907) — and nil
+	// is the daemon's in-process local session, which has no agent-server
+	// process to restart. See account_swap_recorder_store.go.
 	store *accountSwapStore
-	// unbackedRefusal, when non-nil, is returned by run for every swap: the
-	// install could neither back the recorder nor durably invalidate an
-	// earlier swap's record, and an unbacked recorder may only permit a
-	// rotation while no earlier record survives to be reloaded later — a
-	// stale named verdict a repaired-permissions restart rehydrates reads to
-	// a reconcile as proof the in-flight swap never ran, and it rolls the
-	// swap back without probing even when it committed (#7907). The refusal
-	// is decided once at install, names the dir in its message, and never
-	// clears mid-life. It is only ever set when store is nil.
-	unbackedRefusal error
 }
 
 // discardStaged tombstones a swap id: a request that names it afterwards can
@@ -127,19 +117,6 @@ func (r *accountSwapRecorder) run(id string, swap func() (string, error)) (strin
 		r.refuseLocked(id)
 		return "", fmt.Errorf("account swap %s: the staged scope was discarded before the request ran; refusing to rotate", id)
 	}
-	if r.unbackedRefusal != nil {
-		// An unbacked recorder may only permit a rotation while no earlier
-		// record can survive to be reloaded later, and this install could
-		// not durably invalidate one (#7907): every swap refuses for the
-		// session's whole life, decided once — the same session never
-		// changes posture mid-life, not even if the dir is repaired while
-		// the process lives. The refusal still claims this request's
-		// rolled_back under its own id, the honest verdict for a swap that
-		// never ran, so a reconcile gets the matching-id answer rather
-		// than an anonymous none it cannot tell from "still queued".
-		r.refuseLocked(id)
-		return "", fmt.Errorf("account swap %s: %w", id, r.unbackedRefusal)
-	}
 	prevID, prevOutcome, prevProgram := r.id, r.outcome, r.program
 	r.id, r.outcome, r.program = id, swapOutcomePending, "" // this swap's, until it is terminal
 	// Persist this swap's id under a pending verdict BEFORE the rotation
@@ -172,6 +149,14 @@ func (r *accountSwapRecorder) run(id string, swap func() (string, error)) (strin
 			r.id, r.outcome, r.program = prevID, prevOutcome, prevProgram
 			return "", fmt.Errorf("account swap %s: could not checkpoint the swap record before rotating: %w", id, clrErr)
 		}
+		// The degrade is loud at the moment it happens (#7907): the recorder
+		// was wired a store it can no longer write — a dir that degraded
+		// since install — and the checkpoint removed the earlier record so
+		// nothing stale survives to be reloaded. This swap proceeds with no
+		// durable backing: a restart rehydrates nothing and reconciles
+		// through the host's own probes, exactly like a recorder with no
+		// store.
+		log.WarningLog.Printf("account swap %s: the durable swap record degraded mid-swap — the pre-rotation checkpoint could not land (%v), so the earlier record at %s was removed; the swap proceeds without durable backing and a restart rehydrates nothing (#7907)", id, err, r.store.path)
 	}
 	program, err := swap()
 	switch {
