@@ -1,12 +1,14 @@
 package session
 
 import (
+	"bytes"
 	"errors"
 	"os"
 	"path/filepath"
 	"syscall"
 	"testing"
 
+	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session/git"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -1184,4 +1186,118 @@ func TestANonRegularSwapRecordEntryIsMovedAsideWithoutBeingOpened(t *testing.T) 
 			assert.False(t, info.Mode().IsRegular(), "the entry itself moved aside, unopened")
 		})
 	}
+}
+
+// #7907: the recorder is durably backed for its whole life or explicitly not
+// backed — decided at install, never discovered at the first swap. A session
+// dir the install's writability probe cannot write makes the recorder
+// explicitly UNBACKED: the decision is logged loudly with the dir and the
+// error, the stale record is never rehydrated (an unbacked recorder can never
+// update it, so it must not vouch for it), and the first swap runs with
+// exactly the no-store posture a daemon's in-process session (and every
+// session before #7862) has — it is not refused at the pre-rotation
+// checkpoint, and it does not silently lose its backing mid-swap. On master
+// the install wires the store anyway (durableAccountSwapStore is non-nil),
+// no unbacked decision is logged, the stale record IS rehydrated, and the
+// first swap refuses at the checkpoint (persist EACCES + clear EACCES) —
+// every one of those assertions fails there.
+func TestAnUnwritableSessionDirInstallsAnExplicitlyUnbackedRecorder(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root bypasses directory write permissions; the unwritable-dir probe needs a non-root uid")
+	}
+	dir := t.TempDir()
+	key := RebuildTeardownKey("/repo", "title")
+	path := filepath.Join(dir, accountSwapRecordMarkerName(key))
+
+	// A stale terminal record exists — written while the dir was writable.
+	require.NoError(t, newAccountSwapStore(path).save(accountSwapRecordData{
+		Outcome: swapOutcomeCommitted, Program: "claude", ID: "swap-1"}))
+	// The dir stays readable (the record would still load) but cannot be
+	// written — the remote-hook shape where SessionDir is a root-owned
+	// install dir the server's uid cannot write.
+	require.NoError(t, os.Chmod(dir, 0o500))
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
+
+	var logs bytes.Buffer
+	log.CaptureOutput(t, log.WarningLog, "", &logs)
+
+	inst := &Instance{Title: "title"}
+	require.NoError(t, inst.InstallDurableAccountSwapRecord(dir, key),
+		"an unwritable dir still must not stop the agent-server from starting")
+
+	assert.Nil(t, inst.durableAccountSwapStore,
+		"the install decided the recorder is explicitly unbacked (master: wires the store anyway)")
+	assert.Contains(t, logs.String(), dir,
+		"the unbacked decision is logged loudly at install, naming the dir")
+	assert.Contains(t, logs.String(), "UNBACKED",
+		"the loud install log names the posture it decided")
+
+	las, ok := inst.AgentServer().(*localAgentServer)
+	require.True(t, ok)
+	assert.Nil(t, las.acctSwap.store, "an explicitly unbacked recorder has no store")
+	// The stale record is NOT rehydrated — an unbacked recorder can never
+	// update it, so it vouches for nothing: anonymous "none", exactly what a
+	// recorder with no store answers (master: rehydrates {committed,swap-1}).
+	o, _, id := las.acctSwap.status()
+	assert.Equal(t, swapOutcomeNone, o)
+	assert.Empty(t, id)
+
+	// The first swap RUNS — the no-store posture — where master refuses it
+	// at the pre-rotation checkpoint (the persist and the clear both hit
+	// EACCES on a dir that can neither create nor unlink).
+	ran := false
+	_, err := las.acctSwap.run("swap-2", func() (string, error) { ran = true; return "claude", nil })
+	require.NoError(t, err,
+		"an unbacked recorder takes the pre-#7862 posture: the swap runs (master: refuses at the checkpoint)")
+	assert.True(t, ran, "swap() ran — the rotation was not refused")
+	o, _, id = las.acctSwap.status()
+	assert.Equal(t, swapOutcomeCommitted, o)
+	assert.Equal(t, "swap-2", id)
+
+	// The posture is decided once: even with the dir writable again the same
+	// session stays unbacked — a mid-life writability change never silently
+	// re-backs (or un-backs) a recorder.
+	require.NoError(t, os.Chmod(dir, 0o700))
+	_, err = las.acctSwap.run("swap-3", func() (string, error) { return "claude", nil })
+	require.NoError(t, err)
+	d, lerr := newAccountSwapStore(path).load()
+	require.NoError(t, lerr)
+	assert.Equal(t, "swap-1", d.ID,
+		"nothing was ever written for this session — the stale record is untouched")
+}
+
+// The other half of the install's decision: a session dir that proves
+// writable installs a durably-backed recorder exactly as on master — the
+// prior record is loaded — and the writability probe leaves nothing behind:
+// it can never collide with the record or a *.corrupt-* sibling because it
+// carries its own prefix and is removed before the install returns. The
+// backed assertions are unchanged-on-master behavior; the no-leftover
+// assertions pin the probe's own contract.
+func TestAWritableSessionDirInstallsABackedRecorderAndLeavesNoProbeBehind(t *testing.T) {
+	dir := t.TempDir()
+	key := RebuildTeardownKey("/repo", "title")
+	path := filepath.Join(dir, accountSwapRecordMarkerName(key))
+	require.NoError(t, newAccountSwapStore(path).save(accountSwapRecordData{
+		Outcome: swapOutcomeCommitted, Program: "claude", ID: "swap-1"}))
+
+	inst := &Instance{Title: "title"}
+	require.NoError(t, inst.InstallDurableAccountSwapRecord(dir, key))
+	require.NotNil(t, inst.durableAccountSwapStore,
+		"a writable dir installs a durably-backed recorder")
+	las, ok := inst.AgentServer().(*localAgentServer)
+	require.True(t, ok)
+	require.NotNil(t, las.acctSwap.store)
+	o, _, id := las.acctSwap.status()
+	assert.Equal(t, swapOutcomeCommitted, o, "the prior record rehydrated, exactly as on master")
+	assert.Equal(t, "swap-1", id)
+
+	// The literal prefix (not the const) keeps this file compiling on master,
+	// where the backed-path assertions pass as the regression guard they are.
+	probes, err := filepath.Glob(filepath.Join(dir, ".account-swap-write-probe-*"))
+	require.NoError(t, err)
+	assert.Empty(t, probes, "the probe file is removed before the install returns")
+	entries, err := os.ReadDir(dir)
+	require.NoError(t, err)
+	require.Len(t, entries, 1, "the dir holds the record and nothing else")
+	assert.Equal(t, filepath.Base(path), entries[0].Name())
 }

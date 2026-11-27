@@ -21,7 +21,12 @@ import (
 // rehydrates it — otherwise the recorder forgets every verdict on a process
 // restart and answers anonymous "none", which a settled host cannot tell from
 // "still queued" and fences the row forever (#7793). nil for the daemon's
-// in-process local sessions, which have no agent-server process to restart.
+// in-process local sessions, which have no agent-server process to restart —
+// and nil for an agent-server whose session dir failed the install's
+// writability probe (#7907): the explicitly-unbacked posture, decided once at
+// startup and kept for the session's whole life, which is exactly this same
+// no-store behavior rather than a refusal or a silent loss of backing
+// discovered mid-swap.
 type accountSwapRecorder struct {
 	mu      sync.Mutex
 	outcome string
@@ -32,8 +37,11 @@ type accountSwapRecorder struct {
 	// so the request is refused into rolled_back instead (#7773 R1).
 	cancelled string
 	// store, when non-nil, is the durable backing the recorder rehydrates from
-	// at startup and persists to on every terminal transition. See
-	// account_swap_recorder_store.go.
+	// at startup and persists to on every terminal transition — and nil is a
+	// stable, decided-once state: a daemon's in-process session never gets a
+	// store, and an agent-server whose session dir failed the install's
+	// writability probe is explicitly unbacked for its whole life (#7907).
+	// See account_swap_recorder_store.go.
 	store *accountSwapStore
 }
 

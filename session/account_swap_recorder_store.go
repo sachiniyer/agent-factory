@@ -36,6 +36,28 @@ import (
 // recorder that survives its own restart answers the recorded id's own verdict,
 // so the re-reconcile reaches the same verdict the prior process did.
 //
+// The recorder's backing is decided ONCE, at install, and never changes
+// mid-life (#7907): before wiring the store the install proves the session
+// dir can hold the record by actually creating, writing, syncing and removing
+// a probe file in it — never by checking mode bits, which lie (an ACL, a
+// root-squashed mount, or a read-only filesystem can sit under writable
+// modes). A dir that fails the probe — the remote-hook SessionDir the
+// server's uid cannot write is the case that motivated it — installs an
+// explicitly UNBACKED recorder: the decision is logged loudly at startup with
+// the dir and the error, no record file is ever read or written for it, and
+// swaps keep exactly the no-store posture the daemon's in-process sessions
+// (and every session before #7862) already run. The recorder never discovers
+// the unwritable dir at the first swap, where master's store-either-way
+// install either refused every swap at the pre-rotation checkpoint forever
+// or ran the swap silently unbacked. The probe runs BEFORE the load: an
+// unbacked recorder must not rehydrate a record it can never update — that
+// would leave a stale named verdict in memory for a reconcile to
+// misattribute, the wrong-verdict route the pre-rotation checkpoint exists to
+// prevent (#7862 review R1). A dir that proves writable takes the
+// load/quarantine path unchanged, and a write failure that only arrives later
+// (a disk that fills mid-session) is handled by run's checkpoint semantics
+// exactly as on master.
+//
 // Two edges bound the file's life (#7883, #7897). At the START, an entry that
 // is not a regular file, or whose bytes fail to decode or validate, can vouch
 // for nothing: the install moves it aside under a uniquely-named *.corrupt-*
@@ -247,12 +269,76 @@ func (s *accountSwapStore) clear() error {
 	return syncDir(filepath.Dir(s.path))
 }
 
+// accountSwapWriteProbePrefix is the file prefix the install's writability
+// probe uses (#7907): distinct from accountSwapRecordPrefix and the
+// *.corrupt-* quarantine suffix, and the file is removed before the probe
+// returns, so it can never be mistaken for a record or for evidence.
+const accountSwapWriteProbePrefix = ".account-swap-write-probe-"
+
+// probeAccountSwapDirWritable proves dir can hold the swap record durably by
+// running the operations save() depends on — create, write, fsync, close,
+// unlink, then the directory fsync — against a throwaway file, never by
+// checking mode bits: bits lie (an ACL, a root-squashed mount, or a read-only
+// filesystem can sit under writable modes), a create does not. CreateTemp's
+// exclusive create means a symlink planted at the probe path is never
+// followed — it would only fail the create. The probe leaves nothing behind:
+// the file is unlinked before the probe returns, and a process killed in the
+// window leaves one empty .account-swap-write-probe-* sibling that nothing
+// reads.
+func probeAccountSwapDirWritable(dir string) error {
+	probe, err := os.CreateTemp(dir, accountSwapWriteProbePrefix+"*")
+	if err != nil {
+		return fmt.Errorf("session dir %s cannot create a writability probe file: %w", dir, err)
+	}
+	probePath := probe.Name()
+	defer os.Remove(probePath)
+	if err := probe.Chmod(0o600); err != nil {
+		probe.Close()
+		return fmt.Errorf("session dir %s cannot chmod a writability probe file: %w", dir, err)
+	}
+	if _, err := probe.WriteString("probe\n"); err != nil {
+		probe.Close()
+		return fmt.Errorf("session dir %s cannot write a writability probe file: %w", dir, err)
+	}
+	if err := probe.Sync(); err != nil {
+		probe.Close()
+		return fmt.Errorf("session dir %s cannot sync a writability probe file: %w", dir, err)
+	}
+	if err := probe.Close(); err != nil {
+		return fmt.Errorf("session dir %s cannot close a writability probe file: %w", dir, err)
+	}
+	if err := os.Remove(probePath); err != nil {
+		return fmt.Errorf("session dir %s cannot remove a writability probe file: %w", dir, err)
+	}
+	if err := syncDir(dir); err != nil {
+		return fmt.Errorf("session dir %s cannot sync after the writability probe: %w", dir, err)
+	}
+	return nil
+}
+
 // InstallDurableAccountSwapRecord wires the agent-server's swap recorder to a
 // durable file in the session's sandbox dir and rehydrates it from a previous
 // process's terminal record, the way InstallDurableRebuildTeardown wires the
 // rebuild-teardown marker. Called once at agent-server startup (RunAgentServer),
 // before AgentServer() builds the localAgentServer whose recorder it backs, so
 // the recorder rehydrates before any swap request or status read can cross.
+//
+// The recorder is durably backed for its whole life or explicitly not backed,
+// and the choice is made HERE, once (#7907): dir is proven writable by
+// actually creating and removing a probe file (probeAccountSwapDirWritable),
+// never by checking mode bits. A dir the probe refuses — a remote-hook
+// SessionDir the server's uid cannot write is the case that motivated it —
+// installs an explicitly UNBACKED recorder, logged loudly at startup with the
+// dir and the error: no record file is read or written for it, and off-box
+// swaps keep exactly the no-store posture a daemon's in-process session (and
+// every session before #7862) already runs — they are never refused at the
+// pre-rotation checkpoint forever, and they never run silently unbacked. The
+// probe runs before the load on purpose: an unbacked recorder must not
+// rehydrate a record it can never update, which would leave a stale named
+// verdict in memory for a reconcile to misattribute (#7862 review R1). A
+// write failure that only arrives later is handled by run's checkpoint
+// semantics exactly as on master — a backed recorder is never silently
+// demoted to unbacked mid-life.
 //
 // The key is the same session identity RebuildTeardownKey mints, so an
 // installed-af agent-server that shares its session dir with other sessions
@@ -265,6 +351,14 @@ func (i *Instance) InstallDurableAccountSwapRecord(dir, key string) error {
 	}
 	if !validMarkerKey(key) {
 		return fmt.Errorf("account swap record needs a session key (RebuildTeardownKey), got %q", key)
+	}
+	if err := probeAccountSwapDirWritable(dir); err != nil {
+		log.WarningLog.Printf("account swap record: %v — the recorder starts explicitly UNBACKED for this session's whole life: off-box swaps keep the pre-#7862 memory-only posture and a restart reconcile answers through the host's own probes (fail-closed), exactly like a recorder with no store. For a durable record the dir must be writable by the agent-server's uid; restart the agent-server after fixing it (#7907)", err)
+		i.mu.Lock()
+		i.durableAccountSwapStore = nil
+		i.durableAccountSwapRecord = accountSwapRecordData{}
+		i.mu.Unlock()
+		return nil
 	}
 	store := newAccountSwapStore(filepath.Join(dir, accountSwapRecordMarkerName(key)))
 	data, err := store.load()

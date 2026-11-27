@@ -637,7 +637,10 @@ type Instance struct {
 	// for the in-sandbox recorder's terminal record + discard tombstone
 	// (#7793). Set once at agent-server startup
 	// (InstallDurableAccountSwapRecord); nil for the daemon's in-process
-	// local sessions, which have no agent-server process to restart. Read by
+	// local sessions, which have no agent-server process to restart — and
+	// nil for an agent-server whose session dir failed the install's
+	// writability probe, the explicitly-unbacked posture (#7907) that keeps
+	// exactly the no-store behavior for the session's whole life. Read by
 	// agentServerLocked when it builds the localAgentServer, so the recorder
 	// rehydrates before it can serve a request. Guarded by mu.
 	durableAccountSwapStore *accountSwapStore
