@@ -256,48 +256,9 @@ var busyComposerHints = map[string][]string{
 	"❭": {normalizeDelivery("Guide Devin while it works")},
 }
 
-// composerFooterMarkers are the signature phrases of the status and shortcut
-// rows an agent draws BELOW its live composer, normalized and keyed by that
-// agent's composer glyph — the same "its own" discipline busyComposerHints
-// keeps. composerRegion's cut at a content row after a blank gap exists for
-// these rows, and the still-chip proof may keep that cut only when the row
-// provably IS one: a draft that opened with blank lines, or a second draft
-// line after the absorbed Enter's newline, renders the identical shape, and
-// the remedy Enter would submit it with our prompt (#7850 R3). The marker
-// phrases are the stable part of footers whose wording varies with model,
-// path, mode and version; a draft line that happens to carry one aliases as
-// a footer, the same dim-text ambiguity the hint tables already accept.
-var composerFooterMarkers = map[string][]string{
-	// Codex: the model/warning status footer and the shortcut hints it draws
-	// a blank row under the unruled composer.
-	"›": {
-		normalizeDelivery("f2 to view"),       // the warnings hint
-		normalizeDelivery("for shortcuts"),    // "? for shortcuts"
-		normalizeDelivery("for agents"),       // "← for agents"
-		normalizeDelivery("context left"),     // the context meter
-		normalizeDelivery("esc to interrupt"), // the older busy footer
-		normalizeDelivery("Pursuing goal"),    // the agent-mode status
-	},
-	// Claude Code: the vim-mode and permission footer.
-	claudeComposerGlyph: {
-		normalizeDelivery("-- INSERT --"),
-		normalizeDelivery("-- NORMAL --"),
-		normalizeDelivery("-- VISUAL --"),
-		normalizeDelivery("⏵⏵"),
-		normalizeDelivery("bypass permissions"),
-		normalizeDelivery("shift+tab"),
-		normalizeDelivery("for agents"),
-		normalizeDelivery("esc to interrupt"),
-	},
-	// Devin.
-	"❭": {
-		normalizeDelivery("ctrl+o to expand edits"),
-	},
-}
-
 // anchorGlyph reports the composer glyph leading a row — one of the prompt
 // glyphs isComposerGlyphRow accepts — or "" when the row leads with anything
-// else, so footer markers scope to the agent that owns them.
+// else, so footer grammars scope to the agent that owns them.
 func anchorGlyph(row string) string {
 	r, _ := utf8.DecodeRuneInString(normalizeDelivery(row))
 	switch r {
@@ -305,58 +266,6 @@ func anchorGlyph(row string) string {
 		return string(r)
 	}
 	return ""
-}
-
-// composerFooterRow reports whether a normalized row carries one of the
-// footer markers the anchor's agent draws below its composer
-// (composerFooterMarkers). A glyph the table does not key — the plain ">"
-// prompt names no agent — accepts every marker: a marker row is footer-
-// shaped for some agent either way.
-func composerFooterRow(norm, glyph string) bool {
-	markers, keyed := composerFooterMarkers[glyph]
-	if !keyed {
-		for _, list := range composerFooterMarkers {
-			markers = append(markers, list...)
-		}
-	}
-	for _, m := range markers {
-		if strings.Contains(norm, m) {
-			return true
-		}
-	}
-	return false
-}
-
-// agentComposerFooterRow reports whether the raw row that ended a composer
-// region is provably the agent's own footer: a marker row under its own
-// glyph (composerFooterRow), or — under Codex's "›" — the default
-// model-and-path status line ("gpt-5.6-sol max · ~/agent-factory"), which
-// carries no marker phrase but is the shape codexStatusLineModel owns. A
-// draft line with the same `text · ~/path` shape aliases, the same dim-text
-// ambiguity that recognizer and the hint tables already accept.
-func agentComposerFooterRow(raw, glyph string) bool {
-	if composerFooterRow(normalizeDelivery(raw), glyph) {
-		return true
-	}
-	return glyph == "›" && codexStatusLineModel(raw) != ""
-}
-
-// stillChipRegionTail reports why the row that ended a composer region
-// breaks the still-chip proof, or "" when the frame bounds the block for
-// the proof: pane end, a hard border, or the agent's own footer. Any other
-// content row after a blank gap is draft text composerRegion's footer cut
-// hid (#7850 R3) — a draft that opened with blank lines, or a second draft
-// line after the absorbed Enter's newline, renders the same shape, and the
-// remedy Enter would submit it with our prompt.
-func stillChipRegionTail(rows []string, end int, glyph string) string {
-	if end >= len(rows) {
-		return ""
-	}
-	norm := normalizeDelivery(rows[end])
-	if norm == "" || agentComposerFooterRow(rows[end], glyph) {
-		return ""
-	}
-	return fmt.Sprintf("the composer holds content %q below a blank row that is not provably the agent's own footer", norm)
 }
 
 // bareComposerGlyphRow reports whether a row is an empty composer prompt: the
@@ -796,15 +705,15 @@ func stillChipComposer(boundary string, block boundaryBlock, pane string, cursor
 	if i != len(bRegion) {
 		return false, "a composer row present at the Enter boundary is gone from the grace frame"
 	}
-	// The row that ended each region must be a boundary the frame proves —
-	// pane end, a hard border, or the agent's own footer. A content row after
-	// a blank gap that is none of those is draft text the region cut hid: a
-	// draft that opened with blank lines, or a second draft line after the
-	// absorbed Enter's newline, renders exactly this shape (#7850 R3).
-	if why := stillChipRegionTail(bRows, anchor+len(bRegion), anchorGlyph(bRows[anchor])); why != "" {
+	// Every row from each region's cut to the pane end must bound the block
+	// — blank, a frame-column border, or the anchor agent's own footer. Any
+	// other content row is draft text the region cut hid: a draft that
+	// opened with blank lines, or a second draft line after the absorbed
+	// Enter's newline, renders exactly this shape (#7850 R2).
+	if why := stillChipTailAudit(bRows, anchor+len(bRegion), bRows[anchor]); why != "" {
 		return false, why
 	}
-	if why := stillChipRegionTail(gRows, anchor+len(gRegion), anchorGlyph(gRows[anchor])); why != "" {
+	if why := stillChipTailAudit(gRows, anchor+len(gRegion), gRows[anchor]); why != "" {
 		return false, why
 	}
 	// Position: the cursor must sit inside the region, parked where this draft

@@ -367,6 +367,132 @@ func TestStillChipComposerWithholdsDraftTextBelowABlankRow(t *testing.T) {
 	}
 }
 
+// TestStillChipComposerWithholdsDraftRowsBelowABlankRow is the #7850 R2
+// class: content rows after the blank gap must each be the anchor agent's
+// own footer against its WHOLE-ROW grammar — a draft line that merely
+// contains a footer phrase is composer content, and a footer-shaped row
+// never excuses the rows below it.
+func TestStillChipComposerWithholdsDraftRowsBelowABlankRow(t *testing.T) {
+	chipText := normalizeDelivery(codexChip)
+	for name, rows := range map[string][]string{
+		// B3: a draft line carrying a real marker phrase as substring.
+		"B3 draft containing 'for agents'": {
+			"› " + codexChip,
+			"",
+			"  then update the docs for agents",
+		},
+		// B3b: a footer-looking row never excuses the draft rows below it.
+		"B3b footer-shaped first row, draft below": {
+			"› " + codexChip,
+			"",
+			"  esc to interrupt if this is slow",
+			"  then run make deploy-prod",
+			"  and delete the staging bucket",
+		},
+		// B6: a draft line in the "text · ~/path" shape is not the Codex
+		// status line — the model segment carries no version digit.
+		"B6 draft in model/path shape": {
+			"› " + codexChip,
+			"",
+			"  see my notes · ~/notes.md",
+			"  then force-push release",
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			pane := strings.Join(rows, "\n") + "\n"
+			insert := firstContentCol("› " + codexChip)
+			if ok, why := stillChipComposer(pane, chipBlockForTest(pane, chipText), pane, paneCursorState{Visible: true, Row: 0, Col: insert}, chipText); ok {
+				t.Fatalf("ok=true why=%q, want ok=false (the rows below the blank gap are not the agent's own footer)", why)
+			}
+		})
+	}
+}
+
+// TestStillChipComposerAcceptsEveryRealAgentFooter pins the whole-row
+// grammars against the footers the agents actually draw: every row below the
+// composer is provably that agent's own, so the chip-only composer still
+// remedies.
+func TestStillChipComposerAcceptsEveryRealAgentFooter(t *testing.T) {
+	rule := strings.Repeat("─", 80)
+	for name, tc := range map[string]struct {
+		pane   string
+		cursor paneCursorState
+		chip   string
+	}{
+		// Codex's ruled lane: the rule below the composer, then the
+		// model/goal status line and the shortcut hints line.
+		"codex ruled lane": {
+			pane: strings.Join([]string{
+				"  Worked for 1m 32s — 02:01", "",
+				"› " + codexChip,
+				rule,
+				"  GPT-6-Astra ultra · ~/sahara/sahara-clean · Pursuing goal · Main [default]",
+				"  ← for agents · ? for shortcuts ⚠ 1 warning · f2 to view",
+			}, "\n") + "\n",
+			cursor: paneCursorState{Visible: true, Row: 2, Col: contentEndCol("› " + codexChip)},
+			chip:   normalizeDelivery(codexChip),
+		},
+		// Devin: ruled composer, the model/mode/shells footer directly
+		// below the bottom rule.
+		"devin ruled footer": {
+			pane: strings.Join([]string{
+				"one",
+				rule,
+				"❭ " + codexChip,
+				rule,
+				"SWE-2 Max · bypass · 2 shells ↓ ctrl+o to expand edits",
+			}, "\n") + "\n",
+			cursor: paneCursorState{Visible: true, Row: 2, Col: contentEndCol("❭ " + codexChip)},
+			chip:   normalizeDelivery(codexChip),
+		},
+		// Claude's ruled composer with the shortcuts hint row.
+		"claude ? for shortcuts": {
+			pane: strings.Join([]string{
+				"x",
+				rule,
+				"❯ " + claudeChip,
+				rule,
+				"",
+				"  ? for shortcuts",
+			}, "\n") + "\n",
+			cursor: paneCursorState{Visible: true, Row: 2, Col: contentEndCol("❯ " + claudeChip)},
+			chip:   normalizeDelivery(claudeChip),
+		},
+		// Claude's idle permission footer.
+		"claude auto mode footer": {
+			pane: strings.Join([]string{
+				"x",
+				rule,
+				"❯ " + claudeChip,
+				rule,
+				"",
+				"  ⏵⏵ auto mode on (shift+tab to cycle) · ← for agents",
+			}, "\n") + "\n",
+			cursor: paneCursorState{Visible: true, Row: 2, Col: contentEndCol("❯ " + claudeChip)},
+			chip:   normalizeDelivery(claudeChip),
+		},
+		// Claude's │-boxed composer: the ">" first-row prompt inside the
+		// box, the box edge below, then Claude's own footer.
+		"claude boxed composer": {
+			pane: strings.Join([]string{
+				"x",
+				"╭────────────────╮",
+				"│ > " + codexChip + "     │",
+				"╰────────────────╯",
+				"  ? for shortcuts",
+			}, "\n") + "\n",
+			cursor: paneCursorState{Visible: true, Row: 2, Col: contentEndCol("│ > " + codexChip)},
+			chip:   normalizeDelivery(codexChip),
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if ok, why := stillChipComposer(tc.pane, chipBlockForTest(tc.pane, tc.chip), tc.pane, tc.cursor, tc.chip); !ok {
+				t.Fatalf("ok=false why=%q, want ok=true (every row below the composer is provably the agent's own footer)", why)
+			}
+		})
+	}
+}
+
 // TestStillChipComposerAcceptsAgentFooterBelowABlankRow is the positive #7850
 // R3 control: the same shape as a draft that opened with blank lines, but the
 // row below the gap carries a signature the agent draws there — Codex's model/
