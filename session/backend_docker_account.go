@@ -414,22 +414,26 @@ func accountDockerRoutingReason(agent, name string) (string, bool) {
 
 // accountRoutingPathValuedNames names the routing-class entries whose value is
 // a container path the agent's TLS stack reads (a CA bundle or cert file, or a
-// CA directory). Forwarding such a name through session_env_passthrough is not
-// enough on its own — the file or directory the operator points at must also be
-// mounted at the same container path — so the refusal's remedy names the mount
-// alongside the forward and offers "drop the entry" the way the credential-mount
-// path does. SSL_CERT_DIR sits here alongside SSL_CERT_FILE, and GH_CONFIG_DIR
-// alongside them: forwarding a directory does not make its host contents (the
-// host CAs, or gh's stored config and authentication) available inside the
-// container, so the remedy has to name the mount.
+// CA directory), or a Unix socket the agent's keyring reads. Forwarding such a
+// name through session_env_passthrough is not enough on its own — the file,
+// directory, or socket the operator points at must also be mounted at the same
+// container path — so the refusal's remedy names the mount alongside the
+// forward and offers "drop the entry" the way the credential-mount path does.
+// SSL_CERT_DIR sits here alongside SSL_CERT_FILE, and GH_CONFIG_DIR alongside
+// them: forwarding a directory does not make its host contents (the host CAs,
+// or gh's stored config and authentication) available inside the container, so
+// the remedy has to name the mount. DBUS_SESSION_BUS_ADDRESS joins them for its
+// unix:path=/run/user/.../bus form: forwarding the address does not expose the
+// host socket inside the container, so the remedy has to name the mount.
 var accountRoutingPathValuedNames = map[string]struct{}{
-	"SSL_CERT_FILE":        {},
-	"SSL_CERT_DIR":         {},
-	"NODE_EXTRA_CA_CERTS":  {},
-	"REQUESTS_CA_BUNDLE":   {},
-	"CURL_CA_BUNDLE":       {},
-	"CODEX_CA_CERTIFICATE": {},
-	"GH_CONFIG_DIR":        {},
+	"SSL_CERT_FILE":            {},
+	"SSL_CERT_DIR":             {},
+	"NODE_EXTRA_CA_CERTS":      {},
+	"REQUESTS_CA_BUNDLE":       {},
+	"CURL_CA_BUNDLE":           {},
+	"CODEX_CA_CERTIFICATE":     {},
+	"GH_CONFIG_DIR":            {},
+	"DBUS_SESSION_BUS_ADDRESS": {},
 }
 
 // dockerEngineEndpoint resolves the endpoint this provisioner's docker CLI will
