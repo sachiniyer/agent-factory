@@ -208,15 +208,25 @@ func (s heldAliasStore) judge(t *testing.T, held ...string) (AgentConversationDa
 	return got.conv, got.err
 }
 
-// wedgeStatOf makes every stat of exactly path block until the test ends, as
-// one directory on a mount that lost that lookup does, and bounds af's probes
-// at 50ms. Its ancestors and the paths under it answer.
+// wedgeStatOf makes every stat of exactly path hold the test's flight clock
+// out past the probe bound and then wait until the test ends, as one
+// directory on a mount that lost that lookup does. Its ancestors and the
+// paths under it answer. The bound is declared on the flight clock, never a
+// shrunken probeTimeout: the wedged flight times out because the wedge
+// spends a whole bound on it, and every other flight in the test answers
+// whenever its work finishes, since nothing moves the clock while it runs
+// (#7456). A bound shrunk for the whole test reaches flights the wedge does
+// not mean to wedge — the unwedged ancestor stats and the header read the
+// walk past the stuck ancestor still needs — whose work a loaded -race
+// runner can stretch past it, reading a slow but answering lookup as a look
+// that did not happen and leaving the rollout unclassified (#7593, #7904).
 func wedgeStatOf(t *testing.T, path string) {
 	t.Helper()
 	release := make(chan struct{})
-	restoreTimeout := fsprobe.SetProbeTimeoutForTest(50 * time.Millisecond)
+	clock := wedgeFlightClock(t)
 	restoreStat := fsprobe.SetStatPathForTest(func(p string) (os.FileInfo, error) {
 		if p == path {
+			clock.Advance(wedgeHeldOut)
 			<-release
 		}
 		return os.Stat(p)
@@ -227,7 +237,6 @@ func wedgeStatOf(t *testing.T, path string) {
 		// stat comes back.
 		time.Sleep(50 * time.Millisecond)
 		restoreStat()
-		restoreTimeout()
 	})
 }
 
