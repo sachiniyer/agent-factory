@@ -413,12 +413,18 @@ user's real home and mounts it only if it exists, so:
       `GIT_TEMPLATE_DIR`, and plain-docker and SSH clones keep the
       unflagged argv — only the unclaimed credential boundary suppresses
       templates); an `AF_GIT_CONFIG` marker env carries the same roots
-      to the agent-server's own fetch/push/worktree git. The lockdown
-      lifts only when the operator forwards a git-config-route name
-      (`GIT_CONFIG_GLOBAL`/`GIT_CONFIG_SYSTEM`/`GIT_CONFIG_NOSYSTEM`)
-      with a host value — an all-or-nothing claim on the route. An
-      operator-FORWARDED trust name is not a pin and is never unset — the
-      clone needs that CA to reach a private-CA remote.
+      to the agent-server's own fetch/push/worktree git, plus an
+      `AF_GIT_FORWARDED` marker listing the names the operator forwarded
+      WITH a host value — af's git admits a trust name only through that
+      set, so a claimed-but-hostless passthrough entry cannot deliver the
+      image's own `GIT_SSL_NO_VERIFY` (or `GIT_CONFIG_*` pairs) to the
+      credentialed fetch and push. The route-name exemptions are
+      per-slot: forwarding `GIT_CONFIG_GLOBAL`/`GIT_CONFIG_SYSTEM`/
+      `GIT_CONFIG_NOSYSTEM`/`XDG_CONFIG_HOME` with a host value exempts
+      only that slot — the other slots stay af's, and only claiming every
+      slot lifts the lockdown whole. An operator-FORWARDED trust name is
+      not a pin and is never unset — the clone needs that CA to reach a
+      private-CA remote.
     - At the exec itself: the pins also reach the in-container agent-server,
       whose pane launch re-asserts each one **immediately
       before the agent execs** — after tmux's shell hop or a tmux config file

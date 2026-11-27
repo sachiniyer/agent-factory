@@ -234,18 +234,31 @@ func TestRunContainer_ReassertsGitConfigRoots(t *testing.T) {
 	}
 }
 
-// The AF_GIT_CONFIG marker lifts when the operator forwards a
-// git-config-route name WITH a host value — the all-or-nothing claim —
-// while a claimed-but-hostless name emits no -e and the lockdown stands
-// (#7891 R6).
+// The AF_GIT_CONFIG marker keeps carrying the lockdown when the operator
+// forwards ONE git-config-route name with a host value — the per-slot rule
+// (#7891 N1): the claim exempts only its own slot, and AF_GIT_FORWARDED
+// tells the agent-server which names were claimed. Only claiming EVERY
+// route slot lifts the lockdown whole.
 func TestRunContainer_AfGitConfigMarkerFollowsTheClaim(t *testing.T) {
 	t.Setenv("GIT_CONFIG_GLOBAL", "/operator/global.gitconfig")
 	runCalled, _, runArgv := provisionDockerCredentialGrantPassthrough(t, tmux.ProgramGemini,
 		nil, []string{"GIT_CONFIG_GLOBAL"})
 	require.True(t, runCalled)
 	joined := strings.Join(runArgv, "\x00")
+	require.Contains(t, joined, "-e\x00AF_GIT_CONFIG=/root/.af-gitconfig\x00",
+		"one claimed slot must not lift the lockdown — the unclaimed slots stay af's")
+	require.Contains(t, joined, "AF_GIT_FORWARDED=",
+		"the marker must carry the host-valued claim set for the agent-server's git")
+
+	t.Setenv("GIT_CONFIG_SYSTEM", "/operator/gitconfig")
+	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
+	t.Setenv("XDG_CONFIG_HOME", "/operator/xdg")
+	runCalled, _, runArgv = provisionDockerCredentialGrantPassthrough(t, tmux.ProgramGemini,
+		nil, []string{"GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM", "GIT_CONFIG_NOSYSTEM", "XDG_CONFIG_HOME"})
+	require.True(t, runCalled)
+	joined = strings.Join(runArgv, "\x00")
 	require.NotContains(t, joined, "AF_GIT_CONFIG",
-		"a forwarded config-route name claims the whole route — no marker may be emitted")
+		"claiming every route slot lifts the lockdown whole — no marker may be emitted")
 }
 
 // TestRunContainer_OperatorForwardKeepsFirstPartyEndpoint is the

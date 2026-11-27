@@ -87,15 +87,7 @@ func validateAccountDockerRunArgs(args []string, agent string, passthrough []str
 	// run_args for the agent that pins them: a repo -e NAME=… appended after a
 	// forwarded -e NAME is last-wins, which would turn a repository value into
 	// a "claim" — so session_env_passthrough is the only channel they take.
-	// Agents that pin nothing keep their run_args: the GIT_CONFIG_* entries
-	// claude and codex use for their safe.directory workaround are refused
-	// only where the env drops the name to defend af's own git (#7555).
-	// Where the agent's set does carry the name, a repo value aimed at af's
-	// credentialed git is silently dropped — the provisioning preamble
-	// unsets the whole family — while a repo count would animate
-	// repository-supplied indexed pairs for that agent's env (#7891 R5).
 	loaderDenied := sessionenv.AccountLoaderFilledNames(agent)
-	pairGuard := slices.Contains(loaderDenied, "GIT_CONFIG_COUNT")
 	// Every name the operator claims is checked first: the agent-server's
 	// filter admits every passthrough-listed name into the agent's
 	// environment, so a =-valued repo entry naming one — whatever class the
@@ -120,13 +112,14 @@ func validateAccountDockerRunArgs(args []string, agent string, passthrough []str
 				"backend=docker: docker.run_args cannot set %s for an account-scoped %s session because it can override the selected identity",
 				name, agent)
 		}
-		// The env-config injection names are refused where af won't honour
-		// them for this agent (#7891 R5): af's provisioning preamble unsets
-		// them for its own credentialed git, so a repo value aimed at the
-		// clone is silently dropped — and a repo count would animate
-		// repository-supplied indexed pairs. Agents whose env admits the
-		// family (claude/codex's safe.directory workaround, #7555) keep it.
-		if pairGuard && (name == "GIT_CONFIG_COUNT" || name == "GIT_CONFIG_PARAMETERS") {
+		// The env-config injection names are refused for EVERY account
+		// agent (#7891 R5/N3): af's provisioning preamble unsets them for
+		// its own credentialed git and the account env drops them for the
+		// agent's own, so a repo value aimed at either is silently dropped
+		// — while a repo count would animate repository-supplied indexed
+		// pairs. The operator's own claim still works through
+		// session_env_passthrough.
+		if name == "GIT_CONFIG_COUNT" || name == "GIT_CONFIG_PARAMETERS" {
 			return fmt.Errorf(
 				"backend=docker: docker.run_args cannot set %s for an account-scoped %s session because af unsets it for its own credentialed git unless the operator forwarded it — forward it through session_env_passthrough instead, together with the GIT_CONFIG_KEY_n / GIT_CONFIG_VALUE_n pairs a count activates (git fails the count fatally when the pairs are absent)",
 				name, agent)
@@ -136,7 +129,7 @@ func validateAccountDockerRunArgs(args []string, agent string, passthrough []str
 				"backend=docker: docker.run_args cannot set %s for an account-scoped %s session because af pins it defined-empty at the exec boundary unless the operator forwarded it — forward it through session_env_passthrough instead",
 				name, agent)
 		}
-		if pairGuard && (strings.HasPrefix(name, "GIT_CONFIG_KEY_") || strings.HasPrefix(name, "GIT_CONFIG_VALUE_")) {
+		if strings.HasPrefix(name, "GIT_CONFIG_KEY_") || strings.HasPrefix(name, "GIT_CONFIG_VALUE_") {
 			return fmt.Errorf(
 				"backend=docker: docker.run_args cannot set %s for an account-scoped %s session because a forwarded GIT_CONFIG_COUNT would activate repository-supplied git config — forward the pair through session_env_passthrough together with GIT_CONFIG_COUNT (git fails the count fatally when the pairs travel without it)",
 				name, agent)
@@ -435,6 +428,9 @@ func accountDockerRoutingReason(agent, name string) (string, bool) {
 	}
 	if name == "AF_GIT_CONFIG" {
 		return "it selects the global gitconfig af's own credentialed git reads inside the container — af emits its own path (#7891)", true
+	}
+	if name == "AF_GIT_FORWARDED" {
+		return "it names the claims the agent-server's own git admits through — a repo list would smuggle trust names into af's credentialed git (#7891)", true
 	}
 	if _, ok := credentialMountSharedRoutingNames[name]; ok {
 		return "it changes where the agent sends the account credential — a repo-supplied endpoint, proxy, or trust root routes the account's authenticated traffic to a server the repository controls", true

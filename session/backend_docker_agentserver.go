@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"slices"
 	"strings"
 	"time"
 
@@ -74,10 +75,12 @@ func (p *dockerProvisioner) agentServerCommand() (string, error) {
 	// The passthrough portion admits the operator's claims — every name
 	// listed, host-set or not: a claimed-but-hostless name emits no -e and
 	// the image's own ENV value is what the claim then admits, which is
-	// the documented passthrough contract for the AGENT's env. af's own
-	// git is unaffected either way: its filtered hops admit only
-	// allowlisted names. The pins and re-asserts ride the same channel as
-	// before.
+	// the documented passthrough contract for the AGENT's env. For af's own
+	// git the rule is stricter (#7891 N2): the same extras reach
+	// gitCommandEnvironment's filter, so afGitScopedEnvironment drops every
+	// trust-family name the AF_GIT_FORWARDED marker does not list — a
+	// claimed-but-hostless name never reaches af's credentialed git. The
+	// pins and re-asserts ride the same channel as before.
 	agentServerEnvNames := append(
 		append([]string(nil), p.spec.SessionEnvPassthrough...),
 		p.credentialEnvPins...)
@@ -85,15 +88,28 @@ func (p *dockerProvisioner) agentServerCommand() (string, error) {
 		agentServerEnvNames = append(agentServerEnvNames,
 			credentialMountReassertNames(p.agentName(), p.spec.SessionEnvPassthrough, os.Environ())...)
 	}
-	// Admit the af-git-config marker so the agent-server's own git sees the
-	// lockdown the provisioning preamble applied (#7891 R1). Gated on the
-	// credential-carrying paths like the -e emission: on a plain session
-	// af emits nothing and admitting the name would pass an image's own
-	// AF_GIT_CONFIG through to the agent-server env.
-	if _, ok := p.afGitConfigLockdown(p.forwardedEnvNames()); ok &&
-		(len(p.credentialMounts) > 0 || p.spec.Account.Dir != "") {
-		agentServerEnvNames = append(agentServerEnvNames, "AF_GIT_CONFIG")
-	}
+	// afGitMarkerNames are admitted to the agent-server's own environment
+	// through the WRAP's extras only — never --session-env — so the markers
+	// af's git reads cannot reach the agent's panes (#7891 N5). Gated on
+	// the credential-carrying paths like the -e emission: on a plain
+	// session af emits nothing and admitting the names would pass an
+	// image's own AF_GIT_* values through to the agent-server env.
+	afGitMarkerNames := func() []string {
+		forwarded := p.forwardedEnvNames()
+		if (len(p.credentialMounts) == 0 && p.spec.Account.Dir == "") ||
+			!afGitConfigActive(p.afGitConfigClaims(forwarded)) {
+			return nil
+		}
+		// AF_GIT_FORWARDED is admitted only when the -e actually carries a
+		// claim list: with nothing forwarded af emits no -e, and admitting
+		// the name would let an image's own AF_GIT_FORWARDED smuggle trust
+		// names into af's git as forged "claims".
+		names := []string{"AF_GIT_CONFIG"}
+		if len(forwarded) > 0 {
+			names = append(names, "AF_GIT_FORWARDED")
+		}
+		return names
+	}()
 	if p.spec.Account.Dir != "" {
 		// The keep-if-set names must be NAMED for the inner pane's filter or the
 		// decided value never reaches the agent: a forwarded value arrives via
@@ -139,16 +155,18 @@ func (p *dockerProvisioner) agentServerCommand() (string, error) {
 	var err error
 	if _, ok := sessionenv.SupportsAccounts(p.spec.Account.Agent); ok && p.spec.Account.Dir != "" {
 		// The wrap admits the operator's raw claims like the shared path
-		// above. AF_GIT_CONFIG is admitted so the agent-server's own git
-		// sees the lockdown (#7891 R1) — gated the same way so a plain or
-		// operator-claimed session cannot smuggle an image AF_GIT_CONFIG.
+		// above, plus the wrap-only af-git markers — gated the same way so
+		// a plain or operator-claimed session cannot smuggle image
+		// AF_GIT_* values (#7891 R1, N5).
 		accountExtras := append([]string(nil), p.spec.SessionEnvPassthrough...)
-		if _, lockdown := p.afGitConfigLockdown(p.forwardedEnvNames()); lockdown {
-			accountExtras = append(accountExtras, "AF_GIT_CONFIG")
-		}
+		accountExtras = append(accountExtras, afGitMarkerNames...)
 		filteredInner, err = sessionenv.WrapAgentServerAccountCommand(dockerAfBinaryPath, p.spec.Account.Agent, accountExtras, args)
 	} else {
-		filteredInner, err = sessionenv.WrapAgentServerCommand(dockerAfBinaryPath, agentServerEnvNames, args)
+		// wrapExtras carry the agent-server's own admissions: the marker
+		// names stay out of the --session-env args above so they never
+		// reach the panes (#7891 N5).
+		wrapExtras := append(slices.Clone(agentServerEnvNames), afGitMarkerNames...)
+		filteredInner, err = sessionenv.WrapAgentServerCommand(dockerAfBinaryPath, wrapExtras, args)
 	}
 	if err != nil {
 		return "", fmt.Errorf("backend=docker: preparing filtered agent-server environment failed: %w", err)

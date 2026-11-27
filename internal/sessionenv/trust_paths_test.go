@@ -381,13 +381,17 @@ func TestNeutralizeTrustPathPinsFixesTheProcessEnv(t *testing.T) {
 // that would then outrank a config-route CA or widen a dir-only forward.
 func TestNeutralizeTrustPathPinsLeavesStripNamesAlone(t *testing.T) {
 	stubTrustPathStat(t, "/etc/ssl/certs/ca-certificates.crt", "/etc/ssl/certs/")
+	// EMPTY values: if a mutation made these names resolvable pins again,
+	// the empty slot would resolve to the stubbed platform path and this
+	// test fails — a non-empty fixture could not catch that regression
+	// (#7891 N4).
 	for _, name := range TrustStripNames() {
-		t.Setenv(name, "image-supplied-value")
+		t.Setenv(name, "")
 	}
 	NeutralizeTrustPathPins()
 	for _, name := range TrustStripNames() {
-		if got := os.Getenv(name); got != "image-supplied-value" {
-			t.Fatalf("%s = %q: a strip name must never resolve — unset at filtered hops is its only safe spelling (#7891 R3)", name, got)
+		if got, ok := os.LookupEnv(name); !ok || got != "" {
+			t.Fatalf("%s = %q (set=%v): a strip name must never resolve — unset at filtered hops is its only safe spelling (#7891 R3)", name, got, ok)
 		}
 	}
 }

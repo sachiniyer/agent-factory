@@ -1,10 +1,16 @@
 package session
 
 import (
+	"context"
+	"fmt"
 	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 
+	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/internal/sessionenv"
+	"github.com/sachiniyer/agent-factory/session/tmux"
 	"github.com/stretchr/testify/require"
 )
 
@@ -115,26 +121,54 @@ func TestCloneTemplateSuppressionScope(t *testing.T) {
 // #7891 R1: af's own git reads only config files af created. The marker
 // env `-e AF_GIT_CONFIG=<af file>` rides the container env to the
 // agent-server's own git, and the provisioning preamble applies the same
-// lockdown inline — emitted on BOTH credential paths unless the operator
-// forwarded a config-route name with a host value.
+// lockdown inline — emitted on BOTH credential paths while any config-route
+// slot is unclaimed (#7891 N1: a forwarded route name exempts only its own
+// slot; the lockdown lifts whole only when every slot is claimed).
 func TestAfGitConfigMarkerEmittedOnCredentialPaths(t *testing.T) {
-	file, ok := (&dockerProvisioner{credentialMounts: []string{"mount"}}).
-		afGitConfigLockdown(nil)
-	require.True(t, ok, "an unclaimed git-config route must take the lockdown")
-	require.Equal(t, "/root/.af-gitconfig", file)
+	p := &dockerProvisioner{credentialMounts: []string{"mount"}}
+	claimed := p.afGitConfigClaims(nil)
+	require.True(t, afGitConfigActive(claimed), "an unclaimed git-config route must take the lockdown")
+	require.Equal(t, "/root/.af-gitconfig", p.afGitConfigFile())
 
-	file, ok = (&dockerProvisioner{spec: ProvisionSpec{
+	p = &dockerProvisioner{spec: ProvisionSpec{
 		Account: sessionenv.Account{Agent: "codex", Name: "work", Dir: "/acct"},
-	}}).afGitConfigLockdown(nil)
-	require.True(t, ok, "the account path takes the same lockdown")
-	require.Equal(t, "/af-home/.af-gitconfig", file)
+	}}
+	require.Equal(t, "/af-home/.af-gitconfig", p.afGitConfigFile())
 
-	// AF_GIT_CONFIG itself is refused to run_args on both paths — a repo
-	// value would aim af's git at a repo-authored file.
-	err := validateCredentialDockerRunArgs([]string{"-e", "AF_GIT_CONFIG=/repo/x"}, "opencode", nil)
-	require.Error(t, err, "credential path accepted -e AF_GIT_CONFIG")
-	err = validateAccountDockerRunArgs([]string{"-e", "AF_GIT_CONFIG=/repo/x"}, "codex", nil)
-	require.Error(t, err, "account path accepted -e AF_GIT_CONFIG")
+	// Per-slot (#7891 N1): one forwarded route name exempts only its slot —
+	// the marker still carries the lockdown for the rest.
+	t.Setenv("GIT_CONFIG_GLOBAL", "/operator/global.gitconfig")
+	p = &dockerProvisioner{
+		credentialMounts: []string{"mount"},
+		spec:             ProvisionSpec{SessionEnvPassthrough: []string{"GIT_CONFIG_GLOBAL"}},
+	}
+	claimed = p.afGitConfigClaims(p.forwardedEnvNames())
+	require.True(t, claimed["GIT_CONFIG_GLOBAL"], "the forwarded name claims its own slot")
+	require.True(t, afGitConfigActive(claimed),
+		"one claimed slot must NOT lift the lockdown — the others stay af's")
+	args := p.afGitConfigMarkerArgs(p.forwardedEnvNames())
+	require.Contains(t, args, "AF_GIT_CONFIG=/root/.af-gitconfig",
+		"the marker still carries the af-owned file while slots are unclaimed")
+	require.Contains(t, args, "AF_GIT_FORWARDED=GIT_CONFIG_GLOBAL",
+		"the marker carries the host-valued claim set for the agent-server (N2)")
+
+	// Only claiming EVERY route name lifts the lockdown whole.
+	t.Setenv("GIT_CONFIG_SYSTEM", "/operator/gitconfig")
+	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
+	t.Setenv("XDG_CONFIG_HOME", "/operator/xdg")
+	p.spec.SessionEnvPassthrough = afGitConfigRouteNames
+	require.Empty(t, p.afGitConfigMarkerArgs(p.forwardedEnvNames()),
+		"claiming every route slot lifts the lockdown whole — no marker")
+
+	// AF_GIT_CONFIG and AF_GIT_FORWARDED are refused to run_args on both
+	// paths — a repo value would aim af's git at a repo file or smuggle
+	// trust names through a forged claim list.
+	for _, name := range []string{"AF_GIT_CONFIG", "AF_GIT_FORWARDED"} {
+		err := validateCredentialDockerRunArgs([]string{"-e", name + "=/repo/x"}, "opencode", nil)
+		require.Errorf(t, err, "credential path accepted -e %s", name)
+		err = validateAccountDockerRunArgs([]string{"-e", name + "=/repo/x"}, "codex", nil)
+		require.Errorf(t, err, "account path accepted -e %s", name)
+	}
 }
 
 // GIT_CONFIG_NOSYSTEM keeps master's defined-empty pin for the AGENT's own
@@ -172,11 +206,13 @@ func TestGitConfigEnvInjectionStaysNeutralized(t *testing.T) {
 		require.Contains(t, err.Error(), "session_env_passthrough",
 			"the account refusal must name the forward remedy")
 	}
-	// claude keeps its safe.directory workaround — the family is refused
-	// only where af pins it.
-	require.NoError(t,
-		validateAccountDockerRunArgs([]string{"-e", "GIT_CONFIG_COUNT=1"}, "claude", nil),
-		"claude's GIT_CONFIG_* run_args must stay allowed (#7555)")
+	// Every account agent — claude and codex included — is refused the
+	// family (#7891 N3): it reaches no git af honours, so accepting it
+	// silently dropped a repo value that master once honoured.
+	for _, agent := range []string{"claude", "codex"} {
+		err := validateAccountDockerRunArgs([]string{"-e", "GIT_CONFIG_COUNT=1"}, agent, nil)
+		require.Errorf(t, err, "%s: GIT_CONFIG_* run_args must be refused — the value reaches nowhere", agent)
+	}
 }
 
 // #7891 R3: a forwarded GIT_SSL_CAPATH stays git's ONLY CA env — the
@@ -237,4 +273,162 @@ func TestForwardedGitTLSNameExemptsAllGuards(t *testing.T) {
 	pinned := credentialMountPinnedNames("opencode", []string{"GIT_SSL_CAINFO"})
 	require.NotContains(t, pinned, "GIT_SSL_CAINFO",
 		"a forwarded GIT_SSL_CAINFO must leave the pin set")
+}
+
+// provisionDockerCapturingExecs drives dockerRuntime.Provision on a
+// credential-mount session far enough to capture every `docker exec` argv —
+// the provisioning scripts af's credentialed git runs under. The stub answers
+// the steps up to the clone and then fails the agent-server start so the
+// capture stays bounded (#7891 N4: the script-carrying mutations M1 and M3
+// need the argv itself, not a stubbed predicate).
+func provisionDockerCapturingExecs(t *testing.T, program string, passthrough []string) (execScripts []string) {
+	t.Helper()
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	t.Setenv("DOCKER_HOST", "unix:///var/run/docker.sock")
+	t.Setenv("DOCKER_CONTEXT", "")
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	if files, ok := agentCredentialFiles[program]; ok && len(files) > 0 {
+		writeCredFile(t, filepath.Join(home, files[0]))
+	}
+	_ = forceCredentialMountMode(t)
+	cfg := config.DefaultConfig()
+	cfg.DockerMountAgentCredentials = true
+	require.NoError(t, config.SaveConfig(cfg))
+
+	repoRoot := initTempGitRepo(t)
+	writeInRepoConfig(t, repoRoot, map[string]any{
+		"backend": "docker",
+		"docker":  map[string]any{"image": "example.invalid/agent:latest"},
+	})
+	t.Cleanup(SetLookPathForTest(func(string) (string, error) { return "/usr/bin/docker", nil }))
+	t.Cleanup(SetDockerSelfBinaryForTest(filepath.Join(t.TempDir(), "af")))
+	t.Cleanup(SetDockerExecForTest(func(_ context.Context, _ []string, args ...string) ([]byte, error) {
+		switch {
+		case len(args) > 0 && args[0] == "info":
+			return []byte("credential-test-engine\n"), nil
+		case len(args) > 0 && args[0] == "run":
+			return []byte(dockerCreatedID + "\n"), nil
+		case len(args) > 0 && args[0] == "inspect":
+			return []byte("sha256:resolved\n"), nil
+		case len(args) > 1 && args[0] == "image" && args[1] == "inspect":
+			return []byte(`[]`), nil
+		case len(args) > 0 && (args[0] == "cp" || args[0] == "exec"):
+			joined := strings.Join(args, " ")
+			execScripts = append(execScripts, joined)
+			if strings.Contains(joined, "id -u") {
+				return []byte("0:0\n"), nil // the container-user uid probe
+			}
+			if strings.Contains(joined, "agent-server") {
+				return nil, fmt.Errorf("stop after provisioning execs")
+			}
+			return []byte(""), nil
+		default:
+			return nil, fmt.Errorf("unexpected docker call: %v", args)
+		}
+	}))
+	_, _ = (dockerRuntime{}).Provision(ProvisionSpec{
+		RepoRoot:              repoRoot,
+		Title:                 "af-git-exec-capture",
+		Program:               program,
+		CloneURL:              "https://example.invalid/o/r.git",
+		SessionEnvPassthrough: passthrough,
+	})
+	return execScripts
+}
+
+// M1 (#7891 N4): the clone the provisioning boundary runs must carry
+// --template= — a mutation passing `false` instead of the predicate would
+// leave the image's template route open. This reads the argv itself, not
+// the predicate.
+func TestProvisionCloneScriptSuppressesImageTemplate(t *testing.T) {
+	var clone string
+	for _, script := range provisionDockerCapturingExecs(t, tmux.ProgramGemini, nil) {
+		if strings.Contains(script, " git ") && strings.Contains(script, " clone ") {
+			clone = script
+		}
+	}
+	require.NotEmpty(t, clone, "the clone exec argv was not captured")
+	require.Contains(t, clone, "clone --template=",
+		"the clone af runs on a credential session must suppress the image's templates")
+}
+
+// M3 (#7891 N4): the safe.directory write must target BOTH files — the
+// af-owned global af's git reads and the agent's own gitconfig master
+// wrote. Dropping the agent-file write leaves the pane's git broken.
+func TestProvisionTrustWritesBothGitconfigs(t *testing.T) {
+	var trust string
+	for _, script := range provisionDockerCapturingExecs(t, tmux.ProgramGemini, nil) {
+		if strings.Contains(script, "safe.directory") {
+			trust = script
+		}
+	}
+	require.NotEmpty(t, trust, "the safe.directory exec was not captured")
+	require.Contains(t, trust, "--file '/root/.af-gitconfig'",
+		"af's own global must get the safe.directory mark under the lockdown")
+	require.Contains(t, trust, "--file '/root/.gitconfig'",
+		"the agent's own gitconfig must keep master's safe.directory mark (M3)")
+}
+
+// M4 (#7891 N4): on a PLAIN session the AF_GIT_* marker names must not be
+// admitted to the agent-server env — an image's own AF_GIT_CONFIG would
+// otherwise pass through and forge the lockdown root.
+func TestAgentServerCommandAdmitsNoMarkersOnPlainSession(t *testing.T) {
+	p := &dockerProvisioner{spec: ProvisionSpec{Program: "gemini", Title: "t"}}
+	argv, err := p.agentServerCommand()
+	require.NoError(t, err)
+	for _, name := range []string{"AF_GIT_CONFIG", "AF_GIT_FORWARDED"} {
+		require.NotContains(t, argv, name,
+			"a plain session must not admit %s — an image ENV value would forge af's git roots", name)
+	}
+}
+
+// N5 (#7891): the markers ride the WRAP's extras into the agent-server's own
+// env only — never --session-env, which admits names into the agent's panes.
+func TestAgentServerMarkersStayOffSessionEnv(t *testing.T) {
+	// A forwarded claim so the AF_GIT_FORWARDED admission arm is exercised too.
+	t.Setenv("GIT_SSL_CAPATH", "/operator/certs.d")
+	p := &dockerProvisioner{
+		program:          tmux.ProgramGemini,
+		credentialMounts: []string{"mount"},
+		spec: ProvisionSpec{Program: "gemini", Title: "t",
+			SessionEnvPassthrough: []string{"GIT_SSL_CAPATH"}},
+	}
+	argv, err := p.agentServerCommand()
+	require.NoError(t, err)
+	require.Contains(t, argv, "AF_GIT_CONFIG",
+		"the marker must be admitted to the agent-server env through the wrap extras")
+	require.Contains(t, argv, "AF_GIT_FORWARDED",
+		"the forwarded-claim set must reach the agent-server's own git")
+	for _, name := range []string{"AF_GIT_CONFIG", "AF_GIT_FORWARDED"} {
+		require.NotContains(t, argv, "--session-env "+name,
+			"%s must not reach the panes through --session-env (N5)", name)
+		require.NotContains(t, argv, "--session-env-empty "+name,
+			"%s must not be re-asserted for the panes either (N5)", name)
+	}
+
+	// With NOTHING forwarded the claim-list name is not even admitted —
+	// an image's own AF_GIT_FORWARDED could otherwise forge claims (N2).
+	p.spec.SessionEnvPassthrough = nil
+	argv, err = p.agentServerCommand()
+	require.NoError(t, err)
+	require.NotContains(t, argv, "AF_GIT_FORWARDED",
+		"with no host-valued claims the name must not be admitted — an image value would forge them")
+}
+
+// M5 (#7891 N4): the ACCOUNT path emits `-e AF_GIT_CONFIG` too — without it
+// the agent-server's own git on an account session reads image config.
+func TestAccountRunArgsCarryAfGitMarkers(t *testing.T) {
+	runCalled, _, runArgv := provisionDockerAccountImageEnv(t, "codex", nil, nil, nil)
+	require.True(t, runCalled)
+	joined := strings.Join(runArgv, "\x00")
+	require.Contains(t, joined, "-e\x00AF_GIT_CONFIG=",
+		"the account path must emit the af-git lockdown marker (M5)")
+
+	t.Setenv("GIT_SSL_CAPATH", "/operator/certs.d")
+	runCalled, _, runArgv = provisionDockerAccountImageEnv(t, "codex", nil, []string{"GIT_SSL_CAPATH"}, nil)
+	require.True(t, runCalled)
+	joined = strings.Join(runArgv, "\x00")
+	require.Contains(t, joined, "-e\x00AF_GIT_FORWARDED=GIT_SSL_CAPATH\x00",
+		"the account path must emit the forwarded-claim set for the agent-server's git")
 }

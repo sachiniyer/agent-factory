@@ -107,36 +107,61 @@ func (p *dockerProvisioner) afGitConfigFile() string {
 	return p.sessionHome() + "/.af-gitconfig"
 }
 
-// afGitConfigLockdown reports the af-owned gitconfig path af's own git
-// reads, and whether the lockdown applies at all: an operator who forwards
-// ANY git-config-route name (GIT_CONFIG_GLOBAL, GIT_CONFIG_SYSTEM,
-// GIT_CONFIG_NOSYSTEM) has claimed the whole route — af then takes no
-// part of it, and the ambient environment is the operator's claim
-// verbatim. Claim means forwarded-with-value here, the same rule as every
-// other boundary exemption (#7891 R6).
-func (p *dockerProvisioner) afGitConfigLockdown(forwarded []string) (string, bool) {
-	for _, name := range []string{"GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM", "GIT_CONFIG_NOSYSTEM"} {
-		if slices.Contains(forwarded, name) {
-			return "", false
-		}
-	}
-	return p.afGitConfigFile(), true
+// afGitConfigRouteNames are the env names that relocate git's config
+// reads: the global file, the system file, the system kill-switch, and the
+// XDG base that finds the global file (#7891 R1). A name the operator
+// forwarded WITH a host value exempts ONLY its own slot — forwarding
+// GIT_CONFIG_NOSYSTEM no longer reopens the image's global file, and
+// forwarding GIT_CONFIG_GLOBAL no longer reopens the system file (#7891
+// N1, the re-review's per-slot rule).
+var afGitConfigRouteNames = []string{
+	"GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM", "GIT_CONFIG_NOSYSTEM", "XDG_CONFIG_HOME",
 }
 
-// afGitConfigMarkerArgs returns the `-e AF_GIT_CONFIG=<af file>` pair that
-// carries the lockdown into the container env: af's OWN git inside the
-// container (the provisioning clone/config/fetch — whose preamble applies
-// the lockdown inline — and the agent-server's fetch, push and worktree
-// ops via gitCommandEnvironment, #7891 R1) reads only config files af
-// created. Emitted only when the operator forwarded no git-config-route
-// name with a host value — a forward of GIT_CONFIG_GLOBAL,
-// GIT_CONFIG_SYSTEM or GIT_CONFIG_NOSYSTEM is an all-or-nothing claim on
-// the route af then leaves alone.
-func (p *dockerProvisioner) afGitConfigMarkerArgs(forwarded []string) []string {
-	if file, ok := p.afGitConfigLockdown(forwarded); ok {
-		return []string{"-e", "AF_GIT_CONFIG=" + file}
+// afGitConfigClaims maps each git-config route name to whether the
+// operator claimed its slot by forwarding it with a host value — the same
+// forwardedEnvNames set every other boundary exemption keys on (#7891 R6).
+func (p *dockerProvisioner) afGitConfigClaims(forwarded []string) map[string]bool {
+	claimed := make(map[string]bool, len(afGitConfigRouteNames))
+	for _, name := range afGitConfigRouteNames {
+		claimed[name] = slices.Contains(forwarded, name)
 	}
-	return nil
+	return claimed
+}
+
+// afGitConfigActive reports whether the lockdown has any slot left to own:
+// only an operator claiming EVERY route name lifts it whole — the ambient
+// environment is then their claim verbatim.
+func afGitConfigActive(claimed map[string]bool) bool {
+	for _, name := range afGitConfigRouteNames {
+		if !claimed[name] {
+			return true
+		}
+	}
+	return false
+}
+
+// afGitConfigMarkerArgs returns the `-e` pairs carrying the lockdown into
+// the container env: AF_GIT_CONFIG names the af-owned global file and
+// AF_GIT_FORWARDED names the forwarded-with-value set the agent-server's
+// own git must admit through (the host-valued claims — a claimed-but-
+// hostless passthrough name would otherwise deliver the image's value to
+// af's credentialed git, #7891 N2). Emitted whenever any route slot is
+// unclaimed; the agent-server resolves the per-slot exemptions itself
+// from AF_GIT_FORWARDED (#7891 N1).
+func (p *dockerProvisioner) afGitConfigMarkerArgs(forwarded []string) []string {
+	if !afGitConfigActive(p.afGitConfigClaims(forwarded)) {
+		return nil
+	}
+	args := []string{"-e", "AF_GIT_CONFIG=" + p.afGitConfigFile()}
+	if len(forwarded) > 0 {
+		// An empty AF_GIT_FORWARDED= would be the defined-empty pin shape
+		// the classification forbids — and the agent-server reads an absent
+		// marker as the empty set anyway (the strictest rule), so the name
+		// is emitted only when it carries a claim.
+		args = append(args, "-e", "AF_GIT_FORWARDED="+strings.Join(forwarded, ","))
+	}
+	return args
 }
 
 // agentGitConfigFile resolves the global gitconfig the AGENT's own git
@@ -230,11 +255,13 @@ func (p *dockerProvisioner) cloneTemplateSuppression() bool {
 //   - GIT_CONFIG_COUNT/GIT_CONFIG_PARAMETERS: an image ENV count animates
 //     whatever indexed pairs the image ships, spelling http.sslVerify=false
 //     for af's credentialed git.
-//   - The git-config lockdown: af's own git reads only files af created —
-//     GIT_CONFIG_NOSYSTEM=1 plus GIT_CONFIG_GLOBAL pointed at the fresh
-//     af-owned file, with GIT_CONFIG_SYSTEM and XDG_CONFIG_HOME dropped so
-//     neither redirect survives (#7891 R1). Skipped whole when the
-//     operator forwarded any config-route name — an all-or-nothing claim.
+//   - The git-config lockdown, PER SLOT (#7891 R1/N1): af's own git reads
+//     only files af created — GIT_CONFIG_NOSYSTEM=1 plus GIT_CONFIG_GLOBAL
+//     pointed at the fresh af-owned file, with GIT_CONFIG_SYSTEM and
+//     XDG_CONFIG_HOME dropped. A route name the operator forwarded with a
+//     host value exempts only ITS slot; every other slot stays af's. A
+//     claimed GIT_CONFIG_SYSTEM additionally needs ambient NOSYSTEM
+//     dropped or the pin would defeat the claimed file.
 //
 // Plain sessions keep image TLS config verbatim: with no credential
 // carried the image's own CA setup is the operator's choice.
@@ -266,9 +293,25 @@ func (p *dockerProvisioner) trustPathUnpinnedScript(script string) string {
 		}
 		clauses = append(clauses, "unset "+name)
 	}
-	if afGitConfig, ok := p.afGitConfigLockdown(forwarded); ok {
-		clauses = append(clauses, "unset GIT_CONFIG_SYSTEM XDG_CONFIG_HOME")
-		clauses = append(clauses, "export GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL="+shellQuote(afGitConfig))
+	claimed := p.afGitConfigClaims(forwarded)
+	if afGitConfigActive(claimed) {
+		if !claimed["GIT_CONFIG_SYSTEM"] {
+			clauses = append(clauses, "unset GIT_CONFIG_SYSTEM")
+		}
+		if !claimed["XDG_CONFIG_HOME"] {
+			clauses = append(clauses, "unset XDG_CONFIG_HOME")
+		}
+		switch {
+		case !claimed["GIT_CONFIG_NOSYSTEM"] && !claimed["GIT_CONFIG_SYSTEM"]:
+			clauses = append(clauses, "export GIT_CONFIG_NOSYSTEM=1")
+		case claimed["GIT_CONFIG_SYSTEM"] && !claimed["GIT_CONFIG_NOSYSTEM"]:
+			// A claimed system file still loses to an ambient or pinned
+			// NOSYSTEM — drop it so the operator's file is read.
+			clauses = append(clauses, "unset GIT_CONFIG_NOSYSTEM")
+		}
+		if !claimed["GIT_CONFIG_GLOBAL"] {
+			clauses = append(clauses, "export GIT_CONFIG_GLOBAL="+shellQuote(p.afGitConfigFile()))
+		}
 	}
 	if len(clauses) == 0 {
 		return script

@@ -48,11 +48,13 @@ func TestTrustPathUnpinnedScriptUnsetsPinnedTrustNames(t *testing.T) {
 	// The config lockdown (#7891 R1): af's own git reads only files af
 	// created — system config off, global pointed at the af-owned file,
 	// both redirect names dropped.
-	if !strings.Contains(got, "unset GIT_CONFIG_SYSTEM XDG_CONFIG_HOME") {
-		t.Fatalf("the preamble must drop the config-file redirects: %q", got)
-	}
-	if !strings.Contains(got, "export GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL='/root/.af-gitconfig'") {
-		t.Fatalf("the preamble must point af's git at the af-owned global file with system config off: %q", got)
+	for _, clause := range []string{
+		"unset GIT_CONFIG_SYSTEM", "unset XDG_CONFIG_HOME",
+		"export GIT_CONFIG_NOSYSTEM=1", "export GIT_CONFIG_GLOBAL='/root/.af-gitconfig'",
+	} {
+		if !strings.Contains(got, clause) {
+			t.Fatalf("the preamble must own every unclaimed config slot — missing %q: %q", clause, got)
+		}
 	}
 	if !strings.HasPrefix(got, "[ -n ") && !strings.HasPrefix(got, "unset ") {
 		t.Fatalf("the unset clauses must lead the script so every later command sees them: %q", got)
@@ -108,34 +110,95 @@ func TestTrustPathUnpinnedScriptKeepsForwardedValues(t *testing.T) {
 	}
 }
 
-// A forward of any git-config-route name (GIT_CONFIG_GLOBAL here) is an
-// all-or-nothing claim on the whole route — af takes no part of it: no
-// af-owned global, no NOSYSTEM, no dropped redirects. The ambient
-// environment IS the operator's claim (#7891 R1).
-func TestTrustPathUnpinnedScriptLockdownOffWhenRouteClaimed(t *testing.T) {
-	t.Setenv("GIT_CONFIG_GLOBAL", "/operator/global.gitconfig")
-	p := &dockerProvisioner{
-		credentialMounts: []string{"mount"},
-		spec:             ProvisionSpec{SessionEnvPassthrough: []string{"GIT_CONFIG_GLOBAL"}},
-	}
-	got := p.trustPathUnpinnedScript("true")
-	for _, clause := range []string{
-		"export GIT_CONFIG_NOSYSTEM=1", "af-gitconfig",
-		"unset GIT_CONFIG_SYSTEM", "unset XDG_CONFIG_HOME",
-	} {
-		if strings.Contains(got, clause) {
-			t.Fatalf("a forwarded config-route name claims the whole route — %q must not appear: %q", clause, got)
+// A forwarded git-config-route name exempts ONLY its own slot (#7891 N1,
+// the re-review's per-slot rule): forwarding GIT_CONFIG_GLOBAL keeps the
+// operator's file but leaves system config off and the XDG redirect
+// dropped; forwarding GIT_CONFIG_NOSYSTEM keeps the operator's flag while
+// the af-owned global still applies. Only claiming EVERY route name lifts
+// the lockdown whole.
+func TestTrustPathUnpinnedScriptLockdownIsPerSlot(t *testing.T) {
+	newP := func(names ...string) *dockerProvisioner {
+		return &dockerProvisioner{
+			credentialMounts: []string{"mount"},
+			spec:             ProvisionSpec{SessionEnvPassthrough: names},
 		}
 	}
+
+	// Forwarded GIT_CONFIG_GLOBAL: only the global slot is claimed.
+	t.Setenv("GIT_CONFIG_GLOBAL", "/operator/global.gitconfig")
+	got := newP("GIT_CONFIG_GLOBAL").trustPathUnpinnedScript("true")
+	for _, clause := range []string{
+		"export GIT_CONFIG_NOSYSTEM=1", "unset GIT_CONFIG_SYSTEM", "unset XDG_CONFIG_HOME",
+	} {
+		if !strings.Contains(got, clause) {
+			t.Fatalf("forwarding GIT_CONFIG_GLOBAL claims only the global slot — %q must still apply: %q", clause, got)
+		}
+	}
+	if strings.Contains(got, "export GIT_CONFIG_GLOBAL=") {
+		t.Fatalf("the claimed global slot must keep the operator's file — af must not export its own: %q", got)
+	}
+
+	// Forwarded GIT_CONFIG_NOSYSTEM: the flag is the operator's, every file
+	// slot stays af's.
+	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
+	got = newP("GIT_CONFIG_NOSYSTEM").trustPathUnpinnedScript("true")
+	for _, clause := range []string{
+		"export GIT_CONFIG_GLOBAL='/root/.af-gitconfig'",
+		"unset GIT_CONFIG_SYSTEM", "unset XDG_CONFIG_HOME",
+	} {
+		if !strings.Contains(got, clause) {
+			t.Fatalf("forwarding GIT_CONFIG_NOSYSTEM claims only the flag — %q must still apply: %q", clause, got)
+		}
+	}
+	for _, clause := range []string{"export GIT_CONFIG_NOSYSTEM", "unset GIT_CONFIG_NOSYSTEM"} {
+		if strings.Contains(got, clause) {
+			t.Fatalf("the claimed NOSYSTEM slot must keep the operator's value — %q must not appear: %q", clause, got)
+		}
+	}
+
+	// Forwarded GIT_CONFIG_SYSTEM: the claimed file would still lose to an
+	// ambient or pinned NOSYSTEM, so that name is dropped rather than af's
+	// =1 asserted over the operator's claim.
+	t.Setenv("GIT_CONFIG_SYSTEM", "/operator/gitconfig")
+	got = newP("GIT_CONFIG_SYSTEM").trustPathUnpinnedScript("true")
+	if !strings.Contains(got, "export GIT_CONFIG_GLOBAL='/root/.af-gitconfig'") {
+		t.Fatalf("the unclaimed global slot stays af's when SYSTEM is claimed: %q", got)
+	}
+	for _, clause := range []string{
+		"unset GIT_CONFIG_SYSTEM", "export GIT_CONFIG_NOSYSTEM=1",
+	} {
+		if strings.Contains(got, clause) {
+			t.Fatalf("the claimed system slot must survive — %q would defeat it: %q", clause, got)
+		}
+	}
+	if !strings.Contains(got, "unset GIT_CONFIG_NOSYSTEM") {
+		t.Fatalf("an ambient NOSYSTEM must be dropped so the claimed system file is read: %q", got)
+	}
+
+	// Every route name claimed: the lockdown lifts whole — the ambient
+	// environment IS the operator's claim.
+	t.Setenv("GIT_CONFIG_GLOBAL", "/operator/global.gitconfig")
+	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
+	t.Setenv("XDG_CONFIG_HOME", "/operator/xdg")
+	got = newP("GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM", "GIT_CONFIG_NOSYSTEM", "XDG_CONFIG_HOME").
+		trustPathUnpinnedScript("true")
+	for _, clause := range []string{
+		"export GIT_CONFIG_NOSYSTEM", "export GIT_CONFIG_GLOBAL", "af-gitconfig",
+		"unset GIT_CONFIG_SYSTEM", "unset XDG_CONFIG_HOME", "unset GIT_CONFIG_NOSYSTEM",
+	} {
+		if strings.Contains(got, clause) {
+			t.Fatalf("claiming every route name lifts the lockdown — %q must not appear: %q", clause, got)
+		}
+	}
+
 	// A claimed route name that emits no -e (hostless) does NOT claim: the
 	// lockdown still applies so af's git cannot read the image's files.
-	if v, ok := os.LookupEnv("GIT_CONFIG_GLOBAL"); ok {
-		t.Cleanup(func() { os.Setenv("GIT_CONFIG_GLOBAL", v) })
+	for _, name := range []string{"GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM", "GIT_CONFIG_NOSYSTEM", "XDG_CONFIG_HOME"} {
+		os.Unsetenv(name)
 	}
-	os.Unsetenv("GIT_CONFIG_GLOBAL")
-	got = p.trustPathUnpinnedScript("true")
-	if !strings.Contains(got, "export GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL='/root/.af-gitconfig'") {
-		t.Fatalf("a hostless config-route claim must not suppress the lockdown: %q", got)
+	got = newP("GIT_CONFIG_GLOBAL").trustPathUnpinnedScript("true")
+	if !strings.Contains(got, "export GIT_CONFIG_GLOBAL='/root/.af-gitconfig'") {
+		t.Fatalf("a hostless config-route claim must not exempt even its own slot: %q", got)
 	}
 }
 

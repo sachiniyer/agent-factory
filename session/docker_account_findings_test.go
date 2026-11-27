@@ -355,13 +355,22 @@ func TestDockerAccount_RefusesLoaderFilledRunArgsWhereThePinExists(t *testing.T)
 		require.Contains(t, err.Error(), "session_env_passthrough",
 			"the refusal must name the channel a real operator value takes")
 	}
-	// Agents that pin nothing keep their run_args — the GIT_CONFIG_* family is
-	// how their safe.directory workaround is expressed.
+	// Every agent is refused the GIT_CONFIG_* family (#7891 N3): the preamble
+	// unsets it for af's credentialed git and the account env drops it for
+	// the agent's own, so a repo value reaches nowhere — the "workaround"
+	// it once expressed was silently dead. The refusal names the channel a
+	// real operator value takes.
 	for _, agent := range []string{"claude", "codex"} {
-		require.NoError(t, validateAccountDockerRunArgs([]string{"-e", "GIT_CONFIG_COUNT=1"}, agent, nil),
-			"%s pins no keep-if-set name — the pair workaround must keep working", agent)
-		require.NoError(t, validateAccountDockerRunArgs([]string{"-e", "GIT_CONFIG_KEY_0=safe.directory"}, agent, nil))
-		require.NoError(t, validateAccountDockerRunArgs([]string{"-e", "GIT_CONFIG_VALUE_0=/work"}, agent, nil))
+		for _, args := range [][]string{
+			{"-e", "GIT_CONFIG_COUNT=1"},
+			{"-e", "GIT_CONFIG_KEY_0=safe.directory"},
+			{"-e", "GIT_CONFIG_VALUE_0=/work"},
+		} {
+			err := validateAccountDockerRunArgs(args, agent, nil)
+			require.Errorf(t, err, "%s: %v reaches no git af honours — it must be refused", agent, args)
+			require.Contains(t, err.Error(), "session_env_passthrough",
+				"the refusal must name the channel a real operator value takes")
+		}
 	}
 }
 

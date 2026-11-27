@@ -171,6 +171,11 @@ var credentialMountReassertedNames = map[string]struct{}{
 	// at a repository file, so it is refused to run_args and pin-exempt:
 	// af emits the real path itself where the lockdown applies.
 	"AF_GIT_CONFIG": {},
+	// AF_GIT_FORWARDED carries the host-valued claim set the agent-server's
+	// own git admits through — a repo value would smuggle trust names into
+	// af's credentialed git, so it is refused and pin-exempt the same way
+	// (#7891 N2).
+	"AF_GIT_FORWARDED": {},
 }
 
 // credentialMountSharedConfigRootNames are common-allowlist names that

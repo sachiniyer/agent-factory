@@ -18,10 +18,10 @@ func (p *dockerProvisioner) prepareAfGitConfig() error {
 	if len(p.credentialMounts) == 0 && p.spec.Account.Dir == "" {
 		return nil
 	}
-	file, ok := p.afGitConfigLockdown(p.forwardedEnvNames())
-	if !ok {
+	if !afGitConfigActive(p.afGitConfigClaims(p.forwardedEnvNames())) {
 		return nil
 	}
+	file := p.afGitConfigFile()
 	out, err := p.execSessionSh(dockerShortStepTimeout, ": > "+shellQuote(file))
 	if err != nil {
 		return fmt.Errorf("backend=docker: creating af's gitconfig in the container failed: %s: %w", strings.TrimSpace(string(out)), err)
@@ -43,10 +43,10 @@ func (p *dockerProvisioner) prepareAfGitConfig() error {
 func (p *dockerProvisioner) trustWorkspaceDirectories() error {
 	script := `git config --global --add safe.directory "*"`
 	if len(p.credentialMounts) > 0 || p.spec.Account.Dir != "" {
-		if afFile, ok := p.afGitConfigLockdown(p.forwardedEnvNames()); ok {
+		if afGitConfigActive(p.afGitConfigClaims(p.forwardedEnvNames())) {
 			script = fmt.Sprintf(
 				`git config --file %s --add safe.directory "*" && git config --file %s --add safe.directory "*"`,
-				shellQuote(afFile), shellQuote(p.agentGitConfigFile()))
+				shellQuote(p.afGitConfigFile()), shellQuote(p.agentGitConfigFile()))
 		}
 	}
 	out, err := p.execSessionSh(dockerShortStepTimeout, script)
