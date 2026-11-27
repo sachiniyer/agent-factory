@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+
+	"github.com/sachiniyer/agent-factory/log"
 )
 
 // accountSwapRecorder serializes a swap with the question "how did it end?": the
@@ -13,6 +15,13 @@ import (
 // The terminal record also carries the id the swap arrived with, so the daemon
 // asking after a lost response can tell THIS swap's outcome from an earlier
 // one's stale record (#7773).
+//
+// When store is set (the in-sandbox agent-server process), every terminal
+// transition persists the recorder's state to the session dir so a restart
+// rehydrates it — otherwise the recorder forgets every verdict on a process
+// restart and answers anonymous "none", which a settled host cannot tell from
+// "still queued" and fences the row forever (#7793). nil for the daemon's
+// in-process local sessions, which have no agent-server process to restart.
 type accountSwapRecorder struct {
 	mu      sync.Mutex
 	outcome string
@@ -22,6 +31,10 @@ type accountSwapRecorder struct {
 	// request that names it can never commit — its staged scope is gone —
 	// so the request is refused into rolled_back instead (#7773 R1).
 	cancelled string
+	// store, when non-nil, is the durable backing the recorder rehydrates from
+	// at startup and persists to on every terminal transition. See
+	// account_swap_recorder_store.go.
+	store *accountSwapStore
 }
 
 // discardStaged tombstones a swap id: a request that names it afterwards can
@@ -30,6 +43,7 @@ type accountSwapRecorder struct {
 func (r *accountSwapRecorder) discardStaged(id string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	defer r.persistLocked()
 	if id != "" {
 		r.cancelled = id
 	}
@@ -45,6 +59,7 @@ func (r *accountSwapRecorder) discardStaged(id string) {
 func (r *accountSwapRecorder) noteStagedDiscarded(id string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	defer r.persistLocked()
 	r.refuseLocked(id)
 }
 
@@ -65,6 +80,7 @@ func (r *accountSwapRecorder) refuseLocked(id string) {
 func (r *accountSwapRecorder) run(id string, swap func() (string, error)) (string, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	defer r.persistLocked()
 	if id != "" && id == r.cancelled {
 		// The daemon already resolved this swap as not committed and its
 		// staged scope was discarded — the request arrived too late to ever
@@ -110,4 +126,38 @@ func (r *accountSwapRecorder) status() (outcome, program, id string) {
 		return swapOutcomeNone, "", ""
 	}
 	return r.outcome, r.program, r.id
+}
+
+// persistLocked writes the recorder's durable state to its store, when one is
+// installed. Best-effort: a failed write logs a warning — the swap's terminal
+// outcome stands in memory for this process, and a restart re-asks the host
+// the same way the pre-fix recorder did (no worse), rather than failing the
+// swap over a side record. Caller holds r.mu.
+func (r *accountSwapRecorder) persistLocked() {
+	if r.store == nil {
+		return
+	}
+	if err := r.store.save(accountSwapRecordData{
+		Outcome:   r.outcome,
+		Program:   r.program,
+		ID:        r.id,
+		Cancelled: r.cancelled,
+	}); err != nil {
+		log.WarningLog.Printf("account swap recorder: could not persist the terminal record; a restart re-asks the host for it: %v", err)
+	}
+}
+
+// restore rehydrates the recorder from its durable store's loaded state.
+// Called once at agent-server startup, before the recorder serves any request:
+// the fresh process inherits the terminal verdict + tombstone the prior process
+// reached, so a restart reconcile that asks for the recorded swap's outcome
+// gets this swap's own verdict back — not the anonymous "none" a stage-less,
+// prev-less host can never tell from "still queued" (#7793).
+func (r *accountSwapRecorder) restore(d accountSwapRecordData) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.outcome = d.Outcome
+	r.program = d.Program
+	r.id = d.ID
+	r.cancelled = d.Cancelled
 }

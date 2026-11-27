@@ -207,6 +207,11 @@ func (s *acctSwapServer) DiscardAccountNext(swapID string) error {
 	// own terminal verdict — replayable by a daemon whose record clear was
 	// lost (#7793), exactly like the real server's noteStagedDiscarded.
 	s.rec.refuseLocked(swapID)
+	// The real server's discardStaged + noteStagedDiscarded persist the
+	// tombstone when a store is installed (#7793): mirror that here so a
+	// fixture whose recorder is backed by a store survives its own restart
+	// the way the real agent-server does. A no-op when no store is set.
+	s.rec.persistLocked()
 	return nil
 }
 

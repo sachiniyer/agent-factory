@@ -123,7 +123,19 @@ func (i *Instance) agentServerLocked() AgentServer {
 			// state so auto-recovery is never stranded.
 			i.agentSrv = &deadRemoteAgentServer{title: i.Title, teardown: i.runtimeTeardown}
 		default:
-			i.agentSrv = &localAgentServer{inst: i}
+			las := &localAgentServer{inst: i}
+			// Rehydrate the recorder from the durable store the agent-server
+			// process installed at startup (#7793): a restarted agent-server
+			// inherits the terminal verdict + tombstone the prior process
+			// reached, so the durable in-flight record's restart reconcile
+			// gets THIS swap's own verdict back rather than the anonymous
+			// "none" a fresh recorder answers. nil for the daemon's in-process
+			// local sessions, which keep the recorder process-memory.
+			if i.durableAccountSwapStore != nil {
+				las.acctSwap.store = i.durableAccountSwapStore
+				las.acctSwap.restore(i.durableAccountSwapRecord)
+			}
+			i.agentSrv = las
 		}
 	}
 	return i.agentSrv

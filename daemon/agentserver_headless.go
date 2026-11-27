@@ -328,6 +328,15 @@ func RunAgentServer(opts AgentServerOptions, stdout io.Writer) error {
 	if err := instance.InstallDurableRebuildTeardown(sessionDir, session.RebuildTeardownKey(opts.RepoPath, opts.Title)); err != nil {
 		return fmt.Errorf("agent-server: %w", err)
 	}
+	// The swap recorder's terminal record + discard tombstone survive an
+	// agent-server restart in the same session dir (#7793): without this, a
+	// restarted server answers anonymous "none" for a swap it already settled,
+	// a settled host probes scopeUnknown, and the durable in-flight record's
+	// restart reconcile fences the row forever. Rehydrate before AgentServer()
+	// builds the localAgentServer whose recorder it backs.
+	if err := instance.InstallDurableAccountSwapRecord(sessionDir, session.RebuildTeardownKey(opts.RepoPath, opts.Title)); err != nil {
+		return fmt.Errorf("agent-server: %w", err)
+	}
 
 	if opts.AdoptWorktree != "" {
 		if err := instance.AdoptExistingWorktree(opts.AdoptWorktree); err != nil {
