@@ -622,7 +622,11 @@ func stillChipComposer(boundary, pane string, cursor paneCursorState, chipText s
 // with nothing after it) is a hard newline in a user's draft: its glyph is
 // stripped as the leading prompt glyph by the region-equality check, so the
 // region still matches the chip even though the chip starts on a later row —
-// exactly the shape the wrapped-tail acceptance must not fire on.
+// exactly the shape the wrapped-tail acceptance must not fire on. A blank row
+// is tolerated only AFTER the chip is fully matched (the absorbed-Enter
+// continuation row); a blank row interleaved between the chip's wrapped rows
+// is an interior break in the chip and must fail the proof, or a changed
+// composer could pass a wrapped tail that is not the undisturbed draft.
 func chipStartsOnAnchorRow(region []string, chipText string) bool {
 	if len(region) == 0 {
 		return false
@@ -636,7 +640,10 @@ func chipStartsOnAnchorRow(region []string, chipText string) bool {
 	}
 	for j := 1; j < len(region); j++ {
 		if blankComposerRow(region[j]) {
-			continue
+			if acc == chipText {
+				continue
+			}
+			return false
 		}
 		acc += normalizeDelivery(region[j])
 		if !strings.HasPrefix(chipText, acc) {

@@ -266,3 +266,26 @@ func TestStillChipComposerWithholdsWrappedTailBelowABareGlyphAnchor(t *testing.T
 		t.Fatalf("empty first line + chip on the next row, cursor at the chip tail: ok=true why=%q, want ok=false (the chip does not start on the bare-glyph anchor row)", why)
 	}
 }
+
+// TestChipStartsOnAnchorRowRejectsAnInteriorBlank pins the wrapped-tail proof's
+// blank handling: a blank row is tolerated only AFTER the chip is fully matched
+// (the absorbed-Enter continuation row). A blank interleaved between the chip's
+// wrapped rows is an interior break in the chip and must fail the proof —
+// otherwise a composer that gained a blank row mid-chip could pass a wrapped
+// tail that is not the undisturbed draft. (composerRegion never yields an
+// interior blank — it cuts the region at the first content row after a blank —
+// so this guards the helper directly against a future region shape.)
+func TestChipStartsOnAnchorRowRejectsAnInteriorBlank(t *testing.T) {
+	chipText := normalizeDelivery(codexChip)
+	anchorRow := "› [Pasted Content 32"
+	wrapRow := "07 chars]"
+
+	// A trailing blank after the complete chip is the absorbed-Enter row: OK.
+	if !chipStartsOnAnchorRow([]string{anchorRow, wrapRow, ""}, chipText) {
+		t.Fatal("trailing blank after the complete chip should be accepted (the absorbed-Enter continuation row)")
+	}
+	// A blank interleaved between the chip's wrapped rows is an interior break.
+	if chipStartsOnAnchorRow([]string{anchorRow, "", wrapRow}, chipText) {
+		t.Fatal("interior blank between the chip's wrapped rows should be rejected (the chip is not a contiguous draft)")
+	}
+}
