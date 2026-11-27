@@ -105,14 +105,19 @@ func (s *ConversationCaptureSnapshot) attributeCodexRollouts(candidates []string
 // far slower than the 50ms poll keeps a genuinely-foreign sibling from
 // re-walking the process table on every tick while letting a late-visible hold
 // still attribute, and a released positive stop attributing, inside the
-// capture's settle window. Var, not const, so tests can shorten the cadence.
+// capture's settle window. The cadence is measured on the flight clock the
+// lookups behind a verdict run on (fsprobe.FlightNow): a verdict's age is what
+// the evidence's own clock says passed, so a test stands a verdict inside or
+// past the cadence by advancing a clock it owns rather than by shrinking the
+// interval and racing the runner's scheduler (#7908). Var, not const, so a
+// test may still shorten the cadence itself.
 var codexAttributionRejudgeInterval = 250 * time.Millisecond
 
 // codexRolloutVerdict records one judged answer for a candidate path. ours is
-// the verdict; judgedAt is when the descriptor set it came from was read. A
-// verdict of either sign expires after codexAttributionRejudgeInterval: held
-// evidence is re-asked, never pinned, exactly as the follow check re-asks it
-// for recorded rows.
+// the verdict; judgedAt is when the descriptor set it came from was read, on
+// the flight clock those reads run on. A verdict of either sign expires after
+// codexAttributionRejudgeInterval: held evidence is re-asked, never pinned,
+// exactly as the follow check re-asks it for recorded rows.
 type codexRolloutVerdict struct {
 	ours     bool
 	judgedAt time.Time
@@ -127,15 +132,17 @@ type codexRolloutVerdict struct {
 // (Codex /new retires the old thread's descriptor before the process exits),
 // so a cached positive must be re-asked or a single descriptor walk that
 // catches two rollouts held together mints two permanent positives and wedges
-// the capture's ambiguity for the life of the generation. heldFor — the
-// expensive descriptor enumeration — runs only while unjudged or
-// re-judgeable candidates exist; its error makes the unjudged remainder
+// the capture's ambiguity for the life of the generation. The cadence is
+// measured on fsprobe's flight clock, the one the bounded lookups behind a
+// verdict run on, so a test decides inside and past it on a clock it owns.
+// heldFor — the expensive descriptor enumeration — runs only while unjudged
+// or re-judgeable candidates exist; its error makes the unjudged remainder
 // inconclusive ("could not look" must never arrive as "nobody holds it"). So
 // does a candidate whose containment a lookup could not settle (#7378): it
 // gets no verdict, so it is asked again next time rather than cached as
 // another process's thread.
 func judgeCodexRollouts(heldFor func() (map[string]struct{}, error), verdicts map[string]codexRolloutVerdict, mu *sync.Mutex, candidates []string) (attributed []string, inconclusive bool) {
-	now := time.Now()
+	now := fsprobe.FlightNow()
 	mu.Lock()
 	var pending []string
 	for _, path := range candidates {
