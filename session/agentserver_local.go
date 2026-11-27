@@ -132,11 +132,15 @@ func (i *Instance) agentServerLocked() AgentServer {
 			// "none" a fresh recorder answers. nil for the daemon's in-process
 			// local sessions, which keep the recorder process-memory — and for
 			// an agent-server the install left explicitly unbacked (#7907),
-			// which keeps exactly the same no-store posture.
+			// which keeps exactly the same no-store posture. An unbacked
+			// recorder that could not rule out an earlier record surviving on
+			// disk carries the refusal instead: every swap refuses for the
+			// session's life.
 			if i.durableAccountSwapStore != nil {
 				las.acctSwap.store = i.durableAccountSwapStore
 				las.acctSwap.restore(i.durableAccountSwapRecord)
 			}
+			las.acctSwap.unbackedRefusal = i.durableAccountSwapRefusal
 			i.agentSrv = las
 		}
 	}

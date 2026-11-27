@@ -336,7 +336,11 @@ func RunAgentServer(opts AgentServerOptions, stdout io.Writer) error {
 	// builds the localAgentServer whose recorder it backs. The install proves
 	// the session dir writable first (#7907): a dir this server's uid cannot
 	// write leaves the recorder explicitly unbacked — decided and logged at
-	// startup, never discovered at the first swap.
+	// startup, never discovered at the first swap. An unbacked recorder that
+	// cannot durably invalidate an earlier record refuses every off-box swap
+	// for the session's life instead, since a stale verdict a repaired-
+	// permissions restart rehydrates would settle a later swap without
+	// probing.
 	if err := instance.InstallDurableAccountSwapRecord(sessionDir, session.RebuildTeardownKey(opts.RepoPath, opts.Title)); err != nil {
 		return fmt.Errorf("agent-server: %w", err)
 	}

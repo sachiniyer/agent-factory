@@ -24,9 +24,10 @@ import (
 // in-process local sessions, which have no agent-server process to restart —
 // and nil for an agent-server whose session dir failed the install's
 // writability probe (#7907): the explicitly-unbacked posture, decided once at
-// startup and kept for the session's whole life, which is exactly this same
-// no-store behavior rather than a refusal or a silent loss of backing
-// discovered mid-swap.
+// startup and kept for the session's whole life. An unbacked recorder that
+// could not rule out an earlier record surviving on disk — one a repaired-
+// permissions restart would reload as proof a later swap never ran — also
+// carries unbackedRefusal, and every swap refuses for the session's life.
 type accountSwapRecorder struct {
 	mu      sync.Mutex
 	outcome string
@@ -43,6 +44,16 @@ type accountSwapRecorder struct {
 	// writability probe is explicitly unbacked for its whole life (#7907).
 	// See account_swap_recorder_store.go.
 	store *accountSwapStore
+	// unbackedRefusal, when non-nil, is returned by run for every swap: the
+	// install could neither back the recorder nor durably invalidate an
+	// earlier swap's record, and an unbacked recorder may only permit a
+	// rotation while no earlier record survives to be reloaded later — a
+	// stale named verdict a repaired-permissions restart rehydrates reads to
+	// a reconcile as proof the in-flight swap never ran, and it rolls the
+	// swap back without probing even when it committed (#7907). The refusal
+	// is decided once at install, names the dir in its message, and never
+	// clears mid-life. It is only ever set when store is nil.
+	unbackedRefusal error
 }
 
 // discardStaged tombstones a swap id: a request that names it afterwards can
@@ -115,6 +126,19 @@ func (r *accountSwapRecorder) run(id string, swap func() (string, error)) (strin
 		// commit (#7773 R1).
 		r.refuseLocked(id)
 		return "", fmt.Errorf("account swap %s: the staged scope was discarded before the request ran; refusing to rotate", id)
+	}
+	if r.unbackedRefusal != nil {
+		// An unbacked recorder may only permit a rotation while no earlier
+		// record can survive to be reloaded later, and this install could
+		// not durably invalidate one (#7907): every swap refuses for the
+		// session's whole life, decided once — the same session never
+		// changes posture mid-life, not even if the dir is repaired while
+		// the process lives. The refusal still claims this request's
+		// rolled_back under its own id, the honest verdict for a swap that
+		// never ran, so a reconcile gets the matching-id answer rather
+		// than an anonymous none it cannot tell from "still queued".
+		r.refuseLocked(id)
+		return "", fmt.Errorf("account swap %s: %w", id, r.unbackedRefusal)
 	}
 	prevID, prevOutcome, prevProgram := r.id, r.outcome, r.program
 	r.id, r.outcome, r.program = id, swapOutcomePending, "" // this swap's, until it is terminal

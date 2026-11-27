@@ -43,20 +43,26 @@ import (
 // root-squashed mount, or a read-only filesystem can sit under writable
 // modes). A dir that fails the probe — the remote-hook SessionDir the
 // server's uid cannot write is the case that motivated it — installs an
-// explicitly UNBACKED recorder: the decision is logged loudly at startup with
-// the dir and the error, no record file is ever read or written for it, and
+// explicitly UNBACKED recorder, decided and logged loudly at startup with the
+// dir and the error. The probe runs BEFORE the load, and an unbacked install
+// carries a second rule: a record can only vouch for the swaps that happened
+// while it was being kept, so an unbacked recorder may permit a rotation only
+// while NO earlier record can survive on disk for a later restart to reload.
+// A stale named verdict the repaired-permissions restart rehydrates reads to
+// a reconcile as proof the in-flight swap never ran — it discards and rolls
+// the swap back without probing, even when the swap committed. The install
+// therefore removes any earlier record durably first: when the removal lands,
 // swaps keep exactly the no-store posture the daemon's in-process sessions
-// (and every session before #7862) already run. The recorder never discovers
-// the unwritable dir at the first swap, where master's store-either-way
-// install either refused every swap at the pre-rotation checkpoint forever
-// or ran the swap silently unbacked. The probe runs BEFORE the load: an
-// unbacked recorder must not rehydrate a record it can never update — that
-// would leave a stale named verdict in memory for a reconcile to
-// misattribute, the wrong-verdict route the pre-rotation checkpoint exists to
-// prevent (#7862 review R1). A dir that proves writable takes the
-// load/quarantine path unchanged, and a write failure that only arrives later
-// (a disk that fills mid-session) is handled by run's checkpoint semantics
-// exactly as on master.
+// (and every session before #7862) already run; when it cannot land — the
+// unwritable dir that motivated this — every off-box swap refuses with an
+// actionable message naming the dir, for the session's whole life. Either way
+// the recorder never discovers the unwritable dir at the first swap, where
+// master's store-either-way install refused every swap at the pre-rotation
+// checkpoint forever or ran the swap silently unbacked — and a record the
+// unbacked life left behind can never be misread as a verdict for a swap it
+// outlived. A dir that proves writable takes the load/quarantine path
+// unchanged, and a write failure that only arrives later (a disk that fills
+// mid-session) is handled by run's checkpoint semantics exactly as on master.
 //
 // Two edges bound the file's life (#7883, #7897). At the START, an entry that
 // is not a regular file, or whose bytes fail to decode or validate, can vouch
@@ -285,7 +291,13 @@ const accountSwapWriteProbePrefix = ".account-swap-write-probe-"
 // the file is unlinked before the probe returns, and a process killed in the
 // window leaves one empty .account-swap-write-probe-* sibling that nothing
 // reads.
-func probeAccountSwapDirWritable(dir string) error {
+//
+// The probe is a var seam — the way newHookSandboxProvisioner stands in for
+// the transport — so a test can exercise the install's unbacked/refused
+// decision (a dir whose record can be removed while its probe fails, as a
+// full disk gives) without a genuinely unwritable dir. Production never
+// overrides it.
+var probeAccountSwapDirWritable = func(dir string) error {
 	probe, err := os.CreateTemp(dir, accountSwapWriteProbePrefix+"*")
 	if err != nil {
 		return fmt.Errorf("session dir %s cannot create a writability probe file: %w", dir, err)
@@ -329,16 +341,25 @@ func probeAccountSwapDirWritable(dir string) error {
 // never by checking mode bits. A dir the probe refuses — a remote-hook
 // SessionDir the server's uid cannot write is the case that motivated it —
 // installs an explicitly UNBACKED recorder, logged loudly at startup with the
-// dir and the error: no record file is read or written for it, and off-box
-// swaps keep exactly the no-store posture a daemon's in-process session (and
-// every session before #7862) already runs — they are never refused at the
-// pre-rotation checkpoint forever, and they never run silently unbacked. The
-// probe runs before the load on purpose: an unbacked recorder must not
-// rehydrate a record it can never update, which would leave a stale named
-// verdict in memory for a reconcile to misattribute (#7862 review R1). A
-// write failure that only arrives later is handled by run's checkpoint
-// semantics exactly as on master — a backed recorder is never silently
-// demoted to unbacked mid-life.
+// dir and the error: no record file is read or written for it. But a record
+// can only vouch for the swaps that happened while it was being kept, so an
+// unbacked recorder may permit a rotation only while NO earlier record can
+// survive on disk for a later restart — after the dir is repaired — to
+// reload: a stale named verdict reads to a reconcile as proof the in-flight
+// swap never ran, and it discards and rolls the swap back without probing,
+// even when the swap committed (Codex P1 on this PR). The install therefore
+// removes any earlier record durably first. When the removal lands — or no
+// record exists — swaps keep exactly the no-store posture a daemon's
+// in-process session (and every session before #7862) already runs, and a
+// restart then finds no record and takes master's probe path. When it cannot
+// land — the unwritable dir itself — every off-box swap refuses with an
+// actionable message naming the dir, for the session's whole life; the same
+// session never changes posture mid-life. The probe runs before the load on
+// purpose: an unbacked recorder must not rehydrate a record it can never
+// update, which would leave a stale named verdict in memory for a reconcile
+// to misattribute (#7862 review R1). A write failure that only arrives later
+// is handled by run's checkpoint semantics exactly as on master — a backed
+// recorder is never silently demoted to unbacked mid-life.
 //
 // The key is the same session identity RebuildTeardownKey mints, so an
 // installed-af agent-server that shares its session dir with other sessions
@@ -353,7 +374,38 @@ func (i *Instance) InstallDurableAccountSwapRecord(dir, key string) error {
 		return fmt.Errorf("account swap record needs a session key (RebuildTeardownKey), got %q", key)
 	}
 	if err := probeAccountSwapDirWritable(dir); err != nil {
-		log.WarningLog.Printf("account swap record: %v — the recorder starts explicitly UNBACKED for this session's whole life: off-box swaps keep the pre-#7862 memory-only posture and a restart reconcile answers through the host's own probes (fail-closed), exactly like a recorder with no store. For a durable record the dir must be writable by the agent-server's uid; restart the agent-server after fixing it (#7907)", err)
+		store := newAccountSwapStore(filepath.Join(dir, accountSwapRecordMarkerName(key)))
+		// An unbacked recorder may permit a rotation only while NO earlier
+		// record can survive on disk for a later restart — after the dir is
+		// repaired — to reload: a stale named verdict reads to a reconcile as
+		// proof the in-flight swap never ran, and it discards and rolls the
+		// swap back without probing, even when the swap committed (#7907,
+		// Codex P1). So any earlier record must be invalidated durably — an
+		// unlink and the dir fsync — before unbacked swaps may run, and when
+		// even that cannot land, off-box swaps refuse for the session's whole
+		// life. A stat that proves no record exists invalidates nothing, so
+		// the unbacked posture stands without touching the dir; a stat that
+		// cannot tell is treated like a record that exists.
+		_, statErr := os.Lstat(store.path)
+		var clrErr error
+		if statErr == nil || !os.IsNotExist(statErr) {
+			clrErr = store.clear()
+		}
+		switch {
+		case os.IsNotExist(statErr):
+			log.WarningLog.Printf("account swap record: %v — the recorder starts explicitly UNBACKED for this session's whole life: no earlier record exists that a later restart could reload, so off-box swaps keep the pre-#7862 memory-only posture and a restart reconcile answers through the host's own probes (fail-closed), exactly like a recorder with no store. For a durable record the dir must be writable by the agent-server's uid; restart the agent-server after fixing it (#7907)", err)
+		case clrErr != nil:
+			refusal := fmt.Errorf("the session dir %s cannot hold the durable swap record (%v) and the earlier swap record at %s could not be durably removed (%v): an unbacked recorder may only permit a rotation while no earlier record survives for a later restart to reload, so off-box swaps refuse for this session's whole life — give the agent-server's uid write permission on the dir and restart the agent-server (#7907)", dir, err, store.path, clrErr)
+			log.WarningLog.Printf("account swap record: %v", refusal)
+			i.mu.Lock()
+			i.durableAccountSwapStore = nil
+			i.durableAccountSwapRecord = accountSwapRecordData{}
+			i.durableAccountSwapRefusal = refusal
+			i.mu.Unlock()
+			return nil
+		default:
+			log.WarningLog.Printf("account swap record: %v — the recorder starts explicitly UNBACKED for this session's whole life: an earlier swap's record was invalidated durably so none survives for a later restart to reload. Off-box swaps keep the pre-#7862 memory-only posture and a restart reconcile answers through the host's own probes (fail-closed), exactly like a recorder with no store. For a durable record the dir must be writable by the agent-server's uid; restart the agent-server after fixing it (#7907)", err)
+		}
 		i.mu.Lock()
 		i.durableAccountSwapStore = nil
 		i.durableAccountSwapRecord = accountSwapRecordData{}
