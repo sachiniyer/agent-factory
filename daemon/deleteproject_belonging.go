@@ -239,10 +239,19 @@ type rootBelongingVerdict struct {
 }
 
 // absentBelongingProbeFlights bounds an unresponsive identity-root probe to
-// one parked observation per root. Callers time out independently, and a
-// later probe joins the parked one instead of stranding a second goroutine on
-// the same dead filesystem (the checkoutMarkerReadFlights contract, applied
-// to the whole probe).
+// one parked observation per (root, checkoutID) pair. Callers time out
+// independently, and a later probe of the SAME question joins the parked one
+// instead of stranding a second goroutine on the same dead filesystem (the
+// checkoutMarkerReadFlights contract, applied to the whole probe). The key
+// carries the checkout id because the verdict DEPENDS on it: sharing by root
+// alone would hand one absent-rooted row's delete another row's cleared
+// verdict, deregistering a project whose marker was never compared (#7914
+// review).
+type rootBelongingProbeKey struct {
+	root       string
+	checkoutID string
+}
+
 var absentBelongingProbeFlights sync.Map
 
 type rootBelongingObservation struct {
@@ -251,12 +260,13 @@ type rootBelongingObservation struct {
 }
 
 func awaitRootBelonging(root, checkoutID string) rootBelongingVerdict {
+	key := rootBelongingProbeKey{root: root, checkoutID: checkoutID}
 	obs := &rootBelongingObservation{done: make(chan struct{})}
-	actual, loaded := absentBelongingProbeFlights.LoadOrStore(root, obs)
+	actual, loaded := absentBelongingProbeFlights.LoadOrStore(key, obs)
 	if !loaded {
 		go func() {
 			obs.verdict = probeRootBelonging(root, checkoutID)
-			absentBelongingProbeFlights.CompareAndDelete(root, obs)
+			absentBelongingProbeFlights.CompareAndDelete(key, obs)
 			close(obs.done)
 		}()
 	} else {
@@ -276,6 +286,13 @@ func awaitRootBelonging(root, checkoutID string) rootBelongingVerdict {
 		}
 	}
 }
+
+// probeRootBelongingHookForTest, when non-nil, runs at the top of every
+// probeRootBelonging inside the parked observation, so a test can hold two
+// concurrent deletes' probes open at once and see whether a second (root,
+// checkoutID) ran its own probe or joined another row's parked verdict
+// (#7914 review: the flight key must carry the checkout id).
+var probeRootBelongingHookForTest func(root string)
 
 // probeRootBelonging runs the whole per-root probe as filesystem reads only —
 // no git subprocess, and nothing from the worktree ledger. It answers which
@@ -301,6 +318,9 @@ func awaitRootBelonging(root, checkoutID string) rootBelongingVerdict {
 // deliberately accepted rather than treated as proof, because the
 // alternative makes a missing directory proof of ownership.
 func probeRootBelonging(root, checkoutID string) rootBelongingVerdict {
+	if probeRootBelongingHookForTest != nil {
+		probeRootBelongingHookForTest(root)
+	}
 	info, err := os.Stat(root)
 	switch {
 	case errors.Is(err, os.ErrNotExist):

@@ -299,10 +299,25 @@ func CheckoutIDsInCommonDir(commonDir string) (ids []string, present bool, err e
 		return nil, false, fmt.Errorf("list checkout markers under %s: %w", filepath.Join(commonDir, checkoutMarkerDirName), err)
 	}
 	for _, entry := range entries {
-		if entry.IsDir() || !strings.HasPrefix(entry.Name(), checkoutMarkerFilePrefix) {
+		name := entry.Name()
+		if entry.IsDir() || strings.HasSuffix(name, ".lock") {
+			// WithFileLock leaves a persistent <marker>.lock beside every
+			// marker; it is a companion, never evidence (#7914 review: a
+			// prefix-only match reads the empty lock and the invalid-ID error
+			// discards every valid marker beside it).
 			continue
 		}
-		id, exists, err := readCheckoutID(filepath.Join(commonDir, checkoutMarkerDirName, entry.Name()))
+		if !checkoutMarkerFileName(name) {
+			if strings.HasPrefix(name, checkoutMarkerFilePrefix) {
+				// Marker-shaped but not a marker name — a stranded temp
+				// write or an id scheme this build does not know. It could
+				// hold the row's id, so it is unverifiable evidence, never
+				// "absent" and never silently skipped.
+				return nil, false, fmt.Errorf("unverifiable checkout-marker file %s under %s", name, filepath.Join(commonDir, checkoutMarkerDirName))
+			}
+			continue
+		}
+		id, exists, err := readCheckoutID(filepath.Join(commonDir, checkoutMarkerDirName, name))
 		if err != nil {
 			return nil, false, err
 		}
@@ -311,6 +326,26 @@ func CheckoutIDsInCommonDir(commonDir string) (ids []string, present bool, err e
 		}
 	}
 	return ids, true, nil
+}
+
+// checkoutMarkerFileName reports whether name is a real checkout marker file —
+// checkoutMarkerFilePrefix followed by exactly one home digest — and not one
+// of its companions: ensureCheckoutID's WithFileLock leaves a persistent
+// <marker>.lock beside every marker, and AtomicWriteFile can strand a temp
+// name, both of which a prefix-only match would read as markers and fail on
+// (#7914 review: the lock is empty, so readCheckoutID's invalid-ID error
+// would discard every valid marker alongside it).
+func checkoutMarkerFileName(name string) bool {
+	rest, ok := strings.CutPrefix(name, checkoutMarkerFilePrefix)
+	if !ok || len(rest) != opaqueIDBytes*2 {
+		return false
+	}
+	for _, c := range rest {
+		if !('0' <= c && c <= '9' || 'a' <= c && c <= 'f') {
+			return false
+		}
+	}
+	return true
 }
 
 // projectBindingIdentityRaceHookForTest, when non-nil, runs between the probes

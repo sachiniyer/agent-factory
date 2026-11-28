@@ -478,3 +478,115 @@ func TestOrdinaryDeleteIsNotRefusedByAnUnrelatedBareSession(t *testing.T) {
 		t.Fatalf("the unrelated session must stay live")
 	}
 }
+
+// TestConcurrentAbsentRootDeletesProbeEachRootWithItsOwnCheckoutID pins the
+// ownership flight's key: an observation is shared only between callers
+// asking the SAME question — the same root AND the same checkout id. Two
+// absent-rooted rows carry different recorded checkouts, and the live
+// session's repo holds the SECOND row's marker: a verdict shared by root
+// alone would hand the second delete the first row's "cleared", letting its
+// row come off while the session it exists to protect stays live (#7914
+// review).
+func TestConcurrentAbsentRootDeletesProbeEachRootWithItsOwnCheckoutID(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	installOptionsRecordingBackend(t)
+
+	// Row A's marker lives in a clone nothing else here shares; probing the
+	// session's repo against it clears.
+	parentA := testguard.CanonicalTempDir(t)
+	_, worktreeA, _ := bareWorktreeFixture(t, parentA)
+	rowA := registerTestProject(t, worktreeA)
+	clearRecordedRepoID(t, rowA.ID)
+	if err := os.RemoveAll(worktreeA); err != nil {
+		t.Fatalf("remove row A's recorded root: %v", err)
+	}
+
+	// Row C's marker lives in the clone the live session keys under; probing
+	// the same root against ITS checkout id must answer owner.
+	parentC := testguard.CanonicalTempDir(t)
+	cloneC, worktreeC, siblingC := bareWorktreeFixture(t, parentC)
+	rowC := registerTestProject(t, worktreeC)
+	cID := repoID(t, cloneC)
+	clearRecordedRepoID(t, rowC.ID)
+	if err := os.RemoveAll(worktreeC); err != nil {
+		t.Fatalf("remove row C's recorded root: %v", err)
+	}
+
+	manager, err := NewManager(config.DefaultConfig())
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	liveSessionUnderIdentity(t, manager, cID, "c-session", siblingC)
+
+	// Park every probe at entry until a SECOND probe run arrives, or a
+	// deadline well under the await budget frees the parked one. A flight
+	// keyed by root alone produces exactly one probe run — row C's delete
+	// joins row A's parked observation and inherits its cleared verdict;
+	// keyed by (root, checkoutID) each delete runs its own, and the second
+	// entry is what releases both.
+	entered := make(chan struct{}, 4)
+	release := make(chan struct{})
+	firstSeen := make(chan struct{})
+	previousHook := probeRootBelongingHookForTest
+	probeRootBelongingHookForTest = func(string) {
+		entered <- struct{}{}
+		<-release
+	}
+	go func() {
+		<-entered
+		close(firstSeen)
+		select {
+		case <-entered:
+		case <-time.After(1500 * time.Millisecond):
+		}
+		close(release)
+	}()
+	t.Cleanup(func() { probeRootBelongingHookForTest = previousHook })
+
+	type outcome struct {
+		deregistered bool
+		err          error
+	}
+	deleteA := make(chan outcome, 1)
+	go func() {
+		result, err := manager.DeleteProject(DeleteProjectRequest{RepoPath: worktreeA})
+		deleteA <- outcome{deregistered: result.Deregistered, err: err}
+	}()
+
+	// Row A's probe must be parked before row C's delete asks its question —
+	// the buggy key then parks THE observation row C's delete would join.
+	<-firstSeen
+	deleteC := make(chan outcome, 1)
+	go func() {
+		result, err := manager.DeleteProject(DeleteProjectRequest{RepoPath: worktreeC})
+		deleteC <- outcome{deregistered: result.Deregistered, err: err}
+	}()
+
+	outA := <-deleteA
+	if outA.err != nil || !outA.deregistered {
+		t.Fatalf("row A's delete probes the session's repo against a marker it does not hold and completes: %+v", outA)
+	}
+	outC := <-deleteC
+	if outC.err == nil || outC.deregistered {
+		t.Fatalf("row C's delete must run its own probe, find its own checkout marker in the session's repo, and refuse — a shared verdict deregistered it over a live session")
+	}
+	for _, want := range []string{"nothing was changed", "c-session", "checkout marker"} {
+		if !strings.Contains(outC.err.Error(), want) {
+			t.Fatalf("row C's refusal must name %q: %v", want, outC.err)
+		}
+	}
+
+	dir, dirErr := config.ProjectRegistryDir()
+	if dirErr != nil {
+		t.Fatalf("ProjectRegistryDir: %v", dirErr)
+	}
+	if _, statErr := os.Stat(filepath.Join(dir, rowC.ID)); statErr != nil {
+		t.Fatalf("row C must survive the refused delete: %v", statErr)
+	}
+	manager.mu.Lock()
+	inst := manager.instances[daemonInstanceKey(cID, "c-session")]
+	manager.mu.Unlock()
+	if inst == nil || inst.GetStatus() != session.Running {
+		t.Fatalf("the live session under the probed repo must stay live")
+	}
+}
