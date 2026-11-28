@@ -175,6 +175,28 @@ func TestTrustPathUnpinnedScriptLockdownIsPerSlot(t *testing.T) {
 		t.Fatalf("an ambient NOSYSTEM must be dropped so the claimed system file is read: %q", got)
 	}
 
+	// Forwarded XDG_CONFIG_HOME with the global slot unclaimed: the claimed
+	// file only reaches git if af's GIT_CONFIG_GLOBAL redirect points AT it
+	// — a GIT_CONFIG_GLOBAL export replaces the XDG global too, so af's own
+	// file would silently shadow the operator's claim (Codex on #7891 N1).
+	// The image's ~/.gitconfig stays shadowed either way.
+	t.Setenv("XDG_CONFIG_HOME", "/operator/xdg")
+	got = newP("XDG_CONFIG_HOME").trustPathUnpinnedScript("true")
+	if !strings.Contains(got, `export GIT_CONFIG_GLOBAL="${XDG_CONFIG_HOME%/}/git/config"`) {
+		t.Fatalf("an XDG-only claim must redirect af's global at the claimed XDG file: %q", got)
+	}
+	for _, clause := range []string{"af-gitconfig", "unset XDG_CONFIG_HOME"} {
+		if strings.Contains(got, clause) {
+			t.Fatalf("the claimed XDG slot must reach git — %q would shadow or drop it: %q", clause, got)
+		}
+	}
+	for _, clause := range []string{"export GIT_CONFIG_NOSYSTEM=1", "unset GIT_CONFIG_SYSTEM"} {
+		if !strings.Contains(got, clause) {
+			t.Fatalf("the unclaimed slots stay af's under an XDG claim — %q must still apply: %q", clause, got)
+		}
+	}
+	os.Unsetenv("XDG_CONFIG_HOME")
+
 	// Every route name claimed: the lockdown lifts whole — the ambient
 	// environment IS the operator's claim.
 	t.Setenv("GIT_CONFIG_GLOBAL", "/operator/global.gitconfig")

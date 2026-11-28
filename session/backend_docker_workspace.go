@@ -36,17 +36,22 @@ func (p *dockerProvisioner) prepareAfGitConfig() error {
 // host's gitconfig does not apply; it runs before the clone, as it always did.
 //
 // Under the git-config lockdown the write splits: `--global` would resolve
-// the preamble's GIT_CONFIG_GLOBAL — af's own file, which DOES need the
-// mark for af's credentialed git — while the agent's own git keeps reading
-// the file master's write hit (agentGitConfigFile), which gets the same
-// mark through an explicit --file (#7891 R4).
+// the preamble's GIT_CONFIG_GLOBAL — which the preamble points at af's own
+// file, the claimed XDG file, or leaves as the operator's forwarded global,
+// exactly the file af's credentialed git will read — while the agent's own
+// git keeps reading the file master's write hit (agentGitConfigFile), which
+// gets the same mark through an explicit --file (#7891 R4). The
+// $GIT_CONFIG_GLOBAL write is best-effort: a claimed global is the
+// operator's own file, possibly mounted read-only or absent from the
+// container, and it may already carry the mark — a failed write must not
+// abort a session their file already serves (Codex on #7891 N1).
 func (p *dockerProvisioner) trustWorkspaceDirectories() error {
 	script := `git config --global --add safe.directory "*"`
 	if len(p.credentialMounts) > 0 || p.spec.Account.Dir != "" {
 		if afGitConfigActive(p.afGitConfigClaims(p.forwardedEnvNames())) {
 			script = fmt.Sprintf(
-				`git config --file %s --add safe.directory "*" && git config --file %s --add safe.directory "*"`,
-				shellQuote(p.afGitConfigFile()), shellQuote(p.agentGitConfigFile()))
+				`git config --file "$GIT_CONFIG_GLOBAL" --add safe.directory "*" 2>/dev/null || true; git config --file %s --add safe.directory "*"`,
+				shellQuote(p.agentGitConfigFile()))
 		}
 	}
 	out, err := p.execSessionSh(dockerShortStepTimeout, script)

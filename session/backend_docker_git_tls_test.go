@@ -354,8 +354,10 @@ func TestProvisionCloneScriptSuppressesImageTemplate(t *testing.T) {
 }
 
 // M3 (#7891 N4): the safe.directory write must target BOTH files — the
-// af-owned global af's git reads and the agent's own gitconfig master
-// wrote. Dropping the agent-file write leaves the pane's git broken.
+// global af's git actually reads ($GIT_CONFIG_GLOBAL as the preamble
+// resolves it: af's own file, the claimed XDG file, or the operator's
+// forwarded global) and the agent's own gitconfig master wrote. Dropping
+// the agent-file write leaves the pane's git broken.
 func TestProvisionTrustWritesBothGitconfigs(t *testing.T) {
 	var trust string
 	for _, script := range provisionDockerCapturingExecs(t, tmux.ProgramGemini, nil) {
@@ -364,10 +366,50 @@ func TestProvisionTrustWritesBothGitconfigs(t *testing.T) {
 		}
 	}
 	require.NotEmpty(t, trust, "the safe.directory exec was not captured")
-	require.Contains(t, trust, "--file '/root/.af-gitconfig'",
-		"af's own global must get the safe.directory mark under the lockdown")
+	require.Contains(t, trust, `--file "$GIT_CONFIG_GLOBAL"`,
+		"af's effective global must get the safe.directory mark under the lockdown")
+	require.Contains(t, trust, "export GIT_CONFIG_GLOBAL='/root/.af-gitconfig'",
+		"with nothing claimed the preamble must resolve that global to af's file")
 	require.Contains(t, trust, "--file '/root/.gitconfig'",
 		"the agent's own gitconfig must keep master's safe.directory mark (M3)")
+}
+
+// Codex on #7891 N1: under the per-slot rule a forwarded GIT_CONFIG_GLOBAL
+// can stand while the lockdown stays active — agentGitConfigFile must then
+// resolve the operator's file (the agent's git reads it), not the pinned
+// session-home default. A hostless claim suppresses the pin but emits no
+// -e, so the image ENV is what master's ambient resolution saw.
+func TestAgentGitConfigFileFollowsTheForwardedGlobal(t *testing.T) {
+	t.Cleanup(SetDockerExecForTest(func(_ context.Context, _ []string, args ...string) ([]byte, error) {
+		if len(args) > 0 && args[0] == "image" {
+			return []byte("[]"), nil
+		}
+		return nil, fmt.Errorf("unexpected docker call: %v", args)
+	}))
+	p := &dockerProvisioner{
+		credentialMounts: []string{"mount"},
+		spec: ProvisionSpec{Program: "gemini",
+			SessionEnvPassthrough: []string{"GIT_CONFIG_GLOBAL"}},
+	}
+
+	// Forwarded WITH a host value: the operator's file is the agent's global.
+	t.Setenv("GIT_CONFIG_GLOBAL", "/operator/global.gitconfig")
+	require.Equal(t, "/operator/global.gitconfig", p.agentGitConfigFile())
+
+	// A run_args -e is last-wins over the bare forward, as in the argv.
+	p.runArgs = []string{"-e", "GIT_CONFIG_GLOBAL=/runargs.gitconfig"}
+	require.Equal(t, "/runargs.gitconfig", p.agentGitConfigFile())
+	p.runArgs = nil
+
+	// Hostless claim: no -e is emitted, the pin is suppressed, and with no
+	// image ENV the default stands — exactly the ambient resolution.
+	os.Unsetenv("GIT_CONFIG_GLOBAL")
+	require.Equal(t, p.sessionHome()+"/.gitconfig", p.agentGitConfigFile())
+
+	// No claim at all: the credential-mount re-assert pins the default.
+	require.Equal(t, p.sessionHome()+"/.gitconfig",
+		(&dockerProvisioner{credentialMounts: []string{"mount"},
+			spec: ProvisionSpec{Program: "gemini"}}).agentGitConfigFile())
 }
 
 // M4 (#7891 N4): on a PLAIN session the AF_GIT_* marker names must not be

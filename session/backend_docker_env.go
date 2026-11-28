@@ -168,17 +168,25 @@ func (p *dockerProvisioner) afGitConfigMarkerArgs(forwarded []string) []string {
 // reads on this session — the file trustWorkspaceDirectories appends
 // safe.directory to so the pane's git keeps working in the bind-mounted
 // workspace exactly as on master (#7891 R4). On the credential-mount path
-// af re-asserts GIT_CONFIG_GLOBAL to the session home's .gitconfig (unless
-// forwarded — but a forward means the lockdown is off and this helper is
-// never consulted). On the account path the ambient name survives: a repo
-// run_args -e is last-wins over the image ENV, matching where master's
-// `git config --global` write landed.
+// af re-asserts GIT_CONFIG_GLOBAL to the session home's .gitconfig UNLESS
+// the operator passthrough-claimed it — and under the per-slot rule the
+// lockdown can stay active while exactly that claim stands, so the claim
+// must resolve here too (Codex on #7891 N1): a run_args -e is last-wins
+// over the bare forward's host value, then the image ENV — the same
+// ambient resolution master's `git config --global` write followed. On
+// the account path the ambient name survives, so the same run_args →
+// image ENV chain applies without the claim check.
 func (p *dockerProvisioner) agentGitConfigFile() string {
 	def := p.sessionHome() + "/.gitconfig"
-	if p.spec.Account.Dir == "" {
+	if p.spec.Account.Dir == "" &&
+		!slices.Contains(p.spec.SessionEnvPassthrough, "GIT_CONFIG_GLOBAL") {
 		return def
 	}
 	if value := dockerRunArgsEnvValue(p.runArgs, "GIT_CONFIG_GLOBAL"); value != "" {
+		return value
+	}
+	if value := os.Getenv("GIT_CONFIG_GLOBAL"); value != "" &&
+		slices.Contains(p.forwardedEnvNames(), "GIT_CONFIG_GLOBAL") {
 		return value
 	}
 	for _, entry := range p.dockerImageEnv() {
@@ -309,7 +317,16 @@ func (p *dockerProvisioner) trustPathUnpinnedScript(script string) string {
 			// NOSYSTEM — drop it so the operator's file is read.
 			clauses = append(clauses, "unset GIT_CONFIG_NOSYSTEM")
 		}
-		if !claimed["GIT_CONFIG_GLOBAL"] {
+		switch {
+		case claimed["GIT_CONFIG_GLOBAL"]:
+			// The operator's file is af's global — keep it.
+		case claimed["XDG_CONFIG_HOME"]:
+			// GIT_CONFIG_GLOBAL replaces the XDG global too, so an
+			// XDG-only claim would deliver nothing under af's own file —
+			// point the redirect at the claimed file instead, which also
+			// keeps the image's ~/.gitconfig shadowed (Codex on #7891 N1).
+			clauses = append(clauses, `export GIT_CONFIG_GLOBAL="${XDG_CONFIG_HOME%/}/git/config"`)
+		default:
 			clauses = append(clauses, "export GIT_CONFIG_GLOBAL="+shellQuote(p.afGitConfigFile()))
 		}
 	}

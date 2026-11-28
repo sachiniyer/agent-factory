@@ -422,7 +422,17 @@ user's real home and mounts it only if it exists, so:
       per-slot: forwarding `GIT_CONFIG_GLOBAL`/`GIT_CONFIG_SYSTEM`/
       `GIT_CONFIG_NOSYSTEM`/`XDG_CONFIG_HOME` with a host value exempts
       only that slot — the other slots stay af's, and only claiming every
-      slot lifts the lockdown whole. An operator-FORWARDED trust name is
+      slot lifts the lockdown whole. Two claim details follow from git's
+      own resolution: an XDG-only claim redirects `GIT_CONFIG_GLOBAL` at
+      `$XDG_CONFIG_HOME/git/config` (a `GIT_CONFIG_GLOBAL` export replaces
+      the XDG global too, so af's own file would shadow the claim — the
+      redirect still suppresses the image's `~/.gitconfig`), and the
+      provisioning `safe.directory` write targets `$GIT_CONFIG_GLOBAL`
+      after the preamble resolves it — af's file, the claimed XDG file,
+      or the operator's forwarded global, best-effort since a claimed
+      file may be read-only or unmounted — plus the agent's own resolved
+      global, which `agentGitConfigFile` follows through the same claim.
+      An operator-FORWARDED trust name is
       not a pin and is never unset — the clone needs that CA to reach a
       private-CA remote.
     - At the exec itself: the pins also reach the in-container agent-server,

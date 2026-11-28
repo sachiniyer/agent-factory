@@ -341,10 +341,27 @@ func afGitScopedEnvironment(environ []string) []string {
 	if !forwarded["GIT_CONFIG_NOSYSTEM"] && !forwarded["GIT_CONFIG_SYSTEM"] {
 		out = append(out, "GIT_CONFIG_NOSYSTEM=1")
 	}
-	if !forwarded["GIT_CONFIG_GLOBAL"] {
-		out = append(out, "GIT_CONFIG_GLOBAL="+file)
+	if forwarded["GIT_CONFIG_GLOBAL"] {
+		return out
 	}
-	return out
+	if xdg := afGitEnvValue(environ, "XDG_CONFIG_HOME"); forwarded["XDG_CONFIG_HOME"] && xdg != "" {
+		// GIT_CONFIG_GLOBAL replaces the XDG global too, so an XDG-only
+		// claim delivers nothing under af's own file — redirect af's git
+		// at the claimed file, which also keeps the image's ~/.gitconfig
+		// shadowed (Codex on #7891 N1).
+		return append(out, "GIT_CONFIG_GLOBAL="+strings.TrimSuffix(xdg, "/")+"/git/config")
+	}
+	return append(out, "GIT_CONFIG_GLOBAL="+file)
+}
+
+// afGitEnvValue reads name's value out of a KEY=VALUE environ slice.
+func afGitEnvValue(environ []string, name string) string {
+	for _, entry := range environ {
+		if value, ok := strings.CutPrefix(entry, name+"="); ok {
+			return value
+		}
+	}
+	return ""
 }
 
 // afGitForwardedSet parses the comma-separated host-valued name set the

@@ -108,6 +108,22 @@ func TestAfGitScopedEnvironmentHonoursClaimedSlots(t *testing.T) {
 	if !slices.Contains(got, "GIT_CONFIG_GLOBAL=/af-home/.af-gitconfig") {
 		t.Fatalf("the unclaimed global slot still takes af's file: %v", got)
 	}
+
+	// A claimed XDG_CONFIG_HOME with the global slot unclaimed: af's git
+	// must read the claimed file — GIT_CONFIG_GLOBAL replaces the XDG
+	// global, so pointing it at af's own file would silently shadow the
+	// operator's claim. The redirect delivers it instead (Codex on N1).
+	in = []string{"XDG_CONFIG_HOME=/operator/xdg"}
+	t.Setenv(afGitForwardedEnvName, "XDG_CONFIG_HOME")
+	got = afGitScopedEnvironment(in)
+	if !slices.Contains(got, "GIT_CONFIG_GLOBAL=/operator/xdg/git/config") {
+		t.Fatalf("an XDG-only claim must redirect af's global at the claimed XDG file: %v", got)
+	}
+	for _, unwanted := range []string{"GIT_CONFIG_GLOBAL=/af-home/.af-gitconfig", "GIT_CONFIG_GLOBAL=/image/.gitconfig"} {
+		if slices.Contains(got, unwanted) {
+			t.Fatalf("the claimed XDG slot must not be shadowed: %v", got)
+		}
+	}
 }
 
 func TestAfGitScopedEnvironmentUnmarkedIsIdentity(t *testing.T) {
