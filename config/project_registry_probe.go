@@ -128,7 +128,16 @@ func resolveProjectBindingContext(ctx context.Context, path string) (projectBind
 	// provisional id and miss state already stored under the real one (#3530
 	// review id 3914971775). Every other probe here has already succeeded, so
 	// a failure at this one is transient — surface it and let the caller retry.
-	identityRepo, identityErr := RepoFromPath(resolved)
+	//
+	// This re-check is a git probe like the ones above, so it carries the
+	// caller's ctx for the same reason they do: a caller that promised a
+	// deadline — the daemon's re-attribution probe, reaching here through
+	// ProjectCheckoutMatchesContext — must not be held past it by a git wedged
+	// on a stale mount. RepoFromPath is RepoFromPathContext(context.Background(),
+	// ...), so the unbounded wrapper silently drops that deadline; the bounded
+	// form keeps it (#3599, restored after #3530 introduced this re-check
+	// without it).
+	identityRepo, identityErr := RepoFromPathContext(ctx, resolved)
 	if identityErr != nil {
 		return projectBinding{}, fmt.Errorf("resolve repository identity for %q: %w", resolved, identityErr)
 	}

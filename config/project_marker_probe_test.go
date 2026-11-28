@@ -3,6 +3,7 @@ package config
 import (
 	"context"
 	"fmt"
+	"os/exec"
 	"path/filepath"
 	"testing"
 	"time"
@@ -113,4 +114,97 @@ func TestResolveProjectBindingContextResolvesTheSameBinding(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, binding, fromCtx,
 		"the two entry points must differ only in cancellation, never in what they resolve")
+}
+
+// TestResolveProjectBindingContextBoundsAWedgedIdentityReCheck is the regression
+// for the bound loss #3530 introduced into #3599's deadline-bounded resolver.
+//
+// resolveProjectBindingContext carries the caller's ctx to every git probe it
+// forks itself, but the identity re-check at the end of resolution — added by
+// #3530 to refuse a binding whose path changed repositories between the two
+// probe batches — used RepoFromPath, which is RepoFromPathContext(context.Background(),
+// ...). A git wedged inside that re-check ran under a context that is never done,
+// so the caller's deadline could not cancel it and WaitDelay's timer never
+// started. The daemon's re-attribution probe, which reaches this function
+// through ProjectCheckoutMatchesContext with a per-step deadline, would then
+// wedge forever holding the record's probe slot — the exact state #3599 was
+// written to eliminate.
+//
+// The wedge lands precisely inside the identity re-check: a git shim passes
+// every probe through to the real git except the SECOND pure
+// `rev-parse --show-toplevel` (the one without --git-common-dir). Occurrence 1
+// is the context-carrying toplevel inside resolveMainRepoRootContext; occurrence
+// 2 is the identity re-check's identical toplevel inside RepoFromPathContext.
+// Occurrence 1 succeeds, so the wedge is reached only by the re-check — the one
+// probe that used to drop the deadline.
+func TestResolveProjectBindingContextBoundsAWedgedIdentityReCheck(t *testing.T) {
+	root := gitRepoForProbe(t)
+
+	// Resolve the real git BEFORE the shim goes on PATH, so the shim can
+	// delegate the probes it does not wedge (same pattern as
+	// installGitWithLingeringHelper).
+	realGit, err := exec.LookPath("git")
+	require.NoError(t, err)
+
+	// The wedge sleeps in the BACKGROUND with its pid recorded: CommandContext
+	// kills the shim shell, never the shell's children (#3594 review).
+	pidFile := filepath.Join(t.TempDir(), "wedged.pids")
+	reapShimChildren(t, pidFile)
+	countFile := filepath.Join(t.TempDir(), "toplevel.count")
+	installFakeGit(t, fmt.Sprintf(`#!/bin/sh
+# Pass every probe through to the real git except the SECOND pure
+# 'rev-parse --show-toplevel' (no --git-common-dir): occurrence 1 is the
+# context-carrying toplevel inside resolveMainRepoRootContext, occurrence 2 is
+# the identity re-check's identical toplevel inside RepoFromPathContext.
+has_toplevel=0
+has_common=0
+for a in "$@"; do
+  [ "$a" = "--show-toplevel" ] && has_toplevel=1
+  [ "$a" = "--git-common-dir" ] && has_common=1
+done
+if [ "$has_toplevel" = 1 ] && [ "$has_common" = 0 ]; then
+  n=$(cat '%s' 2>/dev/null || echo 0)
+  n=$((n + 1))
+  echo "$n" > '%s'
+  if [ "$n" -ge 2 ]; then
+    sleep 30 &
+    echo $! >> '%s'
+    wait
+  fi
+fi
+exec '%s' "$@"
+`, countFile, countFile, pidFile, realGit))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+
+	type outcome struct {
+		binding projectBinding
+		err     error
+	}
+	done := make(chan outcome, 1)
+	go func() {
+		binding, err := resolveProjectBindingContext(ctx, root)
+		done <- outcome{binding: binding, err: err}
+	}()
+
+	select {
+	case got := <-done:
+		require.Error(t, got.err,
+			"the identity re-check's git wedge killed by the caller's deadline established "+
+				"NOTHING about the binding; a clean resolution there is a verdict the probe "+
+				"never earned (#3599)")
+		assert.Equal(t, projectBinding{}, got.binding,
+			"no binding may be committed from a probe the deadline killed")
+		assert.ErrorIs(t, got.err, ErrRepoProbeUnanswered,
+			"the daemon branches on this to hold the identity unknowable rather than "+
+				"settle a verdict that releases the gate")
+		assert.ErrorIs(t, got.err, context.DeadlineExceeded,
+			"the chain must name what ended it, so a stalled mount is not read as broken "+
+				"repository metadata (#3517)")
+	case <-time.After(15 * time.Second):
+		t.Fatal("the identity re-check must be bounded by the caller's deadline: without " +
+			"the ctx threaded through RepoFromPathContext it runs under context.Background() " +
+			"and a wedged git hangs the whole resolution indefinitely (#3599 restored)")
+	}
 }
