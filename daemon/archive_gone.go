@@ -612,7 +612,7 @@ func (m *Manager) cancelArchiveWorktreeGone(repoID string, instance *session.Ins
 // else the message says; both lists empty returns "" and the refusal keeps
 // its generic wording.
 func residueUnprovenClause(retryable, dangling []string) string {
-	clauses := make([]string, 0, len(retryable)+len(dangling))
+	var clauses []string
 	for _, component := range retryable {
 		clauses = append(clauses, fmt.Sprintf(
 			"the binding failed on %s — retry once %s is readable", component, component))

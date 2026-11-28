@@ -557,7 +557,7 @@ func oursExtraFloor(n int) string {
 // so it names the fix-or-remove remedy instead (#7900 R3). Each component
 // gets its own clause; both lists empty returns "".
 func residueUnprovenDetail(retryable, dangling []string) string {
-	clauses := make([]string, 0, len(retryable)+len(dangling))
+	var clauses []string
 	for _, component := range retryable {
 		clauses = append(clauses, fmt.Sprintf(
 			"the binding failed on %s — retry once %s is readable", component, component))
