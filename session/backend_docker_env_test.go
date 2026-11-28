@@ -20,13 +20,30 @@ import (
 // reports the session-home default, and the safe.directory write lands in the
 // wrong gitconfig (#7891 R4). It must also mirror docker's VALUE resolution:
 // a bare -e/--env name resolves against the environment af hands the docker
-// CLI (never the daemon's raw os.Getenv), a name absent there unsets the
-// variable in the container, and a defined-empty result names no file git
-// reads (R4 in the #7933 review). These tests pin the resolver over the full
-// lexical surface the validators already enumerate (dockerForwardedEnvSpellings)
-// plus the bare-name matrix, so it cannot drift from docker again. The shared
-// walker's positional-stop and value-taking-option swallow (#7726) are already
-// pinned by the dockerRunArgsEnvNames tests, which now share the same walker.
+// CLI (never the daemon's raw os.Getenv), and a bare name absent there stays
+// bare — it cannot clear an earlier =-valued entry (only the built-in
+// defaults are removable that way) but still suppresses the image ENV
+// fallback, so the last valued entry wins and a name with no valued entry
+// is unset (the #7933 review's R4, corrected by the #7949 review's R1). A
+// defined-empty result names no global file git reads, so
+// agentGitConfigFile reports no target for it (#7949 review R2). These
+// tests pin the resolver over the full lexical surface the validators
+// already enumerate (dockerForwardedEnvSpellings) plus the bare-name
+// matrix, so it cannot drift from docker again. The shared walker's
+// positional-stop and value-taking-option swallow (#7726) are already
+// pinned by the dockerRunArgsEnvNames tests, which now share the same
+// walker.
+
+// agentGitConfigFileTarget resolves the agent's global gitconfig for cases
+// expecting a file the agent's git actually reads — a session whose
+// container GIT_CONFIG_GLOBAL is defined-empty has no global target at all
+// (ok=false), and those cases assert on agentGitConfigFile directly.
+func agentGitConfigFileTarget(t *testing.T, p *dockerProvisioner) string {
+	t.Helper()
+	file, ok := p.agentGitConfigFile()
+	require.True(t, ok, "expected a global gitconfig the agent's git reads; got none")
+	return file
+}
 
 // TestDockerRunArgsEnvValue_ResolvesEveryDockerEffectiveSpelling is the core
 // regression: every spelling dockerForwardedEnvSpellings pins for the override
@@ -52,9 +69,11 @@ func TestDockerRunArgsEnvValue_ResolvesEveryDockerEffectiveSpelling(t *testing.T
 // resolution across the mixed spellings a repo manifest could combine: docker
 // keeps the LAST -e for a name whatever its spelling, so the resolver must
 // too — including the previously-missed spellings winning over earlier ones.
-// The bare -e NAME tail is docker's unset: the name's absence from the CLI
-// environment removes the variable in the container, clearing the earlier
-// =-valued entry, so agentGitConfigFile reports the ambient default.
+// The bare -e NAME tail is the engine's name-only mention: the CLI env
+// cannot fill it, so it assigns no value, and moby's merge can only remove
+// names from the built-in defaults — never an earlier user entry — so the
+// earlier =-valued entry stands and agentGitConfigFile follows it (#7949
+// review R1).
 func TestDockerRunArgsEnvValue_LastWinsAcrossSpellings(t *testing.T) {
 	for _, tt := range []struct {
 		name string
@@ -87,16 +106,18 @@ func TestDockerRunArgsEnvValue_LastWinsAcrossSpellings(t *testing.T) {
 		})
 	}
 
-	// A bare -e NAME the CLI environment cannot fill UNSETS the variable in
-	// the container — docker's env merge removes it, clearing the earlier
-	// =-valued entry and the image ENV alike (docker/cli opts/env.go
-	// ValidateEnv; container_run.md: a bare name not exported in the local
-	// environment "is unset in the container") — so the resolver reports
-	// unset and agentGitConfigFile reports the ambient default, NOT the
-	// value the earlier entry set. GIT_CONFIG_GLOBAL never enters the CLI
-	// env af hands docker unless the operator forwarded it, so unsetting
-	// the host name (restored at cleanup) makes the case independent of the
-	// runner's environment.
+	// A bare -e NAME the CLI environment cannot fill changes no value an
+	// earlier entry set: moby's ReplaceOrAppendEnvValues removes a bare
+	// key only from the built-in defaults (PATH, HOSTNAME, TERM, link
+	// env) — appended user entries are never in its removal cache — while
+	// the daemon's merge drops the image ENV for any name the user env
+	// mentions, and runc keeps the last valued entry (daemon/container/
+	// env.go:9, daemon/commit.go:26; #7949 review R1). So the resolver
+	// must keep the earlier =-valued entry's value — the "unset clears
+	// earlier values" reading the #7933 review proposed was wrong.
+	// GIT_CONFIG_GLOBAL never enters the CLI env af hands docker unless
+	// the operator forwarded it, so unsetting the host name (restored at
+	// cleanup) makes the case independent of the runner's environment.
 	if orig, ok := os.LookupEnv("GIT_CONFIG_GLOBAL"); ok {
 		t.Cleanup(func() { os.Setenv("GIT_CONFIG_GLOBAL", orig) })
 	}
@@ -107,11 +128,11 @@ func TestDockerRunArgsEnvValue_LastWinsAcrossSpellings(t *testing.T) {
 			Account: sessionenv.Account{Dir: "/acct", Agent: "codex", Name: "work"}},
 	}
 	value, state := dockerRunArgsEnvValue(p.runArgs, "GIT_CONFIG_GLOBAL", p.dockerEnvironment())
-	require.Equal(t, dockerRunArgsEnvUnset, state,
-		"a bare -e the CLI env cannot fill unsets the name — it must clear the earlier -e value, not keep it")
-	require.Equal(t, "", value)
-	require.Equal(t, p.sessionHome()+"/.gitconfig", p.agentGitConfigFile(),
-		"the unset variable leaves the agent's git on the session-home default")
+	require.Equal(t, dockerRunArgsEnvSet, state,
+		"a bare -e the CLI env cannot fill changes no earlier =-valued entry — the merge cannot remove it")
+	require.Equal(t, "/runargs.gitconfig", value)
+	require.Equal(t, "/runargs.gitconfig", agentGitConfigFileTarget(t, p),
+		"the surviving valued entry is the file the agent's git reads")
 }
 
 // TestDockerRunArgsEnvEntries_StopsAtOptionTerminator pins the walker's
@@ -162,9 +183,9 @@ func TestAgentGitConfigFile_FollowsRunArgsGlobalInEverySpelling(t *testing.T) {
 				spec: ProvisionSpec{Program: "codex",
 					Account: sessionenv.Account{Dir: "/acct", Agent: "codex", Name: "work"}},
 			}
-			require.Equal(t, "https://repo.example", p.agentGitConfigFile(),
+			require.Equal(t, "https://repo.example", agentGitConfigFileTarget(t, p),
 				"agentGitConfigFile must follow the run_args value docker sets in the container, not the default: %s", label)
-			require.NotEqual(t, def, p.agentGitConfigFile(),
+			require.NotEqual(t, def, agentGitConfigFileTarget(t, p),
 				"the missed spellings used to fall through to the session-home default: %s", label)
 		})
 	}
@@ -191,24 +212,26 @@ func TestAgentGitConfigFile_FollowsRunArgsGlobalOnPassthroughPath(t *testing.T) 
 					SessionEnvPassthrough: []string{"GIT_CONFIG_GLOBAL"}},
 				credentialMounts: []string{"mount"},
 			}
-			require.Equal(t, "https://repo.example", p.agentGitConfigFile(),
+			require.Equal(t, "https://repo.example", agentGitConfigFileTarget(t, p),
 				"the passthrough-claim arm must resolve the run_args value too: %s", label)
 		})
 	}
 }
 
 // TestAgentGitConfigFile_BareNameResolvesAgainstTheCLIEnv pins the #7924
-// follow-up the #7933 review named (R4): a bare `-e GIT_CONFIG_GLOBAL` or
-// `--env GIT_CONFIG_GLOBAL` resolves against the environment af hands the
-// docker CLI (dockerEnvironment — DockerCLIEnvironment plus af's own
-// additions), never the daemon's raw os.Getenv. docker/cli's ValidateEnv
-// substitutes the CLI's own value for a bare name, and when the name is
-// absent there the engine's env merge UNSETS it in the container — clearing
-// any earlier =-valued entry and the image ENV fallback, so
-// agentGitConfigFile reports the session-home default. A name present in
-// the daemon environment but NOT forwarded is equally absent from that CLI
-// env: DockerCLIEnvironment admits only client/control names plus the
-// passthrough names the operator claimed.
+// follow-up the #7933 review named (R4, corrected by the #7949 review's
+// R1/R2): a bare `-e GIT_CONFIG_GLOBAL` or `--env GIT_CONFIG_GLOBAL`
+// resolves against the environment af hands the docker CLI
+// (dockerEnvironment — DockerCLIEnvironment plus af's own additions),
+// never the daemon's raw os.Getenv. docker/cli's ValidateEnv substitutes
+// the CLI's own value for a bare name; a name absent there stays bare —
+// the daemon's merge drops the image ENV for any name the user env
+// mentions, but the bare mention cannot remove an earlier =-valued
+// entry — so a bare name with no valued entry resolves to unset and the
+// session-home default. A name present in the daemon environment but NOT
+// forwarded is equally absent from that CLI env: DockerCLIEnvironment
+// admits only client/control names plus the passthrough names the
+// operator claimed.
 func TestAgentGitConfigFile_BareNameResolvesAgainstTheCLIEnv(t *testing.T) {
 	// The image carries GIT_CONFIG_GLOBAL=/image.gitconfig so every case can
 	// observe whether the run_args layer correctly dominates or clears the
@@ -236,32 +259,34 @@ func TestAgentGitConfigFile_BareNameResolvesAgainstTheCLIEnv(t *testing.T) {
 	}
 	def := account().sessionHome() + "/.gitconfig"
 
-	// A bare name the CLI env lacks unsets the variable — even though the
-	// daemon's own environment sets it. Before the fix the resolver read
-	// os.Getenv and returned /host.gitconfig, a value docker never delivers.
+	// A bare name the CLI env lacks is a name-only mention: with no valued
+	// entry the name is unset in the container, and the merge drops the
+	// image ENV for it — even though the daemon's own environment sets it.
+	// Before the fix the resolver read os.Getenv and returned
+	// /host.gitconfig, a value docker never delivers.
 	t.Run("daemon env value but not forwarded unsets", func(t *testing.T) {
 		t.Setenv("GIT_CONFIG_GLOBAL", "/host.gitconfig")
 		p := account()
 		p.runArgs = []string{"-e", "GIT_CONFIG_GLOBAL"}
-		require.Equal(t, def, p.agentGitConfigFile(),
-			"the CLI env carries no unforwarded name — docker unsets it, clearing the image ENV too")
+		require.Equal(t, def, agentGitConfigFileTarget(t, p),
+			"the CLI env carries no unforwarded name — the bare -e resolves to unset, suppressing the image ENV too")
 	})
 
 	// Same unset with the name absent from the daemon environment entirely:
-	// the image's own ENV must not fill the slot the bare -e removed.
-	t.Run("unexported bare name clears the image ENV", func(t *testing.T) {
+	// the image's own ENV must not fill the slot the bare -e vacated.
+	t.Run("unexported bare name suppresses the image ENV", func(t *testing.T) {
 		unsetHost(t)
 		p := account()
 		p.runArgs = []string{"-e", "GIT_CONFIG_GLOBAL"}
-		require.Equal(t, def, p.agentGitConfigFile(),
-			"docker unsets a bare -e name the CLI env lacks — the image ENV must not fill it")
+		require.Equal(t, def, agentGitConfigFileTarget(t, p),
+			"a bare -e name the CLI env lacks is unset in the container — the image ENV must not fill it")
 	})
 
 	// The bare name resolves to the CLI env's own value when the operator
 	// forwarded it: a defined-empty forward resolves to "" exactly as
-	// docker's merge keeps NAME= — and since that names no file git can
-	// read, agentGitConfigFile collapses to the ambient default rather than
-	// to the image ENV the empty pin dominates.
+	// docker's merge keeps NAME= — and since a defined-empty
+	// GIT_CONFIG_GLOBAL makes git read NO global file, agentGitConfigFile
+	// reports no target rather than a path the agent ignores (#7949 R2).
 	t.Run("forwarded defined-empty resolves empty", func(t *testing.T) {
 		t.Setenv("GIT_CONFIG_GLOBAL", "")
 		p := account("GIT_CONFIG_GLOBAL")
@@ -270,8 +295,10 @@ func TestAgentGitConfigFile_BareNameResolvesAgainstTheCLIEnv(t *testing.T) {
 		require.Equal(t, dockerRunArgsEnvSet, state)
 		require.Equal(t, "", value,
 			"a forwarded defined-empty value resolves to \"\" — the container keeps NAME=, it is not unset")
-		require.Equal(t, def, p.agentGitConfigFile(),
-			"GIT_CONFIG_GLOBAL= names no file the agent's git can read — the ambient default is the answer")
+		file, ok := p.agentGitConfigFile()
+		require.False(t, ok,
+			"GIT_CONFIG_GLOBAL= names no file the agent's git can read — there is no global target to mark")
+		require.Empty(t, file)
 	})
 
 	// The positive control: a forwarded name with a host value resolves to
@@ -280,7 +307,7 @@ func TestAgentGitConfigFile_BareNameResolvesAgainstTheCLIEnv(t *testing.T) {
 		t.Setenv("GIT_CONFIG_GLOBAL", "/operator.gitconfig")
 		p := account("GIT_CONFIG_GLOBAL")
 		p.runArgs = []string{"-e", "GIT_CONFIG_GLOBAL"}
-		require.Equal(t, "/operator.gitconfig", p.agentGitConfigFile(),
+		require.Equal(t, "/operator.gitconfig", agentGitConfigFileTarget(t, p),
 			"a forwarded name is in the CLI env — the bare -e resolves to the operator's value, as docker does")
 	})
 
@@ -290,10 +317,26 @@ func TestAgentGitConfigFile_BareNameResolvesAgainstTheCLIEnv(t *testing.T) {
 		unsetHost(t)
 		p := account()
 		p.runArgs = []string{"--env", "GIT_CONFIG_GLOBAL"}
-		require.Equal(t, def, p.agentGitConfigFile(),
-			"--env NAME unsets just like -e NAME when the CLI env lacks the name")
+		require.Equal(t, def, agentGitConfigFileTarget(t, p),
+			"--env NAME resolves to unset just like -e NAME when the CLI env lacks the name")
 		p.runArgs = []string{"--env=GIT_CONFIG_GLOBAL="}
-		require.Equal(t, def, p.agentGitConfigFile(),
-			"--env=GIT_CONFIG_GLOBAL= is a defined-empty pin, not a bare name")
+		file, ok := p.agentGitConfigFile()
+		require.False(t, ok,
+			"--env=GIT_CONFIG_GLOBAL= is a defined-empty pin: git reads no global file at all")
+		require.Empty(t, file)
+	})
+
+	// R3 (#7949 review): a forwarded-but-host-empty claim pins the name
+	// defined-empty even with no run_args entry at all — af's own bare -e
+	// forward resolves "" in the CLI env and still suppresses the image
+	// ENV — so no global target exists. Reverting the forwarded arm to
+	// fall through to the image ENV must fail this.
+	t.Run("forwarded host-empty claims the slot over the image ENV", func(t *testing.T) {
+		t.Setenv("GIT_CONFIG_GLOBAL", "")
+		p := account("GIT_CONFIG_GLOBAL")
+		file, ok := p.agentGitConfigFile()
+		require.False(t, ok,
+			"a forwarded host-empty claim keeps GIT_CONFIG_GLOBAL defined-empty — the image ENV must not fill it")
+		require.Empty(t, file)
 	})
 }

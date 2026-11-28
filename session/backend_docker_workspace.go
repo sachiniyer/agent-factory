@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"os"
 	"strings"
+
+	"github.com/sachiniyer/agent-factory/log"
 )
 
 // prepareAfGitConfig creates the fresh global gitconfig af's own
@@ -46,22 +48,32 @@ func (p *dockerProvisioner) prepareAfGitConfig() error {
 // file may already carry the mark or be unwritable on a mount the
 // operator owns — a failed write must not abort a session their file
 // already serves, and without the mark the clone's own failure message
-// names the remedy (Codex on #7891 N1).
+// names the remedy (Codex on #7891 N1). When the container's
+// GIT_CONFIG_GLOBAL is defined-empty the agent's git reads no global
+// file at all — there is no target to mark, so the step writes only
+// af's effective global and warns rather than naming a file the agent
+// ignores (#7949 review R2).
 func (p *dockerProvisioner) trustWorkspaceDirectories() error {
 	script := `git config --global --add safe.directory "*"`
 	if len(p.credentialMounts) > 0 || p.spec.Account.Dir != "" {
 		if claimed := p.afGitConfigClaims(p.forwardedEnvNames()); afGitConfigActive(claimed) {
-			agentFile := shellQuote(p.agentGitConfigFile())
-			agentMkdir, agentSuffix := "", ""
-			if claimed["GIT_CONFIG_GLOBAL"] {
-				// The agent's global is the operator's file under this
-				// claim — absent- or read-only-mounted like af's side.
-				agentMkdir = fmt.Sprintf(`mkdir -p "$(dirname %s)" 2>/dev/null || true; `, agentFile)
-				agentSuffix = " 2>/dev/null || true"
+			if file, ok := p.agentGitConfigFile(); ok {
+				agentFile := shellQuote(file)
+				agentMkdir, agentSuffix := "", ""
+				if claimed["GIT_CONFIG_GLOBAL"] {
+					// The agent's global is the operator's file under this
+					// claim — absent- or read-only-mounted like af's side.
+					agentMkdir = fmt.Sprintf(`mkdir -p "$(dirname %s)" 2>/dev/null || true; `, agentFile)
+					agentSuffix = " 2>/dev/null || true"
+				}
+				script = fmt.Sprintf(
+					`mkdir -p "$(dirname "$GIT_CONFIG_GLOBAL")" 2>/dev/null || true; git config --file "$GIT_CONFIG_GLOBAL" --add safe.directory "*" 2>/dev/null || true; %sgit config --file %s --add safe.directory "*"`,
+					agentMkdir, agentFile) + agentSuffix
+			} else {
+				script = `mkdir -p "$(dirname "$GIT_CONFIG_GLOBAL")" 2>/dev/null || true; git config --file "$GIT_CONFIG_GLOBAL" --add safe.directory "*" 2>/dev/null || true`
+				log.WarningLog.Printf(
+					"backend=docker: the container's GIT_CONFIG_GLOBAL is defined-empty, so the agent's git reads no global file and safe.directory could not be written to a scope it reads — the agent's git may still report 'dubious ownership'; unset the empty GIT_CONFIG_GLOBAL or point it at a writable file")
 			}
-			script = fmt.Sprintf(
-				`mkdir -p "$(dirname "$GIT_CONFIG_GLOBAL")" 2>/dev/null || true; git config --file "$GIT_CONFIG_GLOBAL" --add safe.directory "*" 2>/dev/null || true; %sgit config --file %s --add safe.directory "*"`,
-				agentMkdir, agentFile) + agentSuffix
 		}
 	}
 	out, err := p.execSessionSh(dockerShortStepTimeout, script)

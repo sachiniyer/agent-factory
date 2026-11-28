@@ -496,22 +496,22 @@ func TestAgentGitConfigFileFollowsTheForwardedGlobal(t *testing.T) {
 
 	// Forwarded WITH a host value: the operator's file is the agent's global.
 	t.Setenv("GIT_CONFIG_GLOBAL", "/operator/global.gitconfig")
-	require.Equal(t, "/operator/global.gitconfig", p.agentGitConfigFile())
+	require.Equal(t, "/operator/global.gitconfig", agentGitConfigFileTarget(t, p))
 
 	// A run_args -e is last-wins over the bare forward, as in the argv.
 	p.runArgs = []string{"-e", "GIT_CONFIG_GLOBAL=/runargs.gitconfig"}
-	require.Equal(t, "/runargs.gitconfig", p.agentGitConfigFile())
+	require.Equal(t, "/runargs.gitconfig", agentGitConfigFileTarget(t, p))
 	p.runArgs = nil
 
 	// Hostless claim: no -e is emitted, the pin is suppressed, and with no
 	// image ENV the default stands — exactly the ambient resolution.
 	os.Unsetenv("GIT_CONFIG_GLOBAL")
-	require.Equal(t, p.sessionHome()+"/.gitconfig", p.agentGitConfigFile())
+	require.Equal(t, p.sessionHome()+"/.gitconfig", agentGitConfigFileTarget(t, p))
 
 	// No claim at all: the credential-mount re-assert pins the default.
 	require.Equal(t, p.sessionHome()+"/.gitconfig",
-		(&dockerProvisioner{credentialMounts: []string{"mount"},
-			spec: ProvisionSpec{Program: "gemini"}}).agentGitConfigFile())
+		agentGitConfigFileTarget(t, &dockerProvisioner{credentialMounts: []string{"mount"},
+			spec: ProvisionSpec{Program: "gemini"}}))
 }
 
 // M4 (#7891 N4): on a PLAIN session the AF_GIT_* marker names must not be
