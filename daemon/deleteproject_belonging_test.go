@@ -1325,6 +1325,9 @@ func TestAbsentRootDeleteRefusesWhenItsRootReappearsWithADanglingGitfile(t *test
 // enter gives git no verdict either — the same non-answer, refused the same
 // way.
 func TestAbsentRootDeleteRefusesWhenItsRootReappearsUnreadable(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("chmod-based unreadability is meaningless as root")
+	}
 	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	installOptionsRecordingBackend(t)
 	parent := testguard.CanonicalTempDir(t)
