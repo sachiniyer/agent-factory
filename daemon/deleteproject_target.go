@@ -549,15 +549,28 @@ func (m *Manager) resolveDeleteProjectTarget(req DeleteProjectRequest) (deletePr
 	// an unvetted identity fails closed too. Nothing has been mutated yet, so
 	// a refusal here is literally "nothing was changed".
 	var absentBelonging *absentRootBelonging
-	// The scan guards exactly the deletes that DEREGISTER the absent-rooted
-	// row: the path and derived-id forms, which selected a record the durable
-	// removal below will take. A delete by the row's own path-hash identity
-	// reaches the same row only as unattributed — DeregisterProject matches
-	// nothing for it (a legacy row recorded no RepoID), so the only thing a
-	// scan there could add is a refusal that protects nothing, and master's
+	// The scan guards every delete that DEREGISTERS the absent-rooted row
+	// whose path selected a record: the path form and BOTH identity forms.
+	// The derived-id form is the legacy row that recorded no RepoID; the
+	// real-id form is a reconciled row whose recorded root is gone — and
+	// whose live sessions need not be keyed under that RepoID. Pre-#3358
+	// sessions of a bare clone are preserved under the clone's
+	// parent-directory identity (daemon/manager_create_legacy_bare.go),
+	// which a workspace-registered row's RepoID (hash of the bare common
+	// dir) never equals, so without this scan a real-id absent-root delete
+	// can deregister the row while a live parent-keyed session survives as
+	// an orphan behind a reported success (#2549). The scan's original
+	// derived-only gate (#7914) rested on the premise that "a recorded
+	// RepoID is already the identity the sessions were keyed under" — a
+	// premise the legacy bare preservation contradicts.
+	//
+	// A delete by a legacy row's own path-hash identity reaches the same
+	// row only as unattributed — DeregisterProject matches nothing for it
+	// (a legacy row recorded no RepoID), so the only thing a scan there
+	// could add is a refusal that protects nothing, and master's
 	// unattributed refusal already names the record and its sessions.
 	belongingRoot, belongingCheckoutID := "", ""
-	if rowFound && config.IsDerivedRepoID(repoID) && repoPath != "" {
+	if rowFound && repoPath != "" {
 		belongingRoot, belongingCheckoutID = repoPath, recordedCheckoutID
 	}
 	if belongingRoot != "" {
@@ -575,6 +588,16 @@ func (m *Manager) resolveDeleteProjectTarget(req DeleteProjectRequest) (deletePr
 			return deleteProjectTarget{repoID: repoID}, fmt.Errorf("delete project %s: could not observe whether its recorded root %s is absent within %s, so af cannot establish which live sessions it owned — nothing was changed; retry the delete", repoID, belongingRoot, boundedRecordRootAbsentTimeout)
 		case absent:
 			belonging := m.absentRootBelongingScan(belongingCheckoutID)
+			// A real-id row's own identity carries its checkout marker in
+			// its common dir, so the scan classifies its R-keyed live
+			// sessions as owners — but those are handled, correctly and
+			// ordinarily, by the existing stranded/starting gates and the
+			// archive loop, which key on repoID. Without this exclusion
+			// the scan would turn every normal real-id delete that has a
+			// live session under the row's own identity into a refusal. A
+			// derived-id row has no sessions under its invented d-…
+			// identity, so the call is a no-op for it.
+			belonging.excludeDeletedIdentity(repoID)
 			if len(belonging.suspects) > 0 {
 				return deleteProjectTarget{repoID: repoID}, absentRootBelongingRefusal(repoID, belongingRoot, belonging.suspects)
 			}

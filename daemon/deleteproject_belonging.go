@@ -185,6 +185,35 @@ type absentRootBelonging struct {
 	suspects   []absentRootSuspect
 }
 
+// excludeDeletedIdentity drops suspects keyed under the deleted row's own
+// repo identity and marks that identity cleared for the post-deregister
+// re-scan. A real-id row's R-keyed live sessions are handled by the existing
+// stranded/starting gates and the archive loop, which key on repoID — the
+// scan would otherwise flag them as owners (the row's own checkout marker
+// lives in its common dir) and turn ordinary real-id deletes with live
+// sessions into refusals. A derived-id row has no sessions under its
+// invented d-… identity, so the call is a no-op for it. Marking the identity
+// cleared keeps the post-deregister re-scan's unvetted pass from
+// re-reporting a session under it — escaped, via fenced, already reports
+// such a session with the correct "delete again" remedy.
+func (b *absentRootBelonging) excludeDeletedIdentity(repoID string) {
+	if b == nil || repoID == "" {
+		return
+	}
+	if b.cleared == nil {
+		b.cleared = make(map[string]struct{})
+	}
+	b.cleared[repoID] = struct{}{}
+	kept := make([]absentRootSuspect, 0, len(b.suspects))
+	for _, s := range b.suspects {
+		if s.repoID == repoID {
+			continue
+		}
+		kept = append(kept, s)
+	}
+	b.suspects = kept
+}
+
 // unvettedIdentities is the post-deregister form of "could belong": the live
 // repository identities this scan never cleared. An identity proven clear
 // stays clear — the evidence names the clone, not the session — but an

@@ -1088,3 +1088,195 @@ func TestAbsentRootRefusalPrintsNoCommandWhenTheRootCannotProveTheKey(t *testing
 	}
 	assertAbsentRowSurvives(t, manager, project.ID, []string{derived, foreignID}, [][2]string{{foreignID, "foreign-keyed"}})
 }
+
+// TestAbsentRootDeleteRefusesWhileAPre3358SessionKeysUnderTheClonesParentForARealId
+// pins the real-id counterpart of the test above: the IDENTICAL fixture,
+// minus clearRecordedRepoID, so the row keeps its real RepoID (the hash of
+// the bare common dir). Pre-#3358 sessions preserved under the bare clone's
+// parent-directory identity (daemon/manager_create_legacy_bare.go) are keyed
+// under an identity that never equals the row's recorded RepoID, so a
+// real-id absent-root delete must refuse over them exactly as the derived-id
+// form does — the belonging scan's marker evidence lives one level down
+// inside the bare clone the parent holds, regardless of which identity the
+// row is filed under. Before the fix the gate was derived-only, so the scan
+// never ran for a real-id row and the delete succeeded while the
+// parent-keyed session survived as an orphan.
+func TestAbsentRootDeleteRefusesWhileAPre3358SessionKeysUnderTheClonesParentForARealId(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	installOptionsRecordingBackend(t)
+	parent := testguard.CanonicalTempDir(t)
+	// The parent is a repository in its own right — the dotfiles checkout the
+	// review describes — so its own common dir is provably not the row's.
+	if err := exec.Command("git", "init", parent).Run(); err != nil {
+		t.Fatalf("git init %s: %v", parent, err)
+	}
+	bare, worktree, _ := bareWorktreeFixture(t, parent)
+	project := registerTestProject(t, worktree)
+	parentID := repoID(t, parent)
+	bareID := repoID(t, bare)
+	// The row KEEPS its real RepoID (the hash of the bare common dir) — the
+	// shape a reconciled row has, unlike the legacy row above. This is the
+	// one difference from TestAbsentRootDeleteRefusesWhileAPre3358SessionKeysUnderTheClonesParent.
+	if recorded := onlyIdentityFor(t, project.ID); recorded != bareID {
+		t.Fatalf("fixture must keep the row's real RepoID %q, got %q", bareID, recorded)
+	}
+	if err := os.RemoveAll(worktree); err != nil {
+		t.Fatalf("remove the recorded root: %v", err)
+	}
+	manager, err := NewManager(config.DefaultConfig())
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	// The pre-#3358 row persisted the unrelated parent as BOTH the workspace
+	// and the identity root (manager_create_legacy_bare.go).
+	inst := runningInstance(t, "legacy-sibling", parent, parent)
+	manager.mu.Lock()
+	manager.instances[daemonInstanceKey(parentID, "legacy-sibling")] = inst
+	manager.mu.Unlock()
+
+	// Both request forms that deregister the row reach the same refusal: by
+	// path, and by the real RepoID the row recorded.
+	for _, req := range []DeleteProjectRequest{
+		{RepoPath: worktree},
+		{RepoID: bareID},
+	} {
+		result, delErr := manager.DeleteProject(req)
+		if delErr == nil {
+			t.Fatalf("request %+v: the delete deregistered the row while a parent-keyed session stayed live — the reported bug", req)
+		}
+		for _, want := range []string{"nothing was changed", "legacy-sibling", "checkout marker", bare, "af sessions archive --repo"} {
+			if !strings.Contains(delErr.Error(), want) {
+				t.Fatalf("request %+v: the refusal must name %q: %v", req, want, delErr)
+			}
+		}
+		// The parent is a repository in its own right whose path provably hashes
+		// to this session's key, so --repo may be printed — but the bare-title
+		// form, which resolves by cwd onto a possibly different session, must
+		// not appear anywhere.
+		if strings.Contains(delErr.Error(), "af sessions archive -- ") {
+			t.Fatalf("request %+v: the refusal must never print a bare-title command: %v", req, delErr)
+		}
+		if len(result.Archived) != 0 || len(result.Killed) != 0 || result.Deregistered {
+			t.Fatalf("request %+v: a refused delete must archive, kill and deregister nothing: archived=%d killed=%d deregistered=%v",
+				req, len(result.Archived), len(result.Killed), result.Deregistered)
+		}
+	}
+	assertAbsentRowSurvives(t, manager, project.ID, []string{bareID, parentID}, [][2]string{{parentID, "legacy-sibling"}})
+}
+
+// TestRealIdAbsentRootDeleteHandlesSessionsKeyedUnderTheRowsOwnIdentity pins
+// the exclusion the widened gate requires: a real-id row whose recorded root
+// is absent, with a live session keyed under the row's OWN real RepoID, must
+// complete exactly as it did before the gate was widened — the archive loop
+// keys on repoID and tears down that session. Without the
+// excludeDeletedIdentity guard the belonging scan would classify the row's
+// own identity as an owner (its checkout marker lives in its common dir) and
+// turn this ordinary delete into a refusal, a regression.
+func TestRealIdAbsentRootDeleteHandlesSessionsKeyedUnderTheRowsOwnIdentity(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	installOptionsRecordingBackend(t)
+	parent := testguard.CanonicalTempDir(t)
+	// The parent is a repository in its own right so its common dir is
+	// provably not the row's, the same shape the refusal test uses.
+	if err := exec.Command("git", "init", parent).Run(); err != nil {
+		t.Fatalf("git init %s: %v", parent, err)
+	}
+	bare, worktree, sibling := bareWorktreeFixture(t, parent)
+	project := registerTestProject(t, worktree)
+	bareID := repoID(t, bare)
+	if recorded := onlyIdentityFor(t, project.ID); recorded != bareID {
+		t.Fatalf("fixture must keep the row's real RepoID %q, got %q", bareID, recorded)
+	}
+	if err := os.RemoveAll(worktree); err != nil {
+		t.Fatalf("remove the recorded root: %v", err)
+	}
+	manager, err := NewManager(config.DefaultConfig())
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	// A live session keyed under the row's OWN real RepoID — the identity the
+	// archive loop handles. Its identity root is the bare common dir, where
+	// the row's checkout marker lives, so the scan would classify it as an
+	// owner without the exclusion.
+	liveSessionUnderIdentity(t, manager, bareID, "own-session", sibling)
+
+	result, delErr := manager.DeleteProject(DeleteProjectRequest{RepoPath: worktree})
+	if delErr != nil {
+		t.Fatalf("a real-id absent-root delete with a session under the row's own identity must complete, not refuse: %v", delErr)
+	}
+	if !result.Deregistered {
+		t.Fatalf("the row must be deregistered once its own-identity session is handled")
+	}
+	if len(result.Archived) == 0 && len(result.Killed) == 0 {
+		t.Fatalf("the own-identity session must be archived or killed by the archive loop, not left behind")
+	}
+	// The session must no longer be live under the row's own identity.
+	manager.mu.Lock()
+	inst := manager.instances[daemonInstanceKey(bareID, "own-session")]
+	manager.mu.Unlock()
+	if inst != nil && inst.GetStatus() != session.Archived {
+		t.Fatalf("the own-identity session must be archived or gone after the delete, got status %v", inst.GetStatus())
+	}
+}
+
+// TestRealIdAbsentRootDeleteReportsAParentKeyedSessionThatMaterializedDuringItsDeregister
+// pins the post-deregister half for a real-id row: a parent-keyed session that
+// materializes between the pre-deregister re-check and the durable removal
+// arrives under an identity the resolution scan never cleared (no session was
+// live under it at resolution), so the unvetted pass vets it — finds the row's
+// checkout marker one level down inside the bare clone — and the delete fails
+// closed with the archive remedy rather than reporting success over a live
+// orphan.
+func TestRealIdAbsentRootDeleteReportsAParentKeyedSessionThatMaterializedDuringItsDeregister(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	installOptionsRecordingBackend(t)
+	parent := testguard.CanonicalTempDir(t)
+	if err := exec.Command("git", "init", parent).Run(); err != nil {
+		t.Fatalf("git init %s: %v", parent, err)
+	}
+	bare, worktree, _ := bareWorktreeFixture(t, parent)
+	project := registerTestProject(t, worktree)
+	parentID := repoID(t, parent)
+	bareID := repoID(t, bare)
+	if recorded := onlyIdentityFor(t, project.ID); recorded != bareID {
+		t.Fatalf("fixture must keep the row's real RepoID %q, got %q", bareID, recorded)
+	}
+	if err := os.RemoveAll(worktree); err != nil {
+		t.Fatalf("remove the recorded root: %v", err)
+	}
+	manager, err := NewManager(config.DefaultConfig())
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	// No parent-keyed session is live at resolution, so the scan clears every
+	// identity it sees and the delete proceeds. The session lands in the gap
+	// between the pre-deregister re-check and the durable removal — the
+	// window the post-deregister re-scan exists for. The hook stretches it.
+	previousHook := deleteProjectPreDeregisterHookForTest
+	deleteProjectPreDeregisterHookForTest = func() {
+		inst := runningInstance(t, "late-legacy-sibling", parent, parent)
+		manager.mu.Lock()
+		manager.instances[daemonInstanceKey(parentID, "late-legacy-sibling")] = inst
+		manager.mu.Unlock()
+	}
+	t.Cleanup(func() { deleteProjectPreDeregisterHookForTest = previousHook })
+
+	result, delErr := manager.DeleteProject(DeleteProjectRequest{RepoPath: worktree})
+	if delErr == nil {
+		t.Fatalf("a parent-keyed session that materialized mid-delete under an unvetted identity must not be reported as success")
+	}
+	if !result.Deregistered {
+		t.Fatalf("the row still comes off — the report is over what survived it")
+	}
+	for _, want := range []string{"late-legacy-sibling", "checkout marker"} {
+		if !strings.Contains(delErr.Error(), want) {
+			t.Fatalf("the report must name %q: %v", want, delErr)
+		}
+	}
+	manager.mu.Lock()
+	inst := manager.instances[daemonInstanceKey(parentID, "late-legacy-sibling")]
+	manager.mu.Unlock()
+	if inst == nil || inst.GetStatus() != session.Running {
+		t.Fatalf("the late session stays live — the delete only reports it")
+	}
+}
