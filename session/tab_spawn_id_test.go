@@ -241,7 +241,7 @@ func TestAddTabWithID_UnstartedRefuses(t *testing.T) {
 
 // TabsData is the roster the agent-server reports: every tab with its stable
 // id, kind, and name — and, for a process tab, the exit evidence
-// RecordProcessTabExits just refreshed. Without the refresh a command that
+// RecordTabExits just refreshed. Without the refresh a command that
 // finished while the sandbox ran would report a stale un-stamped row forever:
 // nothing on a LIVE instance ever looks, so the roster read is where the look
 // happens.
@@ -288,7 +288,7 @@ func TestTabsData_ReportsRosterAndRefreshedExitEvidence(t *testing.T) {
 	assert.Equal(t, "./deploy.sh", before[1].Command)
 	assert.Nil(t, before[1].Exit, "the roster reports no exit until something looks")
 
-	inst.RecordProcessTabExits()
+	inst.RecordTabExits()
 
 	after := inst.TabsData()
 	require.Len(t, after, 2)

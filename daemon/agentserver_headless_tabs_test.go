@@ -49,7 +49,7 @@ func (f *fakeTabKeeper) TabsData() []session.TabData {
 	return append([]session.TabData(nil), f.rows...)
 }
 
-func (f *fakeTabKeeper) RecordProcessTabExits() {
+func (f *fakeTabKeeper) RecordTabExits() {
 	f.mu.Lock()
 	f.probed++
 	f.mu.Unlock()

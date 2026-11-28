@@ -52,8 +52,11 @@ type Instance struct {
 	// intent (`sessions restore --force-reap`) for the recovery in flight; it makes
 	// recovery skip the in-place relaunch. See relaunchOrRecoverSandbox.
 	forceSandboxReplacement atomic.Bool
-	liveBoundaryMu          sync.Mutex
-	liveBoundary            *runtimeLiveBoundary
+	// shellExitProbeRunning makes the async shell-exit probe (KickShellExitProbe)
+	// once-in-flight per instance, so snapshot reads can kick it freely (#7944).
+	shellExitProbeRunning atomic.Bool
+	liveBoundaryMu        sync.Mutex
+	liveBoundary          *runtimeLiveBoundary
 	// ID is the instance's stable identity (#1195): a random UUID minted once at
 	// NewInstance, persisted, and never mutated. The reconcile uses it to tell
 	// "same session" from "title reused" (#765) without leaning on CreatedAt

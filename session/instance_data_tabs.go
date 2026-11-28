@@ -26,8 +26,8 @@ func (i *Instance) tabDataLocked(tab *Tab) TabData {
 // ToInstanceData serializes, agent tab at index 0 — so a peer can consume the
 // roster without the rest of the instance record. It is the /v1/agent/tabs
 // payload the in-sandbox agent-server reports to the driving daemon (#5571
-// W4.3). It does NOT refresh process-exit evidence: stampProcessTabExit runs on
-// restore/attach paths, and the roster endpoint runs RecordProcessTabExits
+// W4.3). It does NOT refresh process-exit evidence: stampTabExit runs on
+// restore/attach paths, and the roster endpoint runs RecordTabExits
 // first — the separation keeps a pure read a pure read.
 func (i *Instance) TabsData() []TabData {
 	i.mu.RLock()

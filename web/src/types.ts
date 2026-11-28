@@ -316,8 +316,23 @@ export interface TabData {
   /** The proposal slug of a docs tab (TabKind.Docs); absent for other kinds.
    *  Mirrors session.TabData.Proposal (session/storage.go). */
   proposal?: string;
+  /** How the tab's PTY ended (TabKind.Shell / TabKind.Process), when the daemon
+   *  observed it — the remain-on-exit dead pane's status/time, or af's own stop
+   *  reason. Absent means the tab is live (or never provably ended), NOT that
+   *  the field is unimplemented. Mirrors session.TabExitData; the tab strip
+   *  reads only its presence (#7944). */
+  exit?: TabExitData | null;
   /** Daemon proxy decision; absent only on older daemon records. */
   web_proxied?: boolean;
+}
+
+/** The subset of session.TabExitData (session/storage_tab_data.go) the web
+ *  reads: presence alone marks a tab dead, so every field is optional. */
+export interface TabExitData {
+  status?: number;
+  status_known?: boolean;
+  at?: string;
+  stopped_by?: string;
 }
 
 /** The subset of session.GitWorktreeData (session/storage.go) the web reads: the

@@ -604,10 +604,10 @@ func (w *TabbedWindow) renderHeader(width int) string {
 	if w.preview != nil && w.preview.instance != nil {
 		inst := w.preview.instance
 		label := tabLabelFor(inst, w.preview.tab)
-		text = fmt.Sprintf(" %s · %s%s · preview ", tree.DisplayTitle(inst), label, placementClause(inst))
+		text = fmt.Sprintf(" %s · %s%s%s · preview ", tree.DisplayTitle(inst), label, deadTabClause(inst, w.preview.tab), placementClause(inst))
 	} else if inst := w.boundInstance(); inst != nil {
 		label := tabLabelFor(inst, w.activeTab())
-		text = fmt.Sprintf(" %s · %s%s ", tree.DisplayTitle(inst), label, placementClause(inst))
+		text = fmt.Sprintf(" %s · %s%s%s ", tree.DisplayTitle(inst), label, deadTabClause(inst, w.activeTab()), placementClause(inst))
 		bound = true
 	} else {
 		text = " Select a session "
@@ -682,6 +682,21 @@ func (w *TabbedWindow) String() string {
 		layout.ClampToRect(content, layout.Rect{W: iw, H: ih}),
 	)
 	return layout.ClampToRect(w.frameStyle().Render(inner), w.rect)
+}
+
+// deadTabClause names a SHELL tab whose exit is recorded, as a header
+// fragment (" · dead") inside the tab identity, and is empty for a live,
+// non-shell, or out-of-range tab (#7944). The stamped Exit is the same
+// evidence the tree row's " · dead" marker and the roster's `exit` field
+// read, so the three surfaces agree by construction. Shell kind only: a dead
+// process pane holds tmux's own "Pane is dead" screen, which is master's
+// marker and stays the only one it gets.
+func deadTabClause(inst *session.Instance, tab int) string {
+	tabs := inst.GetTabs()
+	if tab >= 0 && tab < len(tabs) && tabs[tab].Kind == session.TabKindShell && tabs[tab].Exit != nil {
+		return " · dead"
+	}
+	return ""
 }
 
 // placementClause names where an off-box session runs, as a header clause

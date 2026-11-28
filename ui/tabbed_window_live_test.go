@@ -6,6 +6,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/ui/layout"
 )
 
@@ -89,4 +90,17 @@ func TestTabbedWindowInteractiveCue(t *testing.T) {
 
 	w.SetInteractive(false)
 	assert.Equal(t, navFrame, w.String(), "leaving interactive restores the nav frame")
+}
+
+// TestDeadTabClause pins the header's " · dead" fragment (#7944): it reads the
+// same stamped Exit the tree row's marker and the roster's `exit` field read,
+// so the surfaces cannot disagree about whether a tab is dead.
+func TestDeadTabClause(t *testing.T) {
+	inst := &session.Instance{Tabs: []*session.Tab{
+		{Kind: session.TabKindAgent, Name: "Agent"},
+		{Kind: session.TabKindShell, Name: "terminal", Exit: &session.TabExit{StatusKnown: true}},
+	}}
+	assert.Equal(t, " · dead", deadTabClause(inst, 1), "a tab with a recorded exit names itself dead")
+	assert.Equal(t, "", deadTabClause(inst, 0), "a live tab carries no dead clause")
+	assert.Equal(t, "", deadTabClause(inst, 5), "an out-of-range tab carries no dead clause")
 }

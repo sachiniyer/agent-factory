@@ -54,6 +54,13 @@ type enterInteractiveMsg struct {
 // replay (replayKeyAfterInteractiveHelpDismiss) overrides this key, so the
 // entry key that only surfaced the overlay is never double-forwarded.
 func (m *home) requestInteractive(p *store.OpenPane, replayKey *tea.KeyMsg) (tea.Model, tea.Cmd) {
+	// A tab whose PTY ended owns nothing to type into (#7944): refuse before
+	// any bind, naming the close-and-recreate path. This is the single
+	// chokepoint every interactive entry — focused Enter, click, unbound
+	// letter, tree select — funnels through.
+	if err := interactiveTabGuard(p.Instance(), p.Tab()); err != nil {
+		return m, m.handleNotice(err)
+	}
 	// The first-time help defers activation to its dismiss callback, which
 	// runs as a tea.Cmd off the event loop — the pane must travel as an
 	// enterInteractiveMsg so it is re-validated on arrival (#716). With the
@@ -125,6 +132,11 @@ func (m *home) activateInteractive(p *store.OpenPane) tea.Cmd {
 	// same truthful error Enter would give now, not a generic bind failure.
 	if err := interactiveGuard(p.Instance()); err != nil {
 		return m.handleGuardResult(err)
+	}
+	// Same re-check at the TAB level (#7944): the shell can have died under a
+	// live session in the same window.
+	if err := interactiveTabGuard(p.Instance(), p.Tab()); err != nil {
+		return m.handleNotice(err)
 	}
 
 	// Focus (and, via the recency touch, un-auto-hide) the pane, then bind its live

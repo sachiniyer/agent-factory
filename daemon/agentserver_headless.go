@@ -95,10 +95,11 @@ type tabKeeper interface {
 	// TabsData projects the roster (agent tab first) plus each tab's exit
 	// evidence — the /v1/agent/tabs payload.
 	TabsData() []session.TabData
-	// RecordProcessTabExits probes un-recorded process tabs before a roster
-	// read so a tab whose command already finished does not report a stale
-	// absence — the read side of stampProcessTabExit's restore path.
-	RecordProcessTabExits()
+	// RecordTabExits probes un-recorded PTY tabs (process, and shell since
+	// #7944) before a roster read so a tab whose command already finished does
+	// not report a stale absence — the read side of stampTabExit's restore
+	// path.
+	RecordTabExits()
 	// AddShellTabWithID spawns a shell tab, assigning the daemon-supplied id
 	// verbatim (idempotency key for the replayed create).
 	AddShellTabWithID(id string) (*session.Tab, error)

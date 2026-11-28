@@ -389,6 +389,14 @@ func (m *Manager) SnapshotWithSkipped(repoID string) ([]session.InstanceData, []
 	for _, entry := range entries {
 		projected := entry.pending
 		if entry.instance != nil {
+			// Kick the shell-exit refresh — never wait on it. Snapshot latency
+			// must not depend on tmux responsiveness (#7944): exit evidence is
+			// only discovered when something looks, and on a live instance only
+			// a restore or a reader looks, so the probe pass runs in the
+			// background and its stamp lands on the NEXT read. A shell whose
+			// session vanished since the last pass reports exit: null until
+			// then — the truthful "not provably ended" answer, not a guess.
+			entry.instance.KickShellExitProbe()
 			// The client payload is a PROJECTION: InstanceData doubles as the
 			// instances.json record, so it carries the daemon-side limit-wall
 			// machinery (raw pane anchors, runtime pins, the retired shadow)

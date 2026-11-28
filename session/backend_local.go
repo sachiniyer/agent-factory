@@ -798,6 +798,7 @@ func (b *LocalBackend) setupTabs(i *Instance) (setupErr error) {
 				i.touchLocked()
 				i.mu.Unlock()
 				recordSiblingLaunch(i, tab.ID, tab.tmux)
+				clearTabExit(i, tab.ID)
 				i.markLoadRuntimeReplaced()
 				if account != "" {
 					respawnedAccountTabs = append(respawnedAccountTabs, tab.tmux)
@@ -942,6 +943,12 @@ func (b *LocalBackend) setupTabs(i *Instance) (setupErr error) {
 			if t.ID == bindings[k].id {
 				if t.tmux != bindings[k].tmux {
 					t.tmux = bindings[k].tmux
+					i.touchLocked()
+				}
+				if t.Exit != nil {
+					// The stamped exit described the OLD incarnation's end —
+					// keeping it would read this live replacement as dead.
+					t.Exit = nil
 					i.touchLocked()
 				}
 				bindings[k].bound = true

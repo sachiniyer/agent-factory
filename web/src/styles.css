@@ -1690,6 +1690,14 @@ body[data-project-color] [data-af-theme="dark"] {
   border-bottom-color: transparent;
 }
 
+/* A tab whose PTY recorded its exit (#7944): muted ink, matching the TUI tree
+ * row's " · dead" marker. The active-tab underline survives — it still answers
+ * "which pane" — only the name dims. The button stays clickable: opening the
+ * dead tab shows the held dead pane's screen. */
+.af-tab-dead {
+  color: var(--af-ink-muted);
+}
+
 /* The tab is a drag source (feat: split tabs): a grab cursor cues that it can be
  * dragged into a pane to split. */
 .af-tab {

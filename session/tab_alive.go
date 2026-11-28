@@ -38,3 +38,20 @@ func (i *Instance) TabAlive(idx int) bool {
 	}
 	return false
 }
+
+// TabDead reports whether the tab at idx is PROVABLY ended — its exit is
+// stamped — and nothing else (#7944). It is positive evidence only: every
+// probe failure, timeout, or unproven absence answers false, because the
+// consumers (the tree row, the pane header, the interactive-entry guard) must
+// never steer a user into closing a shell that might be live. It runs no tmux
+// call: the stamp is written by the async probe pass (KickShellExitProbe),
+// the restore paths, or the roster reconcile, so a read on the Bubble Tea
+// loop can never block on tmux. A remote tab whose death its agent-server has
+// not yet stamped answers false — the bind reaches the remote pane, which
+// shows its own dead screen — the same alive-or-unknown direction TabAlive
+// takes for a wedged server (#1962).
+func (i *Instance) TabDead(idx int) bool {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	return idx >= 0 && idx < len(i.Tabs) && i.Tabs[idx].Exit != nil
+}

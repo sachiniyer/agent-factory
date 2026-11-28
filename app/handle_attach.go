@@ -313,6 +313,38 @@ func webTabAttachGuard(inst *session.Instance, tabIdx int) error {
 	}
 }
 
+// interactiveTabGuard fences INTERACTIVE entry off a SHELL tab whose exit is
+// stamped (#7944): the shell can end under a live session (Ctrl-D, `exit`)
+// while its row still reads open, and entering then binds a dead pane —
+// every keystroke silently swallowed. It is an enter-pane guard only:
+// full-screen attach still reaches the tab. The refusal names the existing
+// respawn path — close the tab and open a new one — reading the live bindings
+// the way restoreKeyHint does; `t` opens the Terminal/VS Code picker, which
+// is exactly the kind it replaces. Only the shell kind is fenced: the agent
+// tab's liveness is interactiveGuard's session-level check, web/vscode/docs
+// kinds are webTabAttachGuard's, and process tabs keep master's behavior
+// exactly (a dead process pane holds its output — #4506 — and `t` cannot
+// recreate its command). TabDead reads only the stamped exit — positive
+// evidence, no tmux call — so the guard cannot block the event loop or steer
+// a user into closing a shell that might be live. A nil error means the tab
+// is enterable.
+func interactiveTabGuard(inst *session.Instance, tabIdx int) error {
+	if inst == nil {
+		return nil
+	}
+	tabs := inst.GetTabs()
+	if tabIdx < 0 || tabIdx >= len(tabs) {
+		return nil
+	}
+	if tabs[tabIdx].Kind != session.TabKindShell || !inst.TabDead(tabIdx) {
+		return nil
+	}
+	return fmt.Errorf("tab '%s' is dead — press %s to close it, then %s for a new one",
+		tabs[tabIdx].Name,
+		keys.GlobalKeyBindings[keys.KeyCloseTab].Help().Key,
+		keys.GlobalKeyBindings[keys.KeyNewTab].Help().Key)
+}
+
 // attachSelected runs the tree-selection full-screen attach flow for a
 // guarded (non-nil, non-Loading, non-Deleting, tmux-alive) instance.
 //

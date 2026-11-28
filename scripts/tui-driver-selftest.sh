@@ -1725,6 +1725,136 @@ EOF
     return "$rc"
 }
 
+# _expect_dead_shell_tab_renders — #7944. A shell tab is the #7061 case with the
+# respawn half cut away: its session ends for good when the shell exits, and
+# before this fix nothing anywhere said so — the tree row kept " · open", the
+# pane header had no marker, `sessions get` reported exit: null, and Enter put
+# the pane in interactive mode where keystrokes silently vanished into the dead
+# PTY. The flow is the reported one: open the tab as a pane, enter interactive
+# mode, and type `exit` at the bash prompt — then every surface must read dead
+# and Enter must refuse with the hint naming the w/t affordance.
+# shellcheck disable=SC2317  # dispatched indirectly via step(); not dead code.
+_expect_dead_shell_tab_renders() {
+    local saved_cols="$AF_DRIVER_COLS" saved_rows="$AF_DRIVER_ROWS"
+    local bin n header deadline rc=0
+    bin="$(_af_resolve_bin)"
+    if ! AGENT_FACTORY_HOME="$AGENT_FACTORY_HOME" "$bin" sessions tab-create cycle \
+        --repo "$AF_DRIVER_REPO" --kind shell >/dev/null; then
+        _af_fail "af sessions tab-create could not add the shell tab"
+        return 1
+    fi
+
+    af_resize "$saved_cols" 20 || return 1
+    af_select cycle || rc=1
+    if [ "$rc" -eq 0 ]; then
+        n="$(_af_cli_tab_slot cycle shell)" || rc=1
+    fi
+    if [ "$rc" -eq 0 ]; then
+        af_focus_tree || rc=1
+    fi
+    if [ "$rc" -eq 0 ]; then
+        # The pane header shows the tab's DISPLAY label — "Terminal" for the
+        # canonical "shell" name the CLI roster reports.
+        _af_jump_preview "$n" Terminal || rc=1
+    fi
+    if [ "$rc" -eq 0 ]; then
+        af_send s
+        deadline=$(( $(_af_now) + AF_DRIVER_TIMEOUT ))
+        while :; do
+            header="$(_af_pane_header_row)"
+            if printf '%s\n' "$header" | grep -qE -- 'shell|Terminal' \
+                && ! printf '%s\n' "$header" | grep -qE -- 'preview'; then
+                break
+            fi
+            if [ "$(_af_now)" -ge "$deadline" ]; then
+                _af_fail "s did not open the shell tab as a pane (pane headers: '$header')"
+                rc=1
+                break
+            fi
+            sleep "$AF_DRIVER_POLL"
+        done
+    fi
+    if [ "$rc" -eq 0 ]; then
+        af_enter_interactive || rc=1
+    fi
+    if [ "$rc" -eq 0 ]; then
+        # The reported repro is Ctrl-D; `exit` is the same death one keystroke
+        # earlier and needs no eof-binding assumption.
+        af_send_to_pane exit || rc=1
+    fi
+    if [ "$rc" -eq 0 ]; then
+        # The daemon stamps the exit on its next probe pass (async — a
+        # shell's session is gone outright, so the evidence is a
+        # liveness-proven absence, and `exit` carries no status). kind_name is
+        # the wire's kind string; kind is an integer.
+        deadline=$(( $(_af_now) + 15 ))
+        until AGENT_FACTORY_HOME="$AGENT_FACTORY_HOME" "$bin" sessions get cycle --repo "$AF_DRIVER_REPO" 2>/dev/null \
+            | jq -e '.tabs[] | select(.kind_name == "shell") | .exit != null' >/dev/null 2>&1; do
+            if [ "$(_af_now)" -ge "$deadline" ]; then
+                _af_fail 'the dead shell tab never reported a stamped exit'
+                rc=1
+                break
+            fi
+            sleep "$AF_DRIVER_POLL"
+        done
+    fi
+    if [ "$rc" -eq 0 ]; then
+        # Nav mode must come back on its own: a pane whose PTY is gone cannot
+        # stay interactive. Grow the TUI so the dead tab's row is unfolded —
+        # at 20 rows cycle's tabs collapse into "▼ N more" — then the tree
+        # row and the header both read dead.
+        af_resize "$saved_cols" 40 || rc=1
+        deadline=$(( $(_af_now) + AF_DRIVER_TIMEOUT ))
+        while [ "$rc" -eq 0 ]; do
+            # "Terminal · dead" is text only the fix produces, on the shell
+            # tab's row only — never the one-shot's row, never tmux's own
+            # "Pane is dead" banner (which says nothing about the tab row).
+            if af_capture | grep -qE -- 'Terminal · dead' \
+                && _af_pane_header_row | grep -qE -- '· dead'; then
+                break
+            fi
+            if [ "$(_af_now)" -ge "$deadline" ]; then
+                _af_fail "the dead shell tab never read dead in the tree row and pane header"
+                af_capture >&2
+                rc=1
+                break
+            fi
+            sleep "$AF_DRIVER_POLL"
+        done
+    fi
+    if [ "$rc" -eq 0 ]; then
+        # Enter must refuse with the hint that names the existing respawn
+        # affordance — no interactive mode swallowing keystrokes into a dead
+        # PTY. The invariant drops interactive mode a poll or two after the
+        # stamp lands, so Enter is retried: while the mode still holds the
+        # key forwards harmlessly into the dead pane; once nav is back the
+        # guard fires the hint.
+        deadline=$(( $(_af_now) + AF_DRIVER_TIMEOUT ))
+        local next_enter=0
+        while :; do
+            if [ "$(_af_now)" -ge "$next_enter" ]; then
+                af_send Enter
+                next_enter=$(( $(_af_now) + 3 ))
+            fi
+            # The guard's own hint, verbatim — "is dead" alone would match
+            # tmux's "Pane is dead" banner wherever it renders.
+            if af_capture | grep -qE -- 'press w to close it, then t for a new one'; then
+                break
+            fi
+            if [ "$(_af_now)" -ge "$deadline" ]; then
+                _af_fail "Enter on the dead shell tab never refused with the respawn hint"
+                af_capture >&2
+                rc=1
+                break
+            fi
+            sleep "$AF_DRIVER_POLL"
+        done
+    fi
+
+    af_resize "$saved_cols" "$saved_rows" || return 1
+    return "$rc"
+}
+
 # _expect_scrolled_rail_relaunch — the LIVE half of #2148. At 80x24, seed
 # enough sessions for the current row density and select the last: the rail scrolls,
 # the header is gone, and the boot gate has to read the frame as booted anyway.
@@ -2680,6 +2810,7 @@ step "a committed pane on an idle alternate-screen tab renders it (#7037)" _expe
 # --- #7061: a pane first opened on an already-finished one-shot tab shows its end ---
 # Same 'cycle' instance; the previewing pane it opens from is the one above.
 step "a pane opened on a finished one-shot tab shows its output and the dead marker (#7061)" _expect_dead_tab_pane_renders
+step "a dead shell tab reads dead everywhere and Enter refuses with the respawn hint (#7944)" _expect_dead_shell_tab_renders
 
 # --- #7485 regression: the rail ellipsizes a title past its cell ---
 # The rail gives a title avail = clamp(⌊cols·25%⌋,22,36) − 9 cells and draws

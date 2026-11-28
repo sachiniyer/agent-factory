@@ -820,17 +820,17 @@ func TestRenderTabRows(t *testing.T) {
 	r := NewInstanceRenderer()
 	r.SetWidth(30)
 
-	mid := ansiEscape.ReplaceAllString(r.RenderTab("Agent", 1, false, false, true), "")
+	mid := ansiEscape.ReplaceAllString(r.RenderTab("Agent", 1, false, false, true, false), "")
 	assert.Contains(t, mid, "├ 1 Agent · open", "active non-last tab: ├ connector + slot number + · open marker")
 
-	last := ansiEscape.ReplaceAllString(r.RenderTab("Terminal", 2, true, false, false), "")
+	last := ansiEscape.ReplaceAllString(r.RenderTab("Terminal", 2, true, false, false, false), "")
 	assert.Contains(t, last, "└ 2 Terminal", "last tab uses the └ connector")
 	assert.NotContains(t, last, "open", "inactive tabs carry no active marker")
 
 	// Rows must not exceed the container: effective width + the 2-cell padding
 	// every sidebar row shares.
 	r.SetWidth(12)
-	narrow := r.RenderTab("a-very-long-process-tab-name", 3, true, true, true)
+	narrow := r.RenderTab("a-very-long-process-tab-name", 3, true, true, true, false)
 	assert.LessOrEqual(t, lipgloss.Width(narrow), 14, "tab rows must hard-truncate to the row width")
 }
 
@@ -839,6 +839,45 @@ func TestTabRowForegroundMatchesAgentTab(t *testing.T) {
 		"Terminal/default tab rows must use the same foreground as the Agent/active tab")
 	assert.NotEqual(t, lipgloss.NoColor{}, tabRowSelectedStyle.GetBackground(),
 		"selected tab rows keep their highlight background")
+}
+
+// TestRenderTab_DeadMarker is the #7944 row marker: a tab whose exit is
+// recorded reads " · dead" instead of " · open" — the live-looking marker was
+// the bug report's own example. Dead wins over open when both hold, since the
+// open pane shows the dead screen and " · open" is the lie this removes.
+func TestRenderTab_DeadMarker(t *testing.T) {
+	r := NewInstanceRenderer()
+	r.SetWidth(30)
+
+	dead := ansiEscape.ReplaceAllString(r.RenderTab("Terminal", 2, true, false, false, true), "")
+	assert.Contains(t, dead, "└ 2 Terminal · dead", "a dead tab row carries the dead marker")
+	assert.NotContains(t, dead, "open", "a dead tab never reads open")
+
+	deadOpen := ansiEscape.ReplaceAllString(r.RenderTab("Terminal", 2, true, false, true, true), "")
+	assert.Contains(t, deadOpen, "· dead", "dead wins over open when the dead tab is also shown in a pane")
+	assert.NotContains(t, deadOpen, "· open", "a dead tab open in a pane still does not read live")
+
+	live := ansiEscape.ReplaceAllString(r.RenderTab("Terminal", 2, true, false, true, false), "")
+	assert.Contains(t, live, "· open", "a live shown tab keeps its marker")
+	assert.NotContains(t, live, "dead", "a live tab never reads dead")
+}
+
+// deadMarkerVisible is activeMarkerVisible's twin for the " · dead" marker.
+func deadMarkerVisible(row string) bool {
+	return strings.HasSuffix(strings.TrimRight(ansiEscape.ReplaceAllString(row, ""), " "), "dead")
+}
+
+// TestRenderTab_DeadMarkerSurvivesTruncation reserves the dead marker the same
+// way the active one is reserved (#1983's rule applies unchanged): a truncated
+// tab name must lose characters, never the state cue.
+func TestRenderTab_DeadMarkerSurvivesTruncation(t *testing.T) {
+	r := NewInstanceRenderer()
+	label := "› a-very-long-shell-tab-name-that-overflows"
+	for _, width := range []int{20, 24, 30, 40} {
+		r.SetWidth(width)
+		assert.True(t, deadMarkerVisible(r.RenderTab(label, 2, false, false, false, true)),
+			"width %d: the dead marker survives truncation", width)
+	}
 }
 
 // activeMarkerVisible reports whether a rendered tab row still carries its " · open"
@@ -868,7 +907,7 @@ func TestRenderTab_ActiveMarkerSurvivesTruncation(t *testing.T) {
 
 	for _, width := range []int{20, 24, 30, 40} {
 		r.SetWidth(width)
-		row := r.RenderTab(label, 2, false, false, true)
+		row := r.RenderTab(label, 2, false, false, true, false)
 		clean := ansiEscape.ReplaceAllString(row, "")
 
 		require.Greater(t, runewidth.StringWidth(label), width,
@@ -891,7 +930,7 @@ func TestRenderTab_ActiveMarkerSurvivesWideRuneTruncation(t *testing.T) {
 	r.SetWidth(20)
 
 	// Each CJK rune is 2 cells wide: 12 runes = 24 cells, past the 20-cell row.
-	row := r.RenderTab(WebTabGlyph+" 日本語日本語日本語日本語", 2, false, false, true)
+	row := r.RenderTab(WebTabGlyph+" 日本語日本語日本語日本語", 2, false, false, true, false)
 	assert.True(t, activeMarkerVisible(row),
 		"a wide-rune tab name ate the active marker (row: %q)", ansiEscape.ReplaceAllString(row, ""))
 	assert.LessOrEqual(t, lipgloss.Width(row), 22,
@@ -926,7 +965,7 @@ func TestIndicatorsSurviveTruncation(t *testing.T) {
 			"width %d: the instance row's status glyph must survive a truncated title (row: %q)", width, row)
 
 		// The tab row's active marker, reserved by RenderTab.
-		tab := r.RenderTab(WebTabGlyph+" "+longTitle, 2, false, false, true)
+		tab := r.RenderTab(WebTabGlyph+" "+longTitle, 2, false, false, true, false)
 		assert.True(t, activeMarkerVisible(tab),
 			"width %d: the tab row's active marker must survive a truncated label", width)
 	}
@@ -952,11 +991,11 @@ func TestRenderTab_InactiveRowsUnaffected(t *testing.T) {
 	r.SetWidth(24)
 	label := WebTabGlyph + " a-very-long-web-tab-name-that-overflows"
 
-	inactive := r.RenderTab(label, 2, false, false, false)
+	inactive := r.RenderTab(label, 2, false, false, false, false)
 	assert.NotContains(t, ansiEscape.ReplaceAllString(inactive, ""), "open",
 		"inactive tabs carry no active marker")
 
-	active := r.RenderTab(label, 2, false, false, true)
+	active := r.RenderTab(label, 2, false, false, true, false)
 	assert.Equal(t,
 		runewidth.StringWidth(nameShown(inactive))-runewidth.StringWidth(activeTabMarker),
 		runewidth.StringWidth(nameShown(active)),
