@@ -666,9 +666,62 @@ func (g *GitWorktree) cleanup(allowUnregisteredRemoval bool) (CleanupState, erro
 	// the ordinary worktree and branch; on any refusal or failure, keep the session
 	// record so a retry still has the exact path + identity rather than orphaning a
 	// full duplicate after an explicit kill.
-	if err := g.cleanupRetainedArchiveTrees(); err != nil {
+	//
+	// The consumption performs raw, unbounded filesystem syscalls
+	// (open/statx/fstatat/unlinkat) against the retained tree's parent, which a
+	// cross-device archive can leave on a different, stallable filesystem than the
+	// agent-factory home (#3171). On a stalled mount this call used to block
+	// forever while the kill held killsInFlight and the per-session op lock —
+	// wedging the session permanently undeletable (#7928). Bound it the way the
+	// repo-gone twin of the same call already is
+	// (worktree_repo_gone_cleanup.go): a worker goroutine waited on under the
+	// shared cleanup deadline. A stall returns unknown + DeadlineExceeded, keeps
+	// the record as the retry handle, and releases the kill's guards; the
+	// abandoned worker may finish in the background, the same reasoning already
+	// written down for the repo-gone deadline arm.
+	//
+	// Decide BEFORE spawning that no abandoned worker is outstanding for a tree
+	// this run would touch (review R2): the fence is keyed on the durable
+	// retained-tree path, so a GitWorktree rebuilt from storage — the ghost
+	// path or a restored session — sees it too. Without it each paced retry or
+	// manual re-kill launches another worker that parks an OS thread in the
+	// same uninterruptible syscall.
+	if outstanding := retainedCleanupOutstanding(g.GetArchiveReport()); outstanding != "" {
 		r.unknown = true
-		r.errs = append(r.errs, err)
+		r.errs = append(r.errs, retainedCleanupOutstandingError(outstanding))
+		return r.state(), errors.Join(r.errs...)
+	}
+	// The worker runs unconditionally, as the unbound synchronous call did —
+	// an empty report is a no-op inside it, and the seam contract is that the
+	// retained-tree call happens. runRetainedCleanupClaimed is the atomic half
+	// of the fence: it claims the report's trees inside the worker's own run
+	// and releases them only when the worker returns.
+	cleanupRetained := repoGoneCleanupRetainedTrees // read at spawn: the deadline may abandon this worker
+	deleteDone := make(chan error, 1)
+	go func() { deleteDone <- runRetainedCleanupClaimed(g, cleanupRetained) }()
+	deadline, stopDeadline := repoGoneCleanupDeadline()
+	defer stopDeadline()
+	select {
+	case err := <-deleteDone:
+		if err != nil {
+			r.unknown = true
+			r.errs = append(r.errs, err)
+			return r.state(), errors.Join(r.errs...)
+		}
+	case <-deadline:
+		// Do NOT write a durable cleanup_stalled here. The fence the worker
+		// still holds IS the latch, and it belongs to that worker alone
+		// (review R1): it releases on the worker's own return — success lets
+		// the next retry settle, failure lets it start fresh — and a permanent
+		// stall holds it only until a restart. A durable latch would refuse
+		// every retry even after the worker deleted the tree, which is exactly
+		// what #7937 was closed for.
+		r.unknown = true
+		// This message too states only what the layer knows; whether the kill is
+		// retried is the caller's policy to state — a ghost kill never is.
+		r.errs = append(r.errs, fmt.Errorf(
+			"retained archive tree cleanup did not finish within %s; its worker keeps running on a stalled or slow filesystem: %w",
+			repoGoneCleanupTimeout, context.DeadlineExceeded))
 		return r.state(), errors.Join(r.errs...)
 	}
 
@@ -821,7 +874,9 @@ func (g *GitWorktree) cleanup(allowUnregisteredRemoval bool) (CleanupState, erro
 	return r.state(), nil
 }
 
-// Test seams for the repo-gone cleanup's final destructive boundary.
+// Test seams for the repo-gone cleanup's final destructive boundary. The first
+// two are shared with the plain kill's retained-tree cleanup (#7928): both
+// paths bound the same unbounded filesystem work under the same deadline.
 var (
 	repoGoneCleanupTimeout = localGitTimeout
 	// repoGoneCleanupDeadline starts the cleanup's deadline clock: the channel
