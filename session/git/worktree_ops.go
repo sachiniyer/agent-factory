@@ -695,6 +695,13 @@ func (g *GitWorktree) cleanup(allowUnregisteredRemoval bool) (CleanupState, erro
 		// unknown, keeps the session record, and releases the kill's guards. The
 		// abandoned worker may finish in the background; its opened handles identify
 		// only the retained tree, so it cannot destroy unrelated data.
+		//
+		// Latch the stall on the workspace too (the same chokepoint the ordinary
+		// cleanup-command timeout uses above): prepareKillTeardown fences retries
+		// only while CleanupRetryPending() holds, so without a durable record every
+		// status poll would launch another uninterruptible cleanup goroutine against
+		// the same stalled filesystem, exhausting goroutines and file descriptors.
+		g.markCleanupStalled()
 		r.unknown = true
 		r.errs = append(r.errs, fmt.Errorf(
 			"retained-tree cleanup did not finish within %s: %w",
