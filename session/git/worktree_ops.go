@@ -717,8 +717,10 @@ func (g *GitWorktree) cleanup(allowUnregisteredRemoval bool) (CleanupState, erro
 		// every retry even after the worker deleted the tree, which is exactly
 		// what #7937 was closed for.
 		r.unknown = true
+		// This message too states only what the layer knows; whether the kill is
+		// retried is the caller's policy to state — a ghost kill never is.
 		r.errs = append(r.errs, fmt.Errorf(
-			"retained archive tree cleanup did not finish within %s; its worker keeps running on a stalled or slow filesystem and the kill retries automatically: %w",
+			"retained archive tree cleanup did not finish within %s; its worker keeps running on a stalled or slow filesystem: %w",
 			repoGoneCleanupTimeout, context.DeadlineExceeded))
 		return r.state(), errors.Join(r.errs...)
 	}

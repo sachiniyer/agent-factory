@@ -181,10 +181,17 @@ func awaitWorkerInside(t *testing.T, w *retainedCleanupWedge, done <-chan cleanu
 
 // awaitRefusal asserts that a call to gw.Cleanup refuses quickly because a
 // cleanup worker is still outstanding: the run reports unknown, the message
-// says the cleanup is still running on a stalled or slow filesystem and that
-// the kill retries automatically, and — the load-bearing part — no new worker
-// was started. The 5s window detects a refusal that never comes (a stacked
-// worker waits forever); it is not a speed budget.
+// says the cleanup is still running on a stalled or slow filesystem and that a
+// second worker was refused, and — the load-bearing part — no new worker was
+// started. The 5s window detects a refusal that never comes (a stacked worker
+// waits forever); it is not a speed budget.
+//
+// The message must say ONLY what this layer knows. Whether the kill retries is
+// the caller's policy to state, once: a live kill wraps this in
+// retainedKillTeardownError's "will be retried automatically", a ghost kill in
+// the "not retried automatically — run the kill again" wrapper
+// (daemon/manager_sessions.go). If this layer ever claims a retry again, the
+// ghost's final message contradicts itself — that is review R1's regression.
 func awaitRefusal(t *testing.T, gw *GitWorktree, calls *atomic.Int32, wantCalls int32, what string) {
 	t.Helper()
 	done := cleanupAsync(gw)
@@ -194,9 +201,20 @@ func awaitRefusal(t *testing.T, gw *GitWorktree, calls *atomic.Int32, wantCalls 
 			t.Fatalf("%s: a fenced retry must keep the record unknown, got state=%v err=%v", what, observed.state, observed.err)
 		}
 		if observed.err == nil || !strings.Contains(observed.err.Error(), "still running") ||
-			!strings.Contains(observed.err.Error(), "retries automatically") {
-			t.Fatalf("%s: a fenced retry must say the cleanup is still running and the kill retries automatically, got: %v",
+			!strings.Contains(observed.err.Error(), "refusing to start a second cleanup worker") {
+			t.Fatalf("%s: a fenced retry must say the cleanup is still running and a second worker was refused, got: %v",
 				what, observed.err)
+		}
+		// The check is on policy PHRASES, not the bare words: the test name rides
+		// inside the reported path, which can itself contain "Retry".
+		for _, policy := range []string{
+			"automatically", "the kill retries", "restart the daemon",
+			"run the kill again", "not retried", "will be retried",
+		} {
+			if strings.Contains(strings.ToLower(observed.err.Error()), policy) {
+				t.Fatalf("%s: the git layer must not state retry policy — the caller owns it — got: %v",
+					what, observed.err)
+			}
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatalf("%s: the retry did not refuse quickly — a second worker may have started (worker invocations so far: %d)",
@@ -510,6 +528,122 @@ func TestCleanup_SlowRetainedTreeSettlesWithoutDaemonRestart(t *testing.T) {
 	}
 	if report := gw.GetArchiveReport(); !report.Empty() {
 		t.Fatalf("the settled kill left a retained row behind: %+v", report)
+	}
+}
+
+// TestCleanup_RetainedTreeFenceBlocksRepoGonePhase pins the cross-path half of
+// the fence (#7950 review R2): while a plain-kill worker holds a tree past the
+// deadline, the repo-gone path's retained phase must refuse to start work on it
+// — the claim inside runRetainedCleanupClaimed refuses BEFORE fn runs, so the
+// seam is never invoked a second time. Reverting that call site to
+// cleanupRetained(g) makes this fail: the repo-gone phase then invokes the seam
+// on a held tree and parks its own worker on it.
+func TestCleanup_RetainedTreeFenceBlocksRepoGonePhase(t *testing.T) {
+	gw, _, _, _, report := retainedCleanupFixture(t)
+	repoGoneGw, claim, _ := repoGoneCleanupClaim(t)
+	repoGoneGw.RestoreArchiveReport(report)
+	wedge := newRetainedCleanupWedge(errors.New("retained tree remained unavailable"), false)
+	installRetainedCleanupStub(t, wedge)
+	installChannelDeadline(t, wedge)
+
+	// Park the plain kill's worker inside the tree past the deadline.
+	done := cleanupAsync(gw)
+	awaitWorkerInside(t, wedge, done)
+	wedge.deadlineCh <- time.Now()
+	first := awaitCleanup(t, done, "the retained-tree deadline")
+	if first.state != CleanupStateUnknown {
+		t.Fatalf("attempt one must return unknown at the deadline, got %v", first.state)
+	}
+
+	// The repo-gone call must refuse quickly: its worker claims the report
+	// inside runRetainedCleanupClaimed, sees the held tree, and returns the
+	// outstanding-fence error without ever running fn. An answered refusal is
+	// not an abandoned worker, so the late-result channel is nil.
+	type repoGoneResult struct {
+		state CleanupState
+		err   error
+		late  <-chan error
+	}
+	repoGoneDone := make(chan repoGoneResult, 1)
+	go func() {
+		state, err, late := repoGoneGw.CleanupClaimedRepoGoneWithLateResult(claim)
+		repoGoneDone <- repoGoneResult{state: state, err: err, late: late}
+	}()
+	select {
+	case observed := <-repoGoneDone:
+		if observed.state != CleanupStateUnknown || observed.err == nil ||
+			!strings.Contains(observed.err.Error(), "still running") {
+			t.Fatalf("the repo-gone retained phase must refuse on the held tree's fence, got state=%v err=%v",
+				observed.state, observed.err)
+		}
+		if observed.late != nil {
+			t.Fatal("an answered fence refusal is not an abandoned repo-gone worker: late must be nil")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatalf("the repo-gone retained phase did not refuse quickly — it may be doing work on the held tree (worker invocations so far: %d)",
+			wedge.calls.Load())
+	}
+	if got := wedge.calls.Load(); got != 1 {
+		t.Fatalf("the repo-gone phase ran the cleanup seam on a fenced tree — %d invocation(s)", got)
+	}
+}
+
+// TestCleanup_RetainedTreeFenceBlocksPlainKill is the reverse direction of the
+// same property (#7950 review R2): while the repo-gone path's retained worker
+// holds a tree past its deadline, a plain-kill retry refuses fast and starts
+// nothing. The worker abandoned inside the repo-gone call keeps the fence; the
+// advisory check in cleanup() is what sees it.
+func TestCleanup_RetainedTreeFenceBlocksPlainKill(t *testing.T) {
+	gw, _, _, _, report := retainedCleanupFixture(t)
+	repoGoneGw, claim, _ := repoGoneCleanupClaim(t)
+	repoGoneGw.RestoreArchiveReport(report)
+	wedge := newRetainedCleanupWedge(errors.New("retained tree remained unavailable"), false)
+	installRetainedCleanupStub(t, wedge)
+	installChannelDeadline(t, wedge)
+
+	// Park the repo-gone retained worker inside the shared tree past its
+	// deadline: the call returns unknown + DeadlineExceeded and hands back the
+	// abandoned worker's late-result channel while the fence stays held.
+	type repoGoneResult struct {
+		state CleanupState
+		err   error
+		late  <-chan error
+	}
+	repoGoneDone := make(chan repoGoneResult, 1)
+	go func() {
+		state, err, late := repoGoneGw.CleanupClaimedRepoGoneWithLateResult(claim)
+		repoGoneDone <- repoGoneResult{state: state, err: err, late: late}
+	}()
+	select {
+	case <-wedge.started:
+	case <-time.After(deadlineObservationBudget):
+		wedge.unblock()
+		<-repoGoneDone
+		t.Fatal("repo-gone retained phase never reached the cleanup seam")
+	}
+	wedge.deadlineCh <- time.Now()
+	var observed repoGoneResult
+	select {
+	case observed = <-repoGoneDone:
+	case <-time.After(deadlineObservationBudget):
+		wedge.unblock()
+		t.Fatal("the repo-gone cleanup did not return at the shared deadline")
+	}
+	if observed.state != CleanupStateUnknown || !errors.Is(observed.err, context.DeadlineExceeded) || observed.late == nil {
+		wedge.unblock()
+		t.Fatalf("the repo-gone deadline arm must return unknown + DeadlineExceeded with a late result, got state=%v err=%v late=%v",
+			observed.state, observed.err, observed.late)
+	}
+
+	// The plain kill's retry on the same durable report must refuse fast and
+	// start nothing — the fence outlives the call that spawned the worker.
+	awaitRefusal(t, gw, wedge.calls, 1, "the plain-kill retry while a repo-gone worker is outstanding")
+
+	// The abandoned repo-gone worker's own return still reports through the
+	// late channel.
+	wedge.unblock()
+	if err := <-observed.late; err == nil || !strings.Contains(err.Error(), "retained tree remained unavailable") {
+		t.Fatalf("the abandoned repo-gone worker's own return must surface, got %v", err)
 	}
 }
 

@@ -89,13 +89,17 @@ func claimRetainedCleanupTrees(report ArchiveReport) (release func(), outstandin
 }
 
 // retainedCleanupOutstandingError is what a fenced retry gets: the cleanup is
-// still running on a stalled or slow filesystem and the kill retries
-// automatically. It is a plain error, never a refusal sentinel — the record
-// stays kept for exactly the paced retry this message describes.
+// still running on a stalled or slow filesystem and a second worker was
+// refused. It says only what this layer knows — whether the kill retries is
+// the caller's policy to state, once: a live kill's retainedKillTeardownError
+// says it "will be retried automatically", while a ghost kill is never retried
+// and its wrapper says to run the kill again (daemon/manager_sessions.go).
+// It is a plain error, never a refusal sentinel — the record stays kept for
+// exactly the attempt the caller describes.
 func retainedCleanupOutstandingError(path string) error {
 	return fmt.Errorf(
 		"retained archive tree cleanup at %s is still running from an earlier attempt on a stalled or slow filesystem; "+
-			"the kill retries automatically — refusing to start a second cleanup worker", path)
+			"refusing to start a second cleanup worker", path)
 }
 
 // runRetainedCleanupClaimed runs fn — the retained-tree cleanup — while holding
