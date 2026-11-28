@@ -423,17 +423,19 @@ func dockerRunOptionConsumesNext(arg string) bool {
 // visit for each env entry a -e/--env spelling carries. The entry is either
 // NAME=value (every =-valued spelling: separate, --env=, -e=, attached, and
 // the trailing -e of a combined short cluster) or the bare NAME a separate
-// `-e NAME` passes docker, which resolves against the daemon environment.
+// `-e NAME` passes docker, which resolves against the CLI environment.
 //
 // The walk mirrors the validators' pflag model exactly so the warning's name
 // extractor (dockerRunArgsEnvNames) and the gitconfig resolver
 // (dockerRunArgsEnvValue) share ONE spelling surface and cannot drift: it
 // recognizes every spelling the account/credential validators accept, stops at
-// the first non-option argument (docker run parses non-interspersed, so no
-// later token is a flag), skips a value-taking option's swallowed next argv
-// element (#7726), and walks combined short-option clusters the way
-// dockerCheckShorthandCluster does — reaching -e whether it stands alone,
-// attaches inline (-teNAME=v), or takes the next argument (-te NAME=v).
+// the first non-option argument and at the -- terminator (docker run parses
+// non-interspersed, so no later token is a flag — every validator refuses
+// `--` before this walk runs, but the contract mirrors pflag), skips a
+// value-taking option's swallowed next argv element (#7726), and walks
+// combined short-option clusters the way dockerCheckShorthandCluster does —
+// reaching -e whether it stands alone, attaches inline (-teNAME=v), or takes
+// the next argument (-te NAME=v).
 func dockerRunArgsEnvEntries(args []string, visit func(entry string)) {
 	for index := 0; index < len(args); index++ {
 		arg := args[index]
@@ -449,6 +451,10 @@ func dockerRunArgsEnvEntries(args []string, visit func(entry string)) {
 			visit(strings.TrimPrefix(arg, "-e="))
 		case strings.HasPrefix(arg, "-e") && len(arg) > 2:
 			visit(strings.TrimPrefix(arg, "-e"))
+		case arg == "--":
+			// pflag's option terminator: every token after it is positional,
+			// so no later token is a flag either.
+			return
 		case strings.HasPrefix(arg, "--") || (len(arg) == 2 && arg[0] == '-'):
 			// A bare value-taking option (--label, -l, or a mount option
 			// neither consumer tracks) swallows the NEXT argv element as its
