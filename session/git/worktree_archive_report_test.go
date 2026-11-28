@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -195,11 +196,18 @@ func TestArchiveReport_RetainedTreeAtPath(t *testing.T) {
 // TestArchiveReport_RetainedTreeAtPath_DeleteRecreateReadsUntracked pins the
 // #7900 property "tracked proves the same tree, not a reused (dev, ino)": a
 // record captured with a creation pin must NOT read a delete-and-recreate at
-// the tracked path as its tree. Where the filesystem hands the replacement
-// the recycled inode slot — ext4 does so every time the issue measured —
-// dev+ino+type alone cannot tell the two apart, so the pin is the only
-// evidence the data changed. Either way the verdict is untracked: an inode
-// mismatch fails the identity compare, a recycled inode fails the pin.
+// the tracked path as its tree. The pin is the only evidence the data
+// changed when the filesystem hands the replacement the recycled inode slot
+// — so the test simulates that slot by answering the recorded dev+ino+type
+// for the new tree (exactly what a recycled slot makes the kernel answer,
+// as the pin-less test does), leaving the pin to do the separating.
+//
+// What the pin can prove is bounded by the birth time's granularity: it is
+// a per-tick stamp, so the test recreates until a probe reads a LATER tick
+// than the recorded pin rather than assuming one recreation always lands on
+// a different stamp. On kernels before the 6.13 multigrain floor — CI's
+// ubuntu-24.04 runners included — the tick can be as coarse as a scheduler
+// interval, hence the loop: a recreate in a later tick, not never.
 func TestArchiveReport_RetainedTreeAtPath_DeleteRecreateReadsUntracked(t *testing.T) {
 	parent := t.TempDir()
 	path := filepath.Join(parent, ".af-source-0123456789abcdef0123456789abcdef")
@@ -215,16 +223,34 @@ func TestArchiveReport_RetainedTreeAtPath_DeleteRecreateReadsUntracked(t *testin
 		newArchiveRetainedTree(path, identity, pin, nil),
 	}}
 
-	// rm plus recreate at the same path: different data, possibly the same
-	// recycled inode slot.
-	require.NoError(t, os.RemoveAll(path))
-	require.NoError(t, os.Mkdir(path, 0o700))
+	// rm plus recreate at the same path in a later tick: keep replacing the
+	// tree until the pin probe reads a later stamp than the record's, so the
+	// comparison is proven on different-tick data whatever the granularity.
+	var newPin int64
+	for attempt := 0; attempt < 200; attempt++ {
+		require.NoError(t, os.RemoveAll(path))
+		require.NoError(t, os.Mkdir(path, 0o700))
+		newPin, err = inspectRelocationPathPin(path)
+		require.NoError(t, err)
+		if newPin > pin {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	require.Greater(t, newPin, pin,
+		"the filesystem never stamped a later tick across 200 recreations — the pin cannot be exercised here")
 	require.NoError(t, os.WriteFile(filepath.Join(path, "replacement"), []byte("different data"), 0o600))
+
+	// The replacement holds the recycled inode slot — simulated by the
+	// identity probe answering the recorded identity for the new tree.
+	previousIdentity := relocationPathIdentity
+	relocationPathIdentity = func(string) (pathIdentity, error) { return identity, nil }
+	t.Cleanup(func() { relocationPathIdentity = previousIdentity })
 
 	tracked, err := report.RetainedTreeAtPath(path)
 	require.NoError(t, err)
 	assert.False(t, tracked,
-		"a delete-and-recreate at the tracked path is different data; the creation pin proves it even when the inode slot is recycled")
+		"a delete-and-recreate at the tracked path in a later tick is different data; the creation pin proves it even with the recycled inode slot")
 }
 
 // TestArchiveReport_RetainedTreeAtPath_PinProbeMissReadsUntracked pins the

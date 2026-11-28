@@ -649,13 +649,15 @@ func TestBindAFRelocationResidue_UnprovenAnchorResolutionIsUnknown(t *testing.T)
 }
 
 // TestResidueBindingUnproven pins the errno set that makes an Unknown verdict
-// transient (#7900): EACCES, ENOTCONN, ESTALE and EIO components and the
+// unproven (#7900): EACCES, ENOTCONN, ESTALE and EIO components and the
 // present-but-unresolvable component ResolveForCompareWith reports
 // (ErrUnresolvedComponent, the dangling link) are lookups that did not
-// happen — a retry can answer them once the component is readable. Every
-// other failure keeps the generic refusal wording: absence is an answer,
-// a deadline is not a read a retry is expected to complete, and a parse
-// failure is not transient.
+// happen rather than comparisons that answered. The refusal's remedy forks
+// on ResidueBindingDangling — retry for a retryable read, fix-or-remove for
+// a dangling link — but both classes are unproven here. Every other failure
+// keeps the generic refusal wording: absence is an answer, a deadline is
+// not a read a retry is expected to complete, and a parse failure is not
+// transient.
 func TestResidueBindingUnproven(t *testing.T) {
 	componentErr := func(err error) error {
 		return fmt.Errorf("residue binding failed: %w",
@@ -684,6 +686,39 @@ func TestResidueBindingUnproven(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			assert.Equal(t, c.want, ResidueBindingUnproven(c.err))
+		})
+	}
+}
+
+// TestResidueBindingDangling pins the remedy fork #7900 R3 requires: only
+// the present-but-unresolvable component (ErrUnresolvedComponent — a
+// dangling symlink) gets the fix-or-remove wording. The retryable errnos —
+// EACCES, ENOTCONN, ESTALE, EIO — are unproven but NOT dangling: a retry
+// can answer them once the component is readable, so they keep the
+// "retry once readable" clause.
+func TestResidueBindingDangling(t *testing.T) {
+	componentErr := func(err error) error {
+		return fmt.Errorf("residue binding failed: %w",
+			&os.PathError{Op: "lstat", Path: "/wt/component", Err: err})
+	}
+	cases := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"dangling component", fmt.Errorf("residue binding failed: %w",
+			&os.PathError{Op: "resolve", Path: "/wt/link", Err: pathutil.ErrUnresolvedComponent}), true},
+		{"bare ErrUnresolvedComponent", pathutil.ErrUnresolvedComponent, true},
+		{"EACCES component", componentErr(unix.EACCES), false},
+		{"ENOTCONN component", componentErr(unix.ENOTCONN), false},
+		{"ESTALE component", componentErr(unix.ESTALE), false},
+		{"EIO component", componentErr(unix.EIO), false},
+		{"nil", nil, false},
+		{"arbitrary failure", errors.New("gitdir pointer malformed"), false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			assert.Equal(t, c.want, ResidueBindingDangling(c.err))
 		})
 	}
 }

@@ -18,15 +18,18 @@ import (
 )
 
 // residueTestRepo sets up a real git repo with an initial commit and returns
-// its root, ready for `git worktree add` to place real linked worktrees whose
-// `.git` pointers BindAFRelocationResidue can authenticate.
+// its root — the kernel spelling, canonicalized through EvalSymlinks — ready
+// for `git worktree add` to place real linked worktrees whose `.git`
+// pointers BindAFRelocationResidue can authenticate.
 func residueTestRepo(t *testing.T) string {
 	t.Helper()
 	repoRoot := initTempGitRepo(t)
 	gitOut(t, repoRoot, "config", "user.email", "test@test.com")
 	gitOut(t, repoRoot, "config", "user.name", "test")
 	gitOut(t, repoRoot, "commit", "--allow-empty", "-m", "initial")
-	return repoRoot
+	resolved, err := filepath.EvalSymlinks(repoRoot)
+	require.NoError(t, err)
+	return resolved
 }
 
 // simulateCrashWindowRename models the on-disk footprint the daemon leaves when
@@ -278,12 +281,16 @@ func TestRecover_RefusesRebuildOverCrashWindowResidue(t *testing.T) {
 const residueTestParentRunes = 200
 
 // residueParentAtCapDepth returns a fresh parent directory exactly
-// residueTestParentRunes runes long, built under t.TempDir() — deterministic
-// across platforms, so the stored-record budget is exercised at the depth
-// that clipped the remedy on macOS (#7855) no matter which OS runs the test.
+// residueTestParentRunes runes long, built under a canonicalized t.TempDir()
+// — deterministic across platforms, so the stored-record budget is
+// exercised at the depth that clipped the remedy on macOS (#7855) no matter
+// which OS runs the test. The base is resolved through EvalSymlinks so the
+// path the record stores is the kernel spelling: on darwin the lexical
+// /var/... spelling is shorter than the /private/var/... the walk resolves
+// to, and the depth premise must hold on the spelling the verdict sees.
 func residueParentAtCapDepth(t *testing.T) string {
 	t.Helper()
-	base := t.TempDir()
+	base := canonicalTempDir(t)
 	pad := residueTestParentRunes - len([]rune(base)) - 1
 	require.GreaterOrEqual(t, pad, 1,
 		"t.TempDir() must leave room for at least one padding rune")
@@ -649,18 +656,18 @@ func TestLostRestoreFailure_ResidueRefusal_AllForms(t *testing.T) {
 	})
 }
 
-// TestMissingWorktreeRebuildRefusal_UnprovenBindingSaysTransient pins #7900:
-// an Unknown verdict that came from a component af could not read — here the
-// recorded source path spelled through a dangling symlink, so the binding's
-// path comparison rests on a lookup that did not happen — is transient. The
-// refusal must say so and name the component: "retry once <component> is
-// readable", not only "may belong to another session… move it out". The
-// verdict stays Unknown — the residue is still unverified, never promoted —
-// and the refusal still refuses fail-closed.
-func TestMissingWorktreeRebuildRefusal_UnprovenBindingSaysTransient(t *testing.T) {
+// TestMissingWorktreeRebuildRefusal_DanglingBindingSaysFixRemove pins #7900
+// R3: an Unknown verdict that came from a component that is present but
+// unresolvable — here the recorded source path spelled through a dangling
+// symlink, ErrUnresolvedComponent — is unproven but NOT retryable. The link
+// itself is readable and no retry makes it resolve, so the refusal names
+// the fix-or-remove remedy — "<component> is a dangling link: fix or remove
+// it, or move the residue out" — never the retry wording. The verdict stays
+// Unknown and the refusal still refuses fail-closed.
+func TestMissingWorktreeRebuildRefusal_DanglingBindingSaysFixRemove(t *testing.T) {
 	repoRoot := residueTestRepo(t)
-	const branch = "af/unproven-bind"
-	wtParent := t.TempDir()
+	const branch = "af/dangling-bind"
+	wtParent := canonicalTempDir(t)
 	realWt := filepath.Join(wtParent, "wt-real")
 	gitOut(t, repoRoot, "worktree", "add", "-b", branch, realWt)
 	quarantine := filepath.Join(wtParent, ".af-source-"+strings.Repeat("a", 32))
@@ -672,15 +679,95 @@ func TestMissingWorktreeRebuildRefusal_UnprovenBindingSaysTransient(t *testing.T
 	wtPath := filepath.Join(wtParent, "link")
 	require.NoError(t, os.Symlink(filepath.Join(wtParent, "nonexistent"), wtPath))
 
-	gw, err := git.NewGitWorktreeFromStorage(repoRoot, wtPath, "unproven-bind", branch, "", false, true)
+	// The fixture must produce the intended verdict on linux and darwin
+	// alike — assert the bind the refusal will see before asserting on its
+	// wording, so a platform that spells the fixture differently fails here
+	// rather than downstream of a clause it never produced.
+	binding, bindErr := git.BindAFRelocationResidue(quarantine, wtPath, repoRoot)
+	assert.Equal(t, git.ResidueUnknown, binding,
+		"premise: a dangling-spelled anchor binds Unknown on both platforms")
+	require.True(t, git.ResidueBindingUnproven(bindErr),
+		"premise: the dangling component is unproven on both platforms: %v", bindErr)
+	require.True(t, git.ResidueBindingDangling(bindErr),
+		"premise: the unproven class is dangling-link on both platforms: %v", bindErr)
+	// The clause names whatever component the bind's error chain carried —
+	// computed off the real bind so the assertion tracks the failed
+	// component rather than guessing which path the PathError kept. The
+	// refusal's caller names the residue itself when the chain keeps none.
+	component := git.ResidueUnprovenComponent(bindErr)
+	if component == "" {
+		component = quarantine
+	}
+
+	gw, err := git.NewGitWorktreeFromStorage(repoRoot, wtPath, "dangling-bind", branch, "", false, true)
 	require.NoError(t, err)
-	inst := &Instance{Title: "unproven-bind", Program: tmux.ProgramClaude, Path: repoRoot, gitWorktree: gw}
+	inst := &Instance{Title: "dangling-bind", Program: tmux.ProgramClaude, Path: repoRoot, gitWorktree: gw}
 
 	err = missingWorktreeRebuildRefusal(inst, gw, true, "claude")
 	require.Error(t, err, "an unverified residue must refuse fail-closed")
 	assert.ErrorIs(t, err, git.ErrRelocateStateUnknown,
 		"the verdict stays Unknown — unproven never becomes ours or foreign")
-	assert.Contains(t, err.Error(), "retry once "+filepath.Base(wtPath)+" is readable",
+	assert.Contains(t, err.Error(), filepath.Base(component)+" is a dangling link: fix or remove it, or move the residue out",
+		"the refusal names the dangling component — its basename resolving against the parent the record already names — and the fix-or-remove remedy")
+	assert.NotContains(t, err.Error(), "retry once",
+		"a dangling link is itself readable — the retry promise is for a read a retry can complete, never for a link whose target is gone")
+	assert.Contains(t, err.Error(), filepath.Base(quarantine),
+		"the refusal still names the unverified residue")
+	assert.NotContains(t, err.Error(), "move it back to "+wtPath,
+		"the refusal for an unverified residue must never direct it into this session's path")
+}
+
+// TestMissingWorktreeRebuildRefusal_UnprovenBindingSaysTransient pins #7900:
+// an Unknown verdict that came from a component af could not read — here
+// the recorded source path mode-000, so the binding's path comparison rests
+// on a lookup that did not happen — is transient. The refusal must say so
+// and name the component: "retry once <component> is readable", not only
+// "may belong to another session… move it out". The verdict stays Unknown —
+// the residue is still unverified, never promoted — and the refusal still
+// refuses fail-closed.
+func TestMissingWorktreeRebuildRefusal_UnprovenBindingSaysTransient(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("chmod-based unreadability is meaningless as root")
+	}
+	repoRoot := residueTestRepo(t)
+	const branch = "af/unproven-bind"
+	wtParent := canonicalTempDir(t)
+	realWt := filepath.Join(wtParent, "wt-real")
+	gitOut(t, repoRoot, "worktree", "add", "-b", branch, realWt)
+	quarantine := filepath.Join(wtParent, ".af-source-"+strings.Repeat("a", 32))
+	require.NoError(t, os.Rename(realWt, quarantine))
+	// The recorded source path is a real directory af cannot open: the
+	// anchor comparison's resolution fails EACCES — a lookup that did not
+	// happen, the retryable class of unproven.
+	wtPath := filepath.Join(wtParent, "wt-mode000")
+	require.NoError(t, os.Mkdir(wtPath, 0o700))
+	require.NoError(t, os.Chmod(wtPath, 0o000))
+	t.Cleanup(func() { _ = os.Chmod(wtPath, 0o700) })
+
+	gw, err := git.NewGitWorktreeFromStorage(repoRoot, wtPath, "unproven-bind", branch, "", false, true)
+	require.NoError(t, err)
+	inst := &Instance{Title: "unproven-bind", Program: tmux.ProgramClaude, Path: repoRoot, gitWorktree: gw}
+
+	// The component the clause names is whatever path the binding's error
+	// chain carries — read it off the real bind so the assertion tracks the
+	// failed component rather than guessing which path the PathError kept.
+	// The verdict is pinned too: the fixture must produce the intended
+	// unproven class on linux and darwin alike.
+	binding, bindErr := git.BindAFRelocationResidue(quarantine, wtPath, repoRoot)
+	assert.Equal(t, git.ResidueUnknown, binding,
+		"premise: an unreadable anchor binds Unknown on both platforms")
+	require.True(t, git.ResidueBindingUnproven(bindErr),
+		"premise: the chmod-000 anchor makes the bind unproven, not an answered comparison: %v", bindErr)
+	require.False(t, git.ResidueBindingDangling(bindErr),
+		"premise: the retryable class is NOT the dangling-link class: %v", bindErr)
+	component := git.ResidueUnprovenComponent(bindErr)
+	require.NotEmpty(t, component, "the unproven bind names a component")
+
+	err = missingWorktreeRebuildRefusal(inst, gw, true, "claude")
+	require.Error(t, err, "an unverified residue must refuse fail-closed")
+	assert.ErrorIs(t, err, git.ErrRelocateStateUnknown,
+		"the verdict stays Unknown — unproven never becomes ours or foreign")
+	assert.Contains(t, err.Error(), "retry once "+filepath.Base(component)+" is readable",
 		"the refusal must name the unreadable component — its basename resolving against the parent the record already names — and say the retry may clear once it is readable")
 	assert.Contains(t, err.Error(), "could not read the binding",
 		"the transient clause says WHY the binding failed")
@@ -690,13 +777,15 @@ func TestMissingWorktreeRebuildRefusal_UnprovenBindingSaysTransient(t *testing.T
 		"the refusal for an unverified residue must never direct it into this session's path")
 }
 
-// TestLostRestoreFailure_ResidueRefusalFitsCap_Unproven pins the transient
+// TestLostRestoreFailure_ResidueRefusalFitsCap_Unproven pins the unproven
 // clause at the depth that clipped the remedy on macOS (#7855): at a
 // 200-rune parent the unproven clause rides the cap ladder like every other
 // mandatory clause — naming the component's basename while that fits and
-// falling to its "unreadable component — retry once it is readable" floor
-// below — so the transient hint is never silently dropped the way optional
-// context is. Either form names the failed read and the retry.
+// falling to its floor below — so the hint is never silently dropped the
+// way optional context is. The fixture spells the anchor through a dangling
+// link, so the mandatory clause is the dangling variant (#7900 R3): the
+// fix-or-remove hint, never the retry promise. Either form keeps the
+// dangling-link wording and the remedy.
 func TestLostRestoreFailure_ResidueRefusalFitsCap_Unproven(t *testing.T) {
 	repoRoot := residueTestRepo(t)
 	const branch = "af/unproven-cap"
@@ -708,6 +797,15 @@ func TestLostRestoreFailure_ResidueRefusalFitsCap_Unproven(t *testing.T) {
 	wtPath := filepath.Join(wtParent, "link")
 	require.NoError(t, os.Symlink(filepath.Join(wtParent, "nonexistent"), wtPath))
 
+	// Pin the verdict the fixture produces on linux and darwin alike, so a
+	// platform spelling difference fails at the premise rather than
+	// downstream of a clause it never produced.
+	binding, bindErr := git.BindAFRelocationResidue(quarantine, wtPath, repoRoot)
+	assert.Equal(t, git.ResidueUnknown, binding,
+		"premise: a dangling-spelled anchor binds Unknown on both platforms")
+	require.True(t, git.ResidueBindingDangling(bindErr),
+		"premise: the unproven class is dangling-link on both platforms: %v", bindErr)
+
 	gw, err := git.NewGitWorktreeFromStorage(repoRoot, wtPath, "unproven-cap", branch, "", false, true)
 	require.NoError(t, err)
 	inst := &Instance{Title: "unproven-cap", Program: tmux.ProgramClaude, Path: repoRoot, gitWorktree: gw}
@@ -715,10 +813,12 @@ func TestLostRestoreFailure_ResidueRefusalFitsCap_Unproven(t *testing.T) {
 	record := crashWindowRefusalRecord(t, inst, gw, wtPath)
 	assert.LessOrEqual(t, len([]rune(record)), lostRestoreFailureMaxRunes,
 		"the stored record stays inside the durable cap by construction")
-	assert.Contains(t, record, "retry once",
-		"the transient clause survives the cap — a mandatory clause is never dropped")
-	assert.Contains(t, record, "readable",
-		"the transient clause keeps its retry hint at whichever rung fits")
+	assert.Contains(t, record, "dangling link",
+		"the unproven clause survives the cap at whichever rung fits — a mandatory clause is never dropped")
+	assert.Contains(t, record, "move the residue out",
+		"the dangling clause keeps its fix-or-remove remedy at whichever rung fits")
+	assert.NotContains(t, record, "retry once",
+		"a dangling link never gets the retry promise — the link is readable; its target is gone")
 	assert.Contains(t, record, filepath.Base(quarantine),
 		"the unverified residue is still named")
 }

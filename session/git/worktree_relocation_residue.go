@@ -291,13 +291,15 @@ func residuePathsEqual(a, b string) (bool, error) {
 // pointer read that did not happen: a permission, transport or stale-handle
 // errno (EACCES, ENOTCONN, ESTALE, EIO), or a component that is present but
 // unresolvable (pathutil.ErrUnresolvedComponent — the dangling symlink
-// ResolveForCompareWith reports, #7295). Those are the causes a later retry
-// can answer — the mount reconnects, the link is fixed, the mode bit is
-// repaired — so the caller names the failed component in its refusal rather
-// than only saying the residue "may belong to another session" (#7900). A
-// verdict error matching nothing here keeps the generic refusal wording: a
-// deadline or a malformed pointer file is not a read a retry is expected to
-// complete.
+// ResolveForCompareWith reports, #7295). Those are the causes a later look
+// can answer where a dropped-error comparison could not — so the caller
+// names the failed component in its refusal rather than only saying the
+// residue "may belong to another session" (#7900). The remedy differs by
+// class: an unreadable component may answer on a retry once it is readable,
+// while a dangling link names a fix-or-remove operation — see
+// ResidueBindingDangling for the fork. A verdict error matching nothing
+// here keeps the generic refusal wording: a deadline or a malformed pointer
+// file is not a read a retry is expected to complete.
 func ResidueBindingUnproven(err error) bool {
 	return errors.Is(err, unix.EACCES) ||
 		errors.Is(err, unix.ENOTCONN) ||
@@ -306,12 +308,24 @@ func ResidueBindingUnproven(err error) bool {
 		errors.Is(err, pathutil.ErrUnresolvedComponent)
 }
 
+// ResidueBindingDangling reports whether an unproven bind failed on a
+// component that is present but unresolvable — pathutil's report of a
+// dangling symlink (#7295). Unlike the retryable errnos, a dangling link is
+// itself readable and no retry makes it resolve: the remedy is to fix the
+// link, remove it, or move the residue out — the refusal must say so rather
+// than promising "retry once it is readable" for a target that may be gone
+// for good (#7900 R3).
+func ResidueBindingDangling(err error) bool {
+	return errors.Is(err, pathutil.ErrUnresolvedComponent)
+}
+
 // ResidueUnprovenComponent names the path component an unproven binding
 // failed on — the Path of the first *os.PathError in the error chain — for
-// the refusal's "retry once <component> is readable" clause. When the chain
-// carries no PathError (a bare errno from a unix.Open wrapper, for example)
-// it returns "", and the caller names the residue itself as the thing to
-// make readable.
+// the refusal's unproven clause ("retry once <component> is readable" for an
+// unreadable component, "<component> is a dangling link" for an
+// unresolvable one). When the chain carries no PathError (a bare errno from
+// a unix.Open wrapper, for example) it returns "", and the caller names the
+// residue itself as the thing at fault.
 func ResidueUnprovenComponent(err error) string {
 	var pathErr *os.PathError
 	if errors.As(err, &pathErr) && pathErr.Path != "" {

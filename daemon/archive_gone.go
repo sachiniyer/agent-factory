@@ -133,8 +133,8 @@ func (m *Manager) archiveSessionSourceAbsent(repoID, title string, instance *ses
 		// back as the worktree (doing so and then removing the source
 		// quarantine as redundant would silently discard the skipped files).
 		var oursSource, oursCopy, unverified []string
-		var unprovenComponents []string
-		seenUnproven := map[string]bool{}
+		var unprovenComponents, danglingComponents []string
+		seenUnproven, seenDangling := map[string]bool{}, map[string]bool{}
 		for _, candidate := range residue {
 			binding, bErr := sessiongit.BindAFRelocationResidue(candidate, source, instance.GetRepoPath())
 			if bErr != nil || binding == sessiongit.ResidueUnknown {
@@ -144,7 +144,12 @@ func (m *Manager) archiveSessionSourceAbsent(repoID, title string, instance *ses
 					if component == "" {
 						component = candidate
 					}
-					if !seenUnproven[component] {
+					if sessiongit.ResidueBindingDangling(bErr) {
+						if !seenDangling[component] {
+							seenDangling[component] = true
+							danglingComponents = append(danglingComponents, component)
+						}
+					} else if !seenUnproven[component] {
 						seenUnproven[component] = true
 						unprovenComponents = append(unprovenComponents, component)
 					}
@@ -189,7 +194,7 @@ func (m *Manager) archiveSessionSourceAbsent(repoID, title string, instance *ses
 			}
 			return refuse(fmt.Errorf(
 				"cannot archive session %q: its worktree path %s is gone, but af relocation residue is present at %s and af could not verify whether it is this session's worktree — it may belong to another session, or its git binding could not be read%s; inspect %s, then move it out of %s to somewhere safe (or remove it once you have confirmed it holds nothing you need) and retry the archive; do not move it into %s unless you have proven it is this session's work (see #7819): %w",
-				title, source, strings.Join(unverified, ", "), strings.Join(unverified, ", "), residueUnprovenClause(unprovenComponents), filepath.Dir(unverified[0]), source, sessiongit.ErrRelocateStateUnknown))
+				title, source, strings.Join(unverified, ", "), residueUnprovenClause(unprovenComponents, danglingComponents), strings.Join(unverified, ", "), filepath.Dir(unverified[0]), source, sessiongit.ErrRelocateStateUnknown))
 		}
 		// The deletion route promises restore can rebuild from the kept branch,
 		// which holds only if the branch is still there: a user who deleted the
@@ -270,8 +275,8 @@ func (m *Manager) archiveSessionSourceAbsent(repoID, title string, instance *ses
 			title, source, dest, filepath.Dir(source), resErr))
 	}
 	loadedReport := instance.GetArchiveReport()
-	var destBound, sourceBound, unverifiedQuarantine, unprovenComponents []string
-	seenUnproven := map[string]bool{}
+	var destBound, sourceBound, unverifiedQuarantine, unprovenComponents, danglingComponents []string
+	seenUnproven, seenDangling := map[string]bool{}, map[string]bool{}
 	for _, candidate := range residue {
 		if !strings.HasPrefix(filepath.Base(candidate), ".af-source-") {
 			continue
@@ -304,16 +309,22 @@ func (m *Manager) archiveSessionSourceAbsent(repoID, title string, instance *ses
 			destBinding == sessiongit.ResidueUnknown || sourceBinding == sessiongit.ResidueUnknown:
 			unverifiedQuarantine = append(unverifiedQuarantine, candidate)
 			// An Unknown that came from a component af could not read —
-			// rather than from an answered comparison — is transient:
-			// the refusal below names it so the operator knows a retry
-			// may clear once it is readable (#7900).
+			// rather than from an answered comparison — is transient or
+			// fixable: the refusal below names it, split by class so a
+			// retryable read says retry while a dangling link says
+			// fix-or-remove (#7900).
 			for _, bindErr := range []error{destBindErr, sourceBindErr} {
 				if sessiongit.ResidueBindingUnproven(bindErr) {
 					component := sessiongit.ResidueUnprovenComponent(bindErr)
 					if component == "" {
 						component = candidate
 					}
-					if !seenUnproven[component] {
+					if sessiongit.ResidueBindingDangling(bindErr) {
+						if !seenDangling[component] {
+							seenDangling[component] = true
+							danglingComponents = append(danglingComponents, component)
+						}
+					} else if !seenUnproven[component] {
 						seenUnproven[component] = true
 						unprovenComponents = append(unprovenComponents, component)
 					}
@@ -353,7 +364,7 @@ func (m *Manager) archiveSessionSourceAbsent(repoID, title string, instance *ses
 			title, source, dest, strings.Join(unverifiedQuarantine, ", "))
 		return refuse(fmt.Errorf(
 			"cannot archive session %q: its worktree path %s is gone and destination %s already exists, but af relocation residue shaped like a source quarantine is present at %s beside the vacated source and af could not verify whether it is this session's retained complete original — it may belong to another session, or its git binding could not be read%s; inspect %s (if it is this session's quarantine, recover into %s anything the published copy lacks), then move it out of %s or remove it once you have confirmed it holds nothing you need, and retry the archive: %w",
-			title, source, dest, strings.Join(unverifiedQuarantine, ", "), strings.Join(unverifiedQuarantine, ", "), residueUnprovenClause(unprovenComponents), dest, filepath.Dir(unverifiedQuarantine[0]), sessiongit.ErrRelocateStateUnknown))
+			title, source, dest, strings.Join(unverifiedQuarantine, ", "), residueUnprovenClause(unprovenComponents, danglingComponents), strings.Join(unverifiedQuarantine, ", "), dest, filepath.Dir(unverifiedQuarantine[0]), sessiongit.ErrRelocateStateUnknown))
 	}
 	if err := instance.AdoptLandedArchiveMove(dest); err != nil {
 		return refuse(fmt.Errorf(
@@ -588,23 +599,30 @@ func (m *Manager) cancelArchiveWorktreeGone(repoID string, instance *session.Ins
 	return cause
 }
 
-// residueUnprovenClause renders the transient-read clause a residue refusal
-// gains when an Unknown verdict came from a component af could not read
-// (#7900): an EACCES/ENOTCONN/ESTALE/EIO component or an unresolvable
-// symlink is a lookup that did not happen, not a comparison that answered,
-// so the refusal says a retry may clear once the named component is readable
-// rather than only saying the residue "may belong to another session". Each
-// component gets its own clause so the literal "retry once <component> is
-// readable" survives whatever else the message says; empty input returns ""
-// and the refusal keeps its generic wording.
-func residueUnprovenClause(components []string) string {
-	if len(components) == 0 {
-		return ""
-	}
-	clauses := make([]string, 0, len(components))
-	for _, component := range components {
+// residueUnprovenClause renders the clause a residue refusal gains when an
+// Unknown verdict came from a lookup af could not complete rather than a
+// comparison that answered (#7900), so the refusal does more than say the
+// residue "may belong to another session". The remedy forks by unproven
+// class: a retryable component — an EACCES/ENOTCONN/ESTALE/EIO read that
+// did not happen — may answer later, so the clause says a retry may clear
+// once it is readable; a dangling component — a symlink resolving to
+// nothing — is itself readable and no retry makes it resolve, so the clause
+// says to fix or remove it or move the residue out (#7900 R3). Each
+// component gets its own clause so the literal remedy survives whatever
+// else the message says; both lists empty returns "" and the refusal keeps
+// its generic wording.
+func residueUnprovenClause(retryable, dangling []string) string {
+	clauses := make([]string, 0, len(retryable)+len(dangling))
+	for _, component := range retryable {
 		clauses = append(clauses, fmt.Sprintf(
 			"the binding failed on %s — retry once %s is readable", component, component))
+	}
+	for _, component := range dangling {
+		clauses = append(clauses, fmt.Sprintf(
+			"%s is a dangling link: fix or remove it, or move the residue out", component))
+	}
+	if len(clauses) == 0 {
+		return ""
 	}
 	return "; " + strings.Join(clauses, "; ")
 }

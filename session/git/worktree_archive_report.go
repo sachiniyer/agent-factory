@@ -111,26 +111,6 @@ func (tree ArchiveRetainedTree) identity() pathIdentity {
 	return pathIdentity{device: tree.Device, inode: tree.Inode, fileType: tree.FileType}
 }
 
-// retainedIdentityMatches reports whether this durable entry still names the
-// tree under inspection — the heart of "tracked proves the same tree, not a
-// reused (dev, ino)" (#7900). Device/inode/file-type must match; a recorded
-// creation pin additionally requires the on-disk probe to answer and answer
-// equal: a filesystem that yields no pin, or a probe that failed, never
-// satisfies a recorded one — a missing value fails closed rather than
-// proving sameness from the half of the identity a delete-and-recreate can
-// recycle. An entry recorded without a pin — a pre-pin record, or one
-// captured where the filesystem offers none — proves only what
-// dev+ino+type can, which is the documented accepted gap.
-func (tree ArchiveRetainedTree) retainedIdentityMatches(current pathIdentity, pin int64, pinErr error) bool {
-	if !tree.identity().same(current) {
-		return false
-	}
-	if tree.CreationTime == 0 {
-		return true
-	}
-	return pinErr == nil && pin == tree.CreationTime
-}
-
 func (tree ArchiveRetainedTree) clone() ArchiveRetainedTree {
 	if len(tree.PathBytes) == 0 {
 		tree.Path, tree.PathBytes = archivePathFields(tree.Path)
