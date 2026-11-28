@@ -907,7 +907,11 @@ func TestAbsentRootDeleteClearsAPlainParentWithCleanChildren(t *testing.T) {
 	// temp — a checkout-id-*.tmp.NNN is companion debris, never evidence.
 	tmpClone := filepath.Join(plainParent, "tmp.git")
 	fakeCommonDir(t, tmpClone, "")
-	if err := os.WriteFile(filepath.Join(tmpClone, "agent-factory", "checkout-id-"+strings.Repeat("c", 32)+".tmp.99"), []byte("chk_x\n"), 0o644); err != nil {
+	tmpMarkerDir := filepath.Join(tmpClone, "agent-factory")
+	if err := os.MkdirAll(tmpMarkerDir, 0o755); err != nil {
+		t.Fatalf("mkdir tmp marker dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(tmpMarkerDir, "checkout-id-"+strings.Repeat("c", 32)+".tmp.99"), []byte("chk_x\n"), 0o644); err != nil {
 		t.Fatalf("write stranded tmp: %v", err)
 	}
 	// A determinately-non-repository child — its agent-factory NAME is not
