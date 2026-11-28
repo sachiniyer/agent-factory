@@ -596,9 +596,10 @@ func (m *Manager) resolveDeleteProjectTarget(req DeleteProjectRequest) (deletePr
 			//   - resolves as a git checkout: the absent-root scan above
 			//     never ran on the occupant's repository, so refusing is the
 			//     only answer that stays fail-closed. The retry is the path
-			//     form — for a derived-id request "delete again" would
-			//     re-select this same row and deregister it as absent,
-			//     which is the trap review R7 named.
+			//     form — for a derived-id request "delete again" is no
+			//     remedy at all: once the root resolves, the derived
+			//     selector matches nothing and returns a zero-count
+			//     success over the surviving row (review R7).
 			//   - provably non-git AND the recorded identity is disproven:
 			//     the only release. The marker evidence that already
 			//     disproved the row's claimed identity transfers to the
