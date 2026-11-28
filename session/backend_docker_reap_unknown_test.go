@@ -527,3 +527,195 @@ func TestDockerReapRealDaemonAnswerStaysKnown(t *testing.T) {
 		t.Fatalf("a real daemon answer must latch known-state so the kill-retry collapses (the contract the latch exists for); got p.reaped=false")
 	}
 }
+
+// TestDockerReapExecStartFailureIsWorkspaceStateUnknown is the exec-start-failure
+// regression the three-valued answer taxonomy originally missed: a `docker rm -f`
+// that FAILS TO START — the docker CLI is missing from PATH, the fork fails
+// (ENOMEM/EAGAIN), or the CLI is killed (e.g. OOM) before printing anything —
+// returns empty output with a non-nil error and NO tripped deadline. That shape
+// matches neither the deadline branch (no deadline) nor a transport banner the
+// CLI printed, so the buggy latch classified it as a KNOWN-state teardown,
+// deleted the row, and orphaned a live container that the rm never even reached.
+// (The live-Kill reap path has no verifyEngineOnReap pre-check, unlike the
+// restored-row reaper and orphan sweep which fail closed at `docker info`.)
+//
+// Every such shape must wrap ErrWorkspaceStateUnknown so TeardownStateUnknown
+// keeps the row, and must NOT latch so the daemon's kill-retry can re-run the rm.
+// The fake returns instantly (no <-ctx.Done()), so the reap's deadline does NOT
+// trip — distinguishing these from TestDockerReapTimeoutIsWorkspaceStateUnknown,
+// whose fake blocks on the context and is killed on the reap's own deadline.
+func TestDockerReapExecStartFailureIsWorkspaceStateUnknown(t *testing.T) {
+	cases := []struct {
+		name string
+		out  []byte
+		err  error
+	}{
+		// The canonical case: exec.CommandContext with the binary absent yields
+		// empty output plus this error (errors.Is(err, exec.ErrNotFound) is true
+		// in the real stdlib) with ctx.Err() == nil.
+		{name: "docker CLI missing from PATH", out: nil, err: errors.New(`exec: "docker": executable file not found in $PATH`)},
+		// A fork failure (ENOMEM/EAGAIN) before the child execs anything.
+		{name: "fork fails EAGAIN", out: nil, err: errors.New("fork/exec /usr/bin/docker: resource temporarily unavailable")},
+		// The CLI was killed (OOM, external signal) before it printed anything.
+		// Distinct from the timeout case: the reap's own deadline did NOT trip.
+		{name: "CLI killed before printing", out: nil, err: errors.New("signal: killed")},
+		// Whitespace-only output is empty after TrimSpace, so it is the same class.
+		{name: "whitespace-only output", out: []byte("  \n  "), err: errors.New("exit status 1")},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			withShortDockerReapTimeout(t, 5*time.Second) // never reached; the fake answers instantly
+			restore := SetDockerExecForTest(func(_ context.Context, _ []string, args ...string) ([]byte, error) {
+				if len(args) > 0 && args[0] == "info" {
+					return []byte(dockerReapTestEngineID + "\n"), nil
+				}
+				return tc.out, tc.err
+			})
+			defer restore()
+
+			// The in-process provisioner shape used for a live session's Kill:
+			// containerID set, verifyEngineOnReap false (default), so reap() goes
+			// straight to `docker rm -f` with no `docker info` pre-check.
+			p := &dockerProvisioner{spec: ProvisionSpec{Title: "startfail"}, containerID: "deadbeefcafe0000"}
+			err := p.reap()
+			if err == nil {
+				t.Fatal("a start-failed `docker rm -f` must return an error, got nil")
+			}
+			if !errors.Is(err, ErrWorkspaceStateUnknown) {
+				t.Fatalf("an exec start failure (rm never reached an engine) must wrap ErrWorkspaceStateUnknown so the row is retained; got a plain error: %v", err)
+			}
+			if !TeardownStateUnknown(err) {
+				t.Fatalf("TeardownStateUnknown must be true for an exec start failure so KillSession/deleteSessionRecord RETAIN the row; got false for: %v", err)
+			}
+			if p.reaped {
+				t.Fatalf("an exec start failure must NOT latch so the kill-retry can re-run `docker rm -f`; p.reaped was true")
+			}
+		})
+	}
+}
+
+// TestDockerReapExecStartFailureIsReRunnable is the no-latch contract for an exec
+// start failure, mirroring TestDockerReapTimeoutIsReRunnable and
+// TestDockerReapDaemonUnreachableIsReRunnable: the daemon's finishUserKill
+// re-invokes reap() on every poll for a retained record, so a start failure that
+// latched would make the second call return a stale error and never re-run
+// `docker rm -f` — the row gets deleted and the container is orphaned. A second
+// reap while the CLI is still unstartable must (i) actually re-attempt the rm
+// and (ii) keep returning the unknown sentinel.
+func TestDockerReapExecStartFailureIsReRunnable(t *testing.T) {
+	withShortDockerReapTimeout(t, 5*time.Second) // never reached; the fake answers instantly
+	var calls int32
+	restore := SetDockerExecForTest(func(_ context.Context, _ []string, args ...string) ([]byte, error) {
+		if len(args) > 0 && args[0] == "info" {
+			return []byte(dockerReapTestEngineID + "\n"), nil
+		}
+		atomic.AddInt32(&calls, 1)
+		return nil, errors.New(`exec: "docker": executable file not found in $PATH`)
+	})
+	defer restore()
+
+	p := &dockerProvisioner{spec: ProvisionSpec{Title: "startfail"}, containerID: "deadbeefcafe0000"}
+
+	first := reapWithin(t, p, 10*time.Second)
+	if !errors.Is(first, ErrWorkspaceStateUnknown) {
+		t.Fatalf("first exec-start-failure reap must wrap ErrWorkspaceStateUnknown, got %v", first)
+	}
+	if p.reaped {
+		t.Fatalf("first exec-start-failure reap must NOT latch, got p.reaped=true")
+	}
+
+	second := reapWithin(t, p, 10*time.Second)
+	if second == nil {
+		t.Fatal("second reap after an exec start failure returned nil — the latch skipped the retry, so the row " +
+			"would be deleted and the container orphaned")
+	}
+	if !errors.Is(second, ErrWorkspaceStateUnknown) {
+		t.Fatalf("a second reap while the docker CLI is still unstartable must keep returning ErrWorkspaceStateUnknown, got %v", second)
+	}
+	if !TeardownStateUnknown(second) {
+		t.Fatalf("the retained row depends on TeardownStateUnknown staying true across retries, got false for: %v", second)
+	}
+	if n := atomic.LoadInt32(&calls); n < 2 {
+		t.Fatalf("an exec-start-failure reap must actually re-attempt `docker rm -f` on the next call; dockerExec ran %d times, want >= 2", n)
+	}
+}
+
+// TestDockerReapExecStartFailureThenSuccessClears completes the retry contract,
+// mirroring TestDockerReapTimeoutThenSuccessClears and
+// TestDockerReapDaemonUnreachableThenSuccessClears: once the docker CLI is
+// restored (e.g. the package upgrade completing, memory pressure easing), a reap
+// after a prior start failure actually reaps the container and returns nil so the
+// row is finally deleted rather than retained forever — and a further reap stays
+// latched at nil. The call-count assertion is what distinguishes a real re-attempt
+// from a stale latched nil (a latched nil would leave the container leaked).
+func TestDockerReapExecStartFailureThenSuccessClears(t *testing.T) {
+	withShortDockerReapTimeout(t, 5*time.Second)
+	var missing atomic.Bool
+	var calls int32
+	missing.Store(true)
+	restore := SetDockerExecForTest(func(_ context.Context, _ []string, args ...string) ([]byte, error) {
+		if len(args) > 0 && args[0] == "info" {
+			return []byte(dockerReapTestEngineID + "\n"), nil
+		}
+		atomic.AddInt32(&calls, 1)
+		if missing.Load() {
+			return nil, errors.New(`exec: "docker": executable file not found in $PATH`)
+		}
+		return []byte("deadbeefcafe0000\n"), nil
+	})
+	defer restore()
+
+	p := &dockerProvisioner{spec: ProvisionSpec{Title: "recovers"}, containerID: "deadbeefcafe0000"}
+
+	if err := reapWithin(t, p, 10*time.Second); !errors.Is(err, ErrWorkspaceStateUnknown) {
+		t.Fatalf("first (start-failed) reap must be unknown, got %v", err)
+	}
+	if p.reaped {
+		t.Fatalf("first (start-failed) reap must NOT latch so recovery can retry, got p.reaped=true")
+	}
+	missing.Store(false) // docker CLI restored
+	if err := reapWithin(t, p, 10*time.Second); err != nil {
+		t.Fatalf("after the docker CLI is restored, the retry must reap and return nil so the row is deleted, got %v", err)
+	}
+	if n := atomic.LoadInt32(&calls); n < 2 {
+		t.Fatalf("the post-recovery reap must actually re-run `docker rm -f`, not return a stale latched result; "+
+			"dockerExec ran %d times, want >= 2 (a latched result would leave the container leaked)", n)
+	}
+	// Now that a reap COMPLETED, it latches: no further docker command, still nil.
+	after := atomic.LoadInt32(&calls)
+	if err := reapWithin(t, p, 10*time.Second); err != nil {
+		t.Fatalf("a completed reap must latch nil, got %v", err)
+	}
+	if n := atomic.LoadInt32(&calls); n != after {
+		t.Fatalf("a completed reap must not re-run `docker rm -f` (the Kill-retry collapse the latch exists for); ran %d more times", n-after)
+	}
+}
+
+// TestDockerReapExecStartFailureRetainsStagingDir guards the staging-dir invariant
+// for an exec start failure, mirroring TestDockerReapDaemonUnreachableRetainsStagingDir:
+// while the container's fate is unproven, the staging directory stays on disk so
+// the cleanup record's StagingDir still names a real directory a later reap owns.
+// A start failure must not clear it (only a success or a "No such container"
+// answer does), or a later reap would find the binding missing for a container
+// that was never removed.
+func TestDockerReapExecStartFailureRetainsStagingDir(t *testing.T) {
+	staging := t.TempDir()
+	restore := SetDockerExecForTest(func(_ context.Context, _ []string, args ...string) ([]byte, error) {
+		if len(args) > 0 && args[0] == "info" {
+			return []byte(dockerReapTestEngineID + "\n"), nil
+		}
+		return nil, errors.New(`exec: "docker": executable file not found in $PATH`)
+	})
+	defer restore()
+
+	p := &dockerProvisioner{spec: ProvisionSpec{Title: "startfail"}, containerID: "deadbeefcafe0000", stagingDir: staging}
+	if err := p.reap(); !errors.Is(err, ErrWorkspaceStateUnknown) {
+		t.Fatalf("expected ErrWorkspaceStateUnknown, got %v", err)
+	}
+	if p.stagingDir == "" {
+		t.Fatalf("an exec-start-failure reap must NOT clear the staging dir — the container may still exist and a later reap still owns it")
+	}
+	if _, err := os.Stat(staging); err != nil {
+		t.Fatalf("the staging dir must still be on disk after an exec-start-failure reap: %v", err)
+	}
+}
