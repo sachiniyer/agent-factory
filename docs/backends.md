@@ -285,9 +285,13 @@ user's real home and mounts it only if it exists, so:
       and a workspace loader that fills only unset names find it already set
       to nothing. The path-valued trust names keep that defined-empty shape
       only inside the container environment — the one hop `docker run` can
-      dominate an image `ENV` at — because their readers load the empty
-      value as a PATH and drop every platform root: af's own provisioning
-      execs unset them for their children, and the agent's exec shim
+      dominate an image `ENV` at — `SSL_CERT_FILE` because its readers load
+      the empty value as a PATH and drop every platform root, and
+      `SSL_CERT_DIR` defended beside it for the older rustls that read
+      `Some("")` the same way (current releases filter empty entries —
+      the measurement and the version floor are below): af's own
+      provisioning execs unset them for their children, and the agent's
+      exec shim
       re-asserts each to a platform bundle location that exists (#7889).
       (Measured: gemini's workspace `.env` supplied
       `GEMINI_API_KEY` only when the name was unset; defined-and-empty
@@ -328,10 +332,15 @@ user's real home and mounts it only if it exists, so:
       `CURL_CA_BUNDLE`, curl falls from `CURL_CA_BUNDLE=''` to its
       compiled CAfile, codex treats `CODEX_CA_CERTIFICATE=''` as unset,
       grpc-js skips `GRPC_DEFAULT_SSL_ROOTS_FILE_PATH=''` — so they keep
-      the plain defined-empty pin. Where the measured empty read is a
-      PATH — `SSL_CERT_FILE`/`SSL_CERT_DIR` alone, whose OpenSSL/rustls
-      readers load the empty value and lose every platform root (#7889)
-      — the name stays claimed in the container environment but resolves
+      the plain defined-empty pin. `SSL_CERT_FILE` is the measured
+      path-valued name — OpenSSL and rustls-native-certs read its empty
+      value as a path and lose every platform root. `SSL_CERT_DIR` is
+      resolved defensively beside it: an empty hashed dir is falsy-safe
+      for current readers — OpenSSL tolerates it and rustls-native-certs
+      ≥ 0.8.4 filters empty entries — but older rustls read `Some("")`
+      the same path-valued way, so the pair resolves together rather
+      than rely on every build shipping the filtered version (#7889).
+      Both names stay claimed in the container environment but resolve
       to a real bundle at the exec boundary below.
       **The claimed set is the checked artifact, not this list.** The
       measured reads — every `process.env` read in
@@ -398,8 +407,9 @@ user's real home and mounts it only if it exists, so:
       *inside* those scripts (`git`, `cat`, `chmod`) resolve through the
       `PATH` re-asserted above — the image's own binaries. Each script also
       opens by unsetting the session's trust names — the path-valued pins
-      (`SSL_CERT_FILE`/`SSL_CERT_DIR`) whose measured empty read is a
-      path, and every git TLS/env name (git's real env set — see above)
+      (`SSL_CERT_FILE`, the measured name, and `SSL_CERT_DIR`, defended for
+      older rustls — see above) whose empty read must never reach a child,
+      and every git TLS/env name (git's real env set — see above)
       no defined or resolved value is safe for — so no provisioning child
       can inherit a defined-empty name an OpenSSL-family TLS stack would
       load as zero roots, or an image's claim that turns verification off
@@ -446,16 +456,40 @@ user's real home and mounts it only if it exists, so:
       write takes the same shape when the global slot is claimed.
       An operator-FORWARDED trust name is
       not a pin and is never unset — the clone needs that CA to reach a
-      private-CA remote.
+      private-CA remote. The sibling exception to the SSL pair's unset is
+      the mirror of the one at the exec shim: beside a non-empty
+      (forwarded) sibling the pinned slot keeps its defined-empty claim,
+      because unset would restore the platform default and resolved would
+      add the image's roots — the empty slot is the only spelling that
+      contributes nothing to the operator's trust (#7889).
+      The container `sh -c` execs af runs WITHOUT this preamble are inert
+      by content — each is an af-composed probe or bookkeeping script that
+      spawns no TLS-reading child (#7895): the account and session-user
+      `id` probe and `mkdir`/`chown` step strings, the skipped-mount
+      writability probe, and the mountinfo reads in
+      `backend_docker_account*.go`; the staged-payload `test`/`wc -c`
+      check and the write-target mountinfo read in
+      `backend_docker_staging.go`, plus that file's throwaway
+      `docker run --entrypoint /bin/sh` destination probe (a run, not an
+      exec, on a container af never provisions); and the banner-poll
+      `cat`/`kill -0` loop in `backend_docker_agentserver.go`. The one
+      bypassing exec that is not inert is the detached `af agent-server`
+      launch — the child it spawns IS the agent-server, which re-resolves
+      its pins at its own startup (next bullet).
     - At the exec itself: the pins also reach the in-container agent-server,
       whose pane launch re-asserts each one **immediately
       before the agent execs** — after tmux's shell hop or a tmux config file
       could have re-set one — defined-and-empty for the falsy-safe classes,
       or to the first existing platform trust-store path for
-      `SSL_CERT_FILE`/`SSL_CERT_DIR` (#7889). The presence-read git names
+      `SSL_CERT_FILE`/`SSL_CERT_DIR` — except beside a forwarded sibling,
+      where the pinned slot keeps its defined-empty claim for the reason
+      above (#7889). The presence-read git names
       are dropped there instead — no defined spelling neutralizes them —
       unless the operator forwarded one (#7891); the agent-server applies
-      the same resolve-or-strip at startup so its non-pane children
+      the same resolve-or-strip at startup, gated on exactly the names it
+      received as `--session-env-empty` — a session carrying no
+      credential pins emits none and its other env stays byte-identical
+      (#7895) — so its non-pane children
       (hooks, helpers) never inherit an image's trust claim either.
     - On tmux: every tmux invocation the agent-server runs carries
       `-f /dev/null`, so the image's `/etc/tmux.conf` or a `~/.tmux.conf`

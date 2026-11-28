@@ -27,25 +27,31 @@ var caBundleDirCandidates = []string{
 	"/etc/pki/tls/certs",
 }
 
-// trustPathPinCandidates names the credential-mount env pins whose
-// defined-empty value a TLS stack reads as a PATH — where empty empties the
-// trust store instead of neutralizing the name (#7889). The set is the two
-// names the independent review MEASURED reading empty as a path:
+// trustPathPinCandidates names the credential-mount env pins af resolves at
+// the filtered hops rather than leaves defined-empty (#7889): the one name
+// the independent review MEASURED reading empty as a PATH — where empty
+// empties the trust store instead of neutralizing the name — plus the
+// sibling dir slot resolved defensively beside it:
 //
-//   - SSL_CERT_FILE: OpenSSL treats the empty value as a path that loads zero
-//     CAs (measured: Python 3.12 ssl.create_default_context cert_store_stats
-//     goes from ~120 CAs to 0), and rustls-native-certs reads Some("") and
-//     skips the platform roots (codex's websocket TLS).
-//   - SSL_CERT_DIR: rustls-native-certs reads Some("") the same way. (OpenSSL
-//     alone tolerates the empty dir — 120 CAs — but FILE="" beside a resolved
-//     DIR still gives 0, so the pair resolves together.)
+//   - SSL_CERT_FILE is the measured path-valued name: OpenSSL treats the
+//     empty value as a path that loads zero CAs (measured: Python 3.12
+//     ssl.create_default_context cert_store_stats goes from ~120 CAs to 0),
+//     and rustls-native-certs reads Some("") and skips the platform roots
+//     (codex's websocket TLS).
+//   - SSL_CERT_DIR is resolved defensively beside it: an empty hashed dir is
+//     falsy-safe for current readers — OpenSSL tolerates it (~120 CAs) and
+//     rustls-native-certs ≥ 0.8.4 filters empty entries — but older rustls
+//     reads Some("") as a path the same way FILE's empty is read, so the
+//     pair resolves together rather than rely on every build shipping the
+//     filtered version.
 //
 // At the exec shim af re-asserts each to the first candidate that EXISTS in
 // the container rather than defined-empty, so the name stays claimed — a
 // repo .env loader fills only unset names — and points at a real store. The
 // agent-server additionally resolves-or-unsets them in its own environment
-// at startup (NeutralizeTrustPathPins) so every child it spawns —
-// post-worktree hooks included — inherits a real store or an absent name.
+// at startup (NeutralizeTrustPathPins, over exactly the names it received as
+// --session-env-empty — #7895) so every child it spawns — post-worktree
+// hooks included — inherits a real store or an absent name.
 //
 // An image with no entry at any candidate keeps the defined-empty pin: on a
 // store-less image unset yields the same zero CAs, and defined-empty still
@@ -234,16 +240,23 @@ func resolveTrustPathPin(name string) (entry string, ok bool) {
 	return name + "=", true
 }
 
-// NeutralizeTrustPathPins re-points each path-valued trust name that stands
-// defined-and-empty in THIS process's environment — the agent-server runs it
-// once at startup so every non-pane child it spawns (post-worktree hooks,
-// helpers) inherits a real store or an absent name, never the pin's empty
-// path (#7889). The container env carries `NAME=` to dominate an image ENV;
-// here, at the last process af controls before spawning children, the empty
-// value resolves to a platform bundle that exists, or drops to unset when
-// the image has no store at all — no .env-fill channel reaches these
-// children, so unset is the inert form. A name the operator forwarded
-// (non-empty) is never touched.
+// NeutralizeTrustPathPins re-points each path-valued trust name THIS process
+// received as a pin and that stands defined-and-empty in its environment —
+// the agent-server runs it once at startup with its --session-env-empty list
+// so every non-pane child it spawns (post-worktree hooks, helpers) inherits
+// a real store or an absent name, never the pin's empty path (#7889). The
+// container env carries `NAME=` to dominate an image ENV; here, at the last
+// process af controls before spawning children, the empty value resolves to
+// a platform bundle that exists, or drops to unset when the image has no
+// store at all — no .env-fill channel reaches these children, so unset is
+// the inert form. A name the operator forwarded (non-empty) is never touched.
+//
+// The gate is the received pin list, not env shape (#7895): an agent-server
+// that received no --session-env-empty names — an account-scoped or plain
+// session — leaves an image `ENV SSL_CERT_FILE=` verbatim, exactly as
+// before the pins existed, and an operator-forwarded empty value rides
+// --session-env rather than the pin list, so it passes through untouched
+// the same way.
 //
 // The exception is a claimed sibling: the names in trustPathSiblingPairs
 // are independent slots every reader loads, so beside a non-empty
@@ -252,7 +265,11 @@ func resolveTrustPathPin(name string) (entry string, ok bool) {
 // restore the platform default for OpenSSL and openssl-probe alike, and
 // resolved would add the image's roots outright (#7889 R5 + its mirror).
 // The empty slot keeps its defined-empty shape then, deliberately.
-func NeutralizeTrustPathPins() {
+func NeutralizeTrustPathPins(pins []string) {
+	received := make(map[string]bool, len(pins))
+	for _, name := range pins {
+		received[name] = true
+	}
 	// Snapshot sibling claims before the loop — resolving one member would
 	// otherwise read as a claim and guard the other, where the operator's
 	// forwarded (pre-existing non-empty) value is what the guard protects.
@@ -261,6 +278,9 @@ func NeutralizeTrustPathPins() {
 		siblingClaimed[sibling] = os.Getenv(sibling) != ""
 	}
 	for _, name := range TrustPathPinNames() {
+		if !received[name] {
+			continue
+		}
 		if value, ok := os.LookupEnv(name); !ok || value != "" {
 			continue
 		}

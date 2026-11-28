@@ -313,10 +313,12 @@ func execInvocation(args []string) error {
 // The name is replaced rather than appended beside its old value so a getenv
 // can only read the empty one.
 //
-// A path-valued trust pin resolves instead (#7889): defined-empty for
-// SSL_CERT_FILE/SSL_CERT_DIR is a PATH their readers load — OpenSSL gets
-// zero CAs, rustls-native-certs reads Some("") and skips the platform
-// roots — so the shim points each at the first platform bundle location
+// A path-valued trust pin resolves instead (#7889): SSL_CERT_FILE is the
+// measured name — defined-empty is a PATH its readers load, OpenSSL gets
+// zero CAs and rustls-native-certs reads Some("") and skips the platform
+// roots — and SSL_CERT_DIR resolves defensively beside it (an empty hashed
+// dir is falsy-safe for current readers but older rustls read it the same
+// way) — so the shim points each at the first platform bundle location
 // that exists in the container (resolveTrustPathPin). The name stays
 // claimed either way, so a repo .env loader cannot take it, and a
 // store-less image keeps the defined-empty pin rather than going unset.

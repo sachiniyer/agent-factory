@@ -2,7 +2,9 @@ package session
 
 import (
 	"os"
+	"os/exec"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -324,39 +326,98 @@ func TestCredentialMountPinnedNames_ForwardedTrustNameExemptsOnlyItself(t *testi
 }
 
 // #7889 R2: a forwarded operator CA must WIN its reader chain — no af-set
-// value may sit ahead of it. Because the falsy-safe spellings keep their
-// defined-empty pin, each name a reader consults FIRST reads falsy and the
-// reader falls through to the operator's value (or its compiled default).
-// The table is the audit: each row names a reader chain and the names that
-// must stay defined-empty-pinned for the forwarded claim to win.
+// value may sit ahead of it. This is proven through the exec shim itself,
+// not pin-set membership (#7895): each row re-execs this test binary with
+// the pane's real argv — os.Args[1] = sessionenv.ExecMarker dispatches
+// through sessionenv.HandleInternalExec (installed by this package's
+// TestMain, exactly as main.go installs it) into the real execInvocation —
+// carrying the operator's forwarded value in the extras slot the way
+// session_env_passthrough delivers it and the REAL
+// credentialMountPinnedNames output as the pin list. The environment the
+// shim's final syscall.Exec installs is what the agent inherits, so the
+// assertion walks the chain in the order the reader consults it and
+// requires the forwarded name to be the first non-empty read.
+//
+// What this catches that membership never could: the falsy-safe spellings
+// must stay defined-empty-pinned PRECISELY because their empty read falls
+// through — a mutation re-adding CURL_CA_BUNDLE,
+// GRPC_DEFAULT_SSL_ROOTS_FILE_PATH or CODEX_CA_CERTIFICATE to
+// trustPathPinCandidates resolves that name to a platform bundle AHEAD of
+// the forwarded member in its chain and the row fails (#7890's R2
+// regression).
 func TestForwardedOperatorCAWinsEveryReaderChain(t *testing.T) {
+	// The reader chains, in consult order. Each row forwards one member and
+	// asserts it is the chain's first non-empty name in the shim's env; the
+	// other members ride the pin list, so the row also proves each stays a
+	// falsy-safe defined-empty rather than resolving into the chain.
 	chains := []struct {
-		reader   string
-		agent    string   // which agent's pin table carries the names
-		forward  string   // the operator's claim through session_env_passthrough
-		falsyPin []string // consulted first — must stay pinned so empty falls through
+		reader string
+		agent  string // whose credential-mount pin table applies
+		names  []string
 	}{
-		// curl: CURL_CA_BUNDLE beats SSL_CERT_FILE for --cacert, and '' is
-		// skipped (compiled CAfile/SSL_CERT_FILE next) → the file wins.
-		{"curl", "opencode", "SSL_CERT_FILE", []string{"CURL_CA_BUNDLE"}},
-		// requests: `REQUESTS_CA_BUNDLE or CURL_CA_BUNDLE or verify` —
-		// '' is falsy at each step → a forwarded member wins.
-		{"requests", "opencode", "CURL_CA_BUNDLE", []string{"REQUESTS_CA_BUNDLE"}},
-		{"requests", "opencode", "REQUESTS_CA_BUNDLE", nil},
-		// grpc-js skips an empty GRPC_DEFAULT_SSL_ROOTS_FILE_PATH and
-		// codex's custom_ca.rs treats CODEX_CA_CERTIFICATE='' as unset —
-		// forwarded, each name is its reader's only override.
-		{"grpc-js", "gemini", "GRPC_DEFAULT_SSL_ROOTS_FILE_PATH", nil},
-		{"codex", "codex", "CODEX_CA_CERTIFICATE", nil},
+		// curl consults CURL_CA_BUNDLE before SSL_CERT_FILE for --cacert;
+		// an empty CURL_CA_BUNDLE is skipped (compiled CAfile next).
+		{"curl", "opencode", []string{"CURL_CA_BUNDLE", "SSL_CERT_FILE"}},
+		// requests: `REQUESTS_CA_BUNDLE or CURL_CA_BUNDLE or verify`.
+		{"requests", "opencode", []string{"REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE"}},
+		// grpc-js's GRPC_DEFAULT_SSL_ROOTS_FILE_PATH replaces node's roots
+		// where NODE_EXTRA_CA_CERTS was meant only to add.
+		{"grpc-js", "gemini", []string{"GRPC_DEFAULT_SSL_ROOTS_FILE_PATH", "NODE_EXTRA_CA_CERTS"}},
+		// codex's custom_ca.rs reads CODEX_CA_CERTIFICATE before rustls's
+		// SSL_CERT_FILE.
+		{"codex", "codex", []string{"CODEX_CA_CERTIFICATE", "SSL_CERT_FILE"}},
+		// OpenSSL and rustls-native-certs both load the file slot before
+		// the hashed dir.
+		{"OpenSSL", "opencode", []string{"SSL_CERT_FILE", "SSL_CERT_DIR"}},
+		{"rustls", "opencode", []string{"SSL_CERT_FILE", "SSL_CERT_DIR"}},
 	}
+	const operatorCA = "/operator/corp-ca.pem"
 	for _, c := range chains {
-		pinned := credentialMountPinnedNames(c.agent, []string{c.forward})
-		if slices.Contains(pinned, c.forward) {
-			t.Fatalf("%s chain: forwarded %s must leave the pin set", c.reader, c.forward)
-		}
-		for _, name := range c.falsyPin {
-			if !slices.Contains(pinned, name) {
-				t.Fatalf("%s chain: %s must stay pinned defined-empty so its empty read falls through to %s", c.reader, name, c.forward)
+		for _, forward := range c.names {
+			pins := credentialMountPinnedNames(c.agent, []string{forward})
+			if slices.Contains(pins, forward) {
+				t.Fatalf("%s chain: forwarded %s must leave the pin set", c.reader, forward)
+			}
+			// The pane argv WrapCommand emits: marker, agent, the extras
+			// count and names (the operator's claim), the pins count and
+			// names, then the command — env dumps the shim's final
+			// environment.
+			argv := []string{sessionenv.ExecMarker, c.agent, "1", forward,
+				strconv.Itoa(len(pins))}
+			argv = append(argv, pins...)
+			argv = append(argv, "env")
+			// The container env the shim reads: the forwarded value plus
+			// every pinned name defined-empty, exactly as `docker run
+			// -e NAME=` delivers them — and nothing else: TMUX_PANE
+			// absent keeps stampPaneRootPid off the host's tmux, and the
+			// unattributed `env` command leaves only common and extras
+			// names through the filter, so the forwarded value survives
+			// solely on the operator's claim.
+			env := []string{"PATH=/usr/local/bin:/usr/bin:/bin", forward + "=" + operatorCA}
+			for _, pin := range pins {
+				env = append(env, pin+"=")
+			}
+			cmd := exec.Command(os.Args[0], argv...)
+			cmd.Env = env
+			out, err := cmd.CombinedOutput()
+			if err != nil {
+				t.Fatalf("%s forwarding %s: the exec shim refused: %v: %s", c.reader, forward, err, out)
+			}
+			got := make(map[string]string)
+			for _, line := range strings.Split(string(out), "\n") {
+				if name, value, ok := strings.Cut(line, "="); ok {
+					got[name] = value
+				}
+			}
+			first := ""
+			for _, name := range c.names {
+				if got[name] != "" {
+					first = name
+					break
+				}
+			}
+			if first != forward {
+				t.Fatalf("%s chain %v forwarding %s: the reader's first non-empty name must be the operator's claim; the shim's env gives %s (env %v)", c.reader, c.names, forward, first, got)
 			}
 		}
 	}

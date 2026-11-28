@@ -322,7 +322,7 @@ func TestNeutralizeTrustPathPinsFixesTheProcessEnv(t *testing.T) {
 	stubTrustPathStat(t, "/etc/ssl/certs/ca-certificates.crt", "/etc/ssl/certs/")
 	t.Setenv("SSL_CERT_FILE", "")
 	t.Setenv("SSL_CERT_DIR", "")
-	NeutralizeTrustPathPins()
+	NeutralizeTrustPathPins(TrustPathPinNames())
 	if got := os.Getenv("SSL_CERT_FILE"); got != "/etc/ssl/certs/ca-certificates.crt" {
 		t.Fatalf("SSL_CERT_FILE = %q: a defined-empty pin must resolve to the platform bundle", got)
 	}
@@ -332,7 +332,7 @@ func TestNeutralizeTrustPathPinsFixesTheProcessEnv(t *testing.T) {
 
 	// A forwarded (non-empty) value is the operator's claim — untouched.
 	t.Setenv("SSL_CERT_FILE", "/operator/corporate-ca.pem")
-	NeutralizeTrustPathPins()
+	NeutralizeTrustPathPins(TrustPathPinNames())
 	if got := os.Getenv("SSL_CERT_FILE"); got != "/operator/corporate-ca.pem" {
 		t.Fatalf("SSL_CERT_FILE = %q: a forwarded value must not be re-pointed", got)
 	}
@@ -342,7 +342,7 @@ func TestNeutralizeTrustPathPinsFixesTheProcessEnv(t *testing.T) {
 	// alone, and unset would restore the platform default dir for OpenSSL
 	// and openssl-probe alike — the empty slot must contribute NOTHING (R5).
 	t.Setenv("SSL_CERT_DIR", "")
-	NeutralizeTrustPathPins()
+	NeutralizeTrustPathPins(TrustPathPinNames())
 	if got, ok := os.LookupEnv("SSL_CERT_DIR"); !ok || got != "" {
 		t.Fatalf("SSL_CERT_DIR must stay defined-empty beside a forwarded SSL_CERT_FILE, got %q (present %v)", os.Getenv("SSL_CERT_DIR"), ok)
 	}
@@ -353,7 +353,7 @@ func TestNeutralizeTrustPathPinsFixesTheProcessEnv(t *testing.T) {
 	// 4722401904).
 	t.Setenv("SSL_CERT_FILE", "")
 	t.Setenv("SSL_CERT_DIR", "/operator/certs.d")
-	NeutralizeTrustPathPins()
+	NeutralizeTrustPathPins(TrustPathPinNames())
 	if got, ok := os.LookupEnv("SSL_CERT_FILE"); !ok || got != "" {
 		t.Fatalf("SSL_CERT_FILE must stay defined-empty beside a forwarded SSL_CERT_DIR, got %q (present %v)", os.Getenv("SSL_CERT_FILE"), ok)
 	}
@@ -363,9 +363,56 @@ func TestNeutralizeTrustPathPinsFixesTheProcessEnv(t *testing.T) {
 	stubTrustPathStat(t)
 	os.Unsetenv("SSL_CERT_FILE")
 	t.Setenv("SSL_CERT_DIR", "")
-	NeutralizeTrustPathPins()
+	NeutralizeTrustPathPins(TrustPathPinNames())
 	if _, ok := os.LookupEnv("SSL_CERT_DIR"); ok {
 		t.Fatalf("SSL_CERT_DIR on a store-less image must drop to unset, got %q", os.Getenv("SSL_CERT_DIR"))
+	}
+}
+
+// #7895: the neutralize is gated on the pin names the agent-server actually
+// received as --session-env-empty, not on env shape — a name it was not
+// handed keeps the environment it already has, byte-for-byte.
+//
+// An account or plain session emits no --session-env-empty args (the pins
+// exist only on the credential-mount path), so an image `ENV SSL_CERT_FILE=`
+// reaches this process defined-and-empty and must keep exactly that shape —
+// on master, before the pins existed, nothing resolved it and every child
+// inherited the image's own empty value.
+//
+// An operator-forwarded EMPTY value is the same shape with a different
+// source: the claim rides --session-env (the forwarded name exempts itself
+// from the pin set), so it is absent from --session-env-empty too, and
+// passes through verbatim — the operator claimed the name, empty and all.
+func TestNeutralizeTrustPathPinsKeepsUnreceivedNamesVerbatim(t *testing.T) {
+	stubTrustPathStat(t, "/etc/ssl/certs/ca-certificates.crt", "/etc/ssl/certs/")
+
+	// The account-session case: no names received at all.
+	t.Setenv("SSL_CERT_FILE", "")
+	t.Setenv("SSL_CERT_DIR", "")
+	NeutralizeTrustPathPins(nil)
+	for _, name := range TrustPathPinNames() {
+		if got, ok := os.LookupEnv(name); !ok || got != "" {
+			t.Fatalf("%s = %q (set %v): with no --session-env-empty names the image's ENV must survive verbatim", name, got, ok)
+		}
+	}
+
+	// The operator-forwarded-empty case: names were received, but this one
+	// was not among them (a forwarded name leaves the pin set).
+	NeutralizeTrustPathPins([]string{"HTTP_PROXY", "OPENAI_API_KEY"})
+	for _, name := range TrustPathPinNames() {
+		if got, ok := os.LookupEnv(name); !ok || got != "" {
+			t.Fatalf("%s = %q (set %v): a name not received as --session-env-empty must pass through verbatim", name, got, ok)
+		}
+	}
+
+	// And receiving the name DOES engage it — same env, same store, the
+	// list is the whole difference.
+	NeutralizeTrustPathPins([]string{"SSL_CERT_FILE"})
+	if got := os.Getenv("SSL_CERT_FILE"); got != "/etc/ssl/certs/ca-certificates.crt" {
+		t.Fatalf("SSL_CERT_FILE = %q: a received pin must resolve to the platform bundle", got)
+	}
+	if got, ok := os.LookupEnv("SSL_CERT_DIR"); !ok || got != "" {
+		t.Fatalf("SSL_CERT_DIR = %q (set %v): a name not in the received list stays untouched beside a resolved sibling", got, ok)
 	}
 }
 
@@ -388,7 +435,11 @@ func TestNeutralizeTrustPathPinsLeavesStripNamesAlone(t *testing.T) {
 	for _, name := range TrustStripNames() {
 		t.Setenv(name, "")
 	}
-	NeutralizeTrustPathPins()
+	// Passed as the received set on purpose: a mutation re-adding a strip
+	// name to the resolve candidates would resolve its empty slot to the
+	// stubbed platform path and fail — a non-empty fixture could not catch
+	// that regression (#7891 N4).
+	NeutralizeTrustPathPins(TrustStripNames())
 	for _, name := range TrustStripNames() {
 		if got, ok := os.LookupEnv(name); !ok || got != "" {
 			t.Fatalf("%s = %q (set=%v): a strip name must never resolve — unset at filtered hops is its only safe spelling (#7891 R3)", name, got, ok)

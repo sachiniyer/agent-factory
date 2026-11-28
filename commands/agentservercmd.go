@@ -77,8 +77,11 @@ branch before shutdown), not this server's.`,
 		// value as a path and drop every root. Neutralize before anything
 		// spawns: re-point to a real bundle, drop when the image has none,
 		// or keep the pin where a forwarded sibling claims the other slot
-		// (#7889 R1).
-		sessionenv.NeutralizeTrustPathPins()
+		// (#7889 R1). Only the names this invocation actually received as
+		// --session-env-empty are touched — a session with no credential
+		// pins emits none, and every other env name stays byte-identical
+		// to master (#7895).
+		sessionenv.NeutralizeTrustPathPins(agentServerSessionEnvEmpty)
 
 		repo, err := resolveAgentServerRepo(agentServerRepo)
 		if err != nil {
