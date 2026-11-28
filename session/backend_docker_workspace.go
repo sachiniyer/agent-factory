@@ -40,18 +40,28 @@ func (p *dockerProvisioner) prepareAfGitConfig() error {
 // file, the claimed XDG file, or leaves as the operator's forwarded global,
 // exactly the file af's credentialed git will read — while the agent's own
 // git keeps reading the file master's write hit (agentGitConfigFile), which
-// gets the same mark through an explicit --file (#7891 R4). The
-// $GIT_CONFIG_GLOBAL write is best-effort: a claimed global is the
-// operator's own file, possibly mounted read-only or absent from the
-// container, and it may already carry the mark — a failed write must not
-// abort a session their file already serves (Codex on #7891 N1).
+// gets the same mark through an explicit --file (#7891 R4). A claimed path
+// may be absent or read-only inside the container: the directories are
+// created when missing, and the writes are best-effort because a claimed
+// file may already carry the mark or be unwritable on a mount the
+// operator owns — a failed write must not abort a session their file
+// already serves, and without the mark the clone's own failure message
+// names the remedy (Codex on #7891 N1).
 func (p *dockerProvisioner) trustWorkspaceDirectories() error {
 	script := `git config --global --add safe.directory "*"`
 	if len(p.credentialMounts) > 0 || p.spec.Account.Dir != "" {
-		if afGitConfigActive(p.afGitConfigClaims(p.forwardedEnvNames())) {
+		if claimed := p.afGitConfigClaims(p.forwardedEnvNames()); afGitConfigActive(claimed) {
+			agentFile := shellQuote(p.agentGitConfigFile())
+			agentMkdir, agentSuffix := "", ""
+			if claimed["GIT_CONFIG_GLOBAL"] {
+				// The agent's global is the operator's file under this
+				// claim — absent- or read-only-mounted like af's side.
+				agentMkdir = fmt.Sprintf(`mkdir -p "$(dirname %s)" 2>/dev/null || true; `, agentFile)
+				agentSuffix = " 2>/dev/null || true"
+			}
 			script = fmt.Sprintf(
-				`git config --file "$GIT_CONFIG_GLOBAL" --add safe.directory "*" 2>/dev/null || true; git config --file %s --add safe.directory "*"`,
-				shellQuote(p.agentGitConfigFile()))
+				`mkdir -p "$(dirname "$GIT_CONFIG_GLOBAL")" 2>/dev/null || true; git config --file "$GIT_CONFIG_GLOBAL" --add safe.directory "*" 2>/dev/null || true; %sgit config --file %s --add safe.directory "*"`,
+				agentMkdir, agentFile) + agentSuffix
 		}
 	}
 	out, err := p.execSessionSh(dockerShortStepTimeout, script)

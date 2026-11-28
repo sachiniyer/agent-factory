@@ -429,9 +429,11 @@ user's real home and mounts it only if it exists, so:
       redirect still suppresses the image's `~/.gitconfig`), and the
       provisioning `safe.directory` write targets `$GIT_CONFIG_GLOBAL`
       after the preamble resolves it — af's file, the claimed XDG file,
-      or the operator's forwarded global, best-effort since a claimed
-      file may be read-only or unmounted — plus the agent's own resolved
-      global, which `agentGitConfigFile` follows through the same claim.
+      or the operator's forwarded global — with its directory created
+      when absent and the write best-effort since a claimed file may be
+      read-only or unmounted — plus the agent's own resolved global,
+      which `agentGitConfigFile` follows through the same claim and whose
+      write takes the same shape when the global slot is claimed.
       An operator-FORWARDED trust name is
       not a pin and is never unset — the clone needs that CA to reach a
       private-CA remote.

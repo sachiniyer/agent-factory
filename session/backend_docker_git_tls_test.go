@@ -366,12 +366,30 @@ func TestProvisionTrustWritesBothGitconfigs(t *testing.T) {
 		}
 	}
 	require.NotEmpty(t, trust, "the safe.directory exec was not captured")
+	require.Contains(t, trust, `mkdir -p "$(dirname "$GIT_CONFIG_GLOBAL")"`,
+		"a claimed global's directory may be absent in the container — create it before writing")
 	require.Contains(t, trust, `--file "$GIT_CONFIG_GLOBAL"`,
 		"af's effective global must get the safe.directory mark under the lockdown")
 	require.Contains(t, trust, "export GIT_CONFIG_GLOBAL='/root/.af-gitconfig'",
 		"with nothing claimed the preamble must resolve that global to af's file")
 	require.Contains(t, trust, "--file '/root/.gitconfig'",
 		"the agent's own gitconfig must keep master's safe.directory mark (M3)")
+
+	// With GIT_CONFIG_GLOBAL claimed the agent's file is the operator's too
+	// — absent or read-only inside the container — so its write takes the
+	// same mkdir + best-effort shape (Codex on #7891 N1).
+	t.Setenv("GIT_CONFIG_GLOBAL", "/operator/global.gitconfig")
+	trust = ""
+	for _, script := range provisionDockerCapturingExecs(t, tmux.ProgramGemini, []string{"GIT_CONFIG_GLOBAL"}) {
+		if strings.Contains(script, "safe.directory") {
+			trust = script
+		}
+	}
+	require.NotEmpty(t, trust, "the safe.directory exec was not captured under a claimed global")
+	require.Contains(t, trust, `mkdir -p "$(dirname '/operator/global.gitconfig')"`,
+		"the claimed agent global's directory must be created before writing")
+	require.Contains(t, trust, `--file '/operator/global.gitconfig' --add safe.directory "*" 2>/dev/null || true`,
+		"a claimed global may be read-only or already marked — the write must be best-effort")
 }
 
 // Codex on #7891 N1: under the per-slot rule a forwarded GIT_CONFIG_GLOBAL
