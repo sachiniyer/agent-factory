@@ -273,6 +273,83 @@ func projectRootUsesGitCommonDir(root, commonDir string) bool {
 	return err == nil && sameProjectPath(binding.gitCommonDir, commonDir)
 }
 
+// CheckoutIDsInCommonDir lists every checkout id a repository's common
+// directory durably holds — under ANY home's marker file name. A registry row
+// records the marker VALUE, not which home minted it, so the ownership
+// question a delete asks is "does any checkout-id-* here carry this id", not
+// "is this home's file present" (#7854, #7853's ledger lesson: the read is
+// af's own evidence, never git's worktree records).
+//
+// The return distinguishes three answers the caller must not conflate:
+// (ids, true, nil) means the marker directory was listed, empty or not;
+// (_, false, nil) means it provably does not exist — registration mints into
+// the common directory that owns a checkout, so a clone with no marker
+// directory never hosted one; and (_, _, err) means evidence exists or might
+// exist but could not be read — a marker directory that cannot be listed, or
+// a marker file that cannot be verified — which is never "absent".
+//
+// The read is synchronous and bounded by the CALLER: the daemon's ownership
+// scan runs it inside a parked, time-boxed observation.
+func CheckoutIDsInCommonDir(commonDir string) (ids []string, present bool, err error) {
+	entries, err := os.ReadDir(filepath.Join(commonDir, checkoutMarkerDirName))
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, fmt.Errorf("list checkout markers under %s: %w", filepath.Join(commonDir, checkoutMarkerDirName), err)
+	}
+	for _, entry := range entries {
+		name := entry.Name()
+		if entry.IsDir() || strings.HasSuffix(name, ".lock") || strings.Contains(name, ".tmp.") || strings.HasSuffix(name, ".tmp") {
+			// Companion files are never evidence: WithFileLock leaves a
+			// persistent <marker>.lock beside every marker (#7914 review: a
+			// prefix-only match reads the empty lock and the invalid-ID
+			// error discards every valid marker beside it), and
+			// AtomicWriteFile strands a <marker>.tmp.NNN when a write dies
+			// between create and rename.
+			continue
+		}
+		if !checkoutMarkerFileName(name) {
+			if strings.HasPrefix(name, checkoutMarkerFilePrefix) {
+				// Marker-shaped but not a marker name — an id scheme this
+				// build does not know. It could hold the row's id, so it is
+				// unverifiable evidence, never "absent" and never silently
+				// skipped.
+				return nil, false, fmt.Errorf("unverifiable checkout-marker file %s under %s", name, filepath.Join(commonDir, checkoutMarkerDirName))
+			}
+			continue
+		}
+		id, exists, err := readCheckoutID(filepath.Join(commonDir, checkoutMarkerDirName, name))
+		if err != nil {
+			return nil, false, err
+		}
+		if exists {
+			ids = append(ids, id)
+		}
+	}
+	return ids, true, nil
+}
+
+// checkoutMarkerFileName reports whether name is a real checkout marker file —
+// checkoutMarkerFilePrefix followed by exactly one home digest — and not one
+// of its companions: ensureCheckoutID's WithFileLock leaves a persistent
+// <marker>.lock beside every marker, and AtomicWriteFile can strand a temp
+// name, both of which a prefix-only match would read as markers and fail on
+// (#7914 review: the lock is empty, so readCheckoutID's invalid-ID error
+// would discard every valid marker alongside it).
+func checkoutMarkerFileName(name string) bool {
+	rest, ok := strings.CutPrefix(name, checkoutMarkerFilePrefix)
+	if !ok || len(rest) != opaqueIDBytes*2 {
+		return false
+	}
+	for _, c := range rest {
+		if !('0' <= c && c <= '9' || 'a' <= c && c <= 'f') {
+			return false
+		}
+	}
+	return true
+}
+
 // projectBindingIdentityRaceHookForTest, when non-nil, runs between the probes
 // that establish a path's checkout root, common directory and marker and the
 // resolution that names its repository identity. That window is #3530 review
