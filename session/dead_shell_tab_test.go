@@ -127,9 +127,14 @@ func TestSetupTabsRespawnsAShellWhoseSessionIsGone(t *testing.T) {
 	inst, commands := shellTabFixture(t,
 		map[string]bool{agentName: true},
 		nil)
+	// The shell died while the roster could see it, the tmux server was lost
+	// after, and the restore now launches a replacement: the old exit described
+	// the OLD incarnation and must be cleared, or the live shell reads dead
+	// forever (and the interactive guard refuses a healthy PTY).
+	inst.Tabs[1].Exit = &TabExit{Status: 0, StatusKnown: true, At: time.Unix(1726000000, 0)}
 
 	require.NoError(t, (&LocalBackend{}).setupTabs(inst))
-	assert.Nil(t, inst.Tabs[1].Exit, "a gone session is not exit evidence — nothing is stamped")
+	assert.Nil(t, inst.Tabs[1].Exit, "a respawned shell drops the exit that described its dead predecessor")
 
 	spawns := 0
 	armed := false

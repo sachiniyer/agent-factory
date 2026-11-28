@@ -85,7 +85,13 @@ func stampTabExit(i *Instance, tabID string, tabTmux *tmux.TmuxSession) bool {
 	if !known || !dead {
 		return false
 	}
-	exit := &TabExit{Status: status, StatusKnown: statusKnown, At: at}
+	return recordTabExit(i, tabID, tabTmux, &TabExit{Status: status, StatusKnown: statusKnown, At: at})
+}
+
+// recordTabExit lands a probed exit on the tab's current copy — the update half
+// of stampTabExit, separated so RecordTabExits can share one probe's answer
+// across the bail check and the stamp without probing twice.
+func recordTabExit(i *Instance, tabID string, tabTmux *tmux.TmuxSession, exit *TabExit) bool {
 	// Fenced on the probed incarnation (#5960): the probe ran against tabTmux
 	// outside the lock, and the id can since have been closed and re-created for
 	// a different command. The id alone cannot tell the two apart; the tmux
@@ -103,6 +109,20 @@ func stampTabExit(i *Instance, tabID string, tabTmux *tmux.TmuxSession) bool {
 		i.markLoadRuntimeReplaced()
 	}
 	return stamped
+}
+
+// clearTabExit drops a recorded exit when a fresh runtime replaces the one it
+// describes (#7944): the stamp belonged to the OLD incarnation's end — a shell
+// killed by tmux-server loss whose replacement just launched — and keeping it
+// would read the live shell as dead on every surface forever.
+func clearTabExit(i *Instance, tabID string) {
+	updateTabByID(i, tabID, func(copy *Tab) {
+		if copy.Exit == nil {
+			return
+		}
+		copy.Exit = nil
+		i.touchLocked()
+	})
 }
 
 // RecordTabExits probes every PTY-bearing tab (process, and since #7944 shell)
@@ -135,10 +155,33 @@ func (i *Instance) RecordTabExits() {
 		probes = append(probes, probe{id: tab.ID, tmux: tab.tmux})
 	}
 	i.mu.RUnlock()
+	// A shared wall-clock budget bounds the pass: snapshot reads call this on
+	// the projection path, and a wedged tmux makes each probe pay its full
+	// bounded wait (~10s). ProbePaneExit's !known cannot tell "wedged" from
+	// "session gone" (both are an unreadable display-message), so the check is
+	// time spent, not answer kind: one stalled probe spends the budget and the
+	// pass ends after it instead of multiplying the stall by tab count, while
+	// a genuinely absent session answers fast and never eats into it.
+	start := time.Now()
 	for _, p := range probes {
-		stampTabExit(i, p.id, p.tmux)
+		if time.Since(start) > recordExitsBudget {
+			break
+		}
+		dead, status, statusKnown, at, known := p.tmux.ProbePaneExit()
+		if !known {
+			continue
+		}
+		if dead {
+			recordTabExit(i, p.id, p.tmux, &TabExit{Status: status, StatusKnown: statusKnown, At: at})
+		}
 	}
 }
+
+// recordExitsBudget is the shared wall-clock limit for one RecordTabExits
+// pass — generous for a healthy server (a probe answers in milliseconds even
+// over many tabs), and it only ever truncates the pass when tmux is answering
+// so slowly that the remaining probes would pay the same wait.
+const recordExitsBudget = 4 * time.Second
 
 // stampProcessTabStopped records that af stopped a process tab's running
 // command, and why, unless the row already records how the command ended. The

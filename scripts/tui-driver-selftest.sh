@@ -1760,7 +1760,7 @@ _expect_dead_shell_tab_renders() {
         deadline=$(( $(_af_now) + AF_DRIVER_TIMEOUT ))
         while :; do
             header="$(_af_pane_header_row)"
-            if printf '%s\n' "$header" | grep -qE -- 'shell\|Terminal' \
+            if printf '%s\n' "$header" | grep -qE -- 'shell|Terminal' \
                 && ! printf '%s\n' "$header" | grep -qE -- 'preview'; then
                 break
             fi
@@ -1816,7 +1816,7 @@ _expect_dead_shell_tab_renders() {
         # Enter must refuse with the hint that names the existing respawn
         # affordance — no interactive mode swallowing keystrokes into a dead PTY.
         af_send Enter
-        if ! af_wait_for 'is dead · press\|is dead — press\|press w to close' 15 'the dead-tab interactive hint'; then
+        if ! af_wait_for 'is dead|press w to close' 15 'the dead-tab interactive hint'; then
             af_capture >&2
             rc=1
         fi
