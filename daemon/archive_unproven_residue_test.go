@@ -167,12 +167,22 @@ func TestArchiveSession_DestPresentUnverifiedQuarantineKeepsGenericWording(t *te
 }
 
 // TestArchiveSession_DanglingAnchorSaysFixRemove pins #7900 R3 on the
-// dest-absent arm: when the recorded source path is spelled through a
-// dangling symlink, the residue's anchor comparison fails on the link — a
-// component that is present but unresolvable, which IS unproven but is not
-// a read a retry can complete. The refusal names the fix-or-remove remedy —
-// "<component> is a dangling link: fix or remove it, or move the residue
-// out" — and never promises a retry for a target that may be gone for good.
+// dest-absent arm: when the residue's git registration backpoints at a path
+// spelled through a dangling symlink — the shape an interrupted move leaves
+// when the operator then deletes a parent directory — the binding's anchor
+// comparison fails on the link, a component that is present but
+// unresolvable. That IS unproven, but it is not a read a retry can
+// complete: the refusal names the fix-or-remove remedy — "<component> is a
+// dangling link: fix or remove it, or move the residue out" — and never
+// promises a retry for a target that may be gone for good.
+//
+// The dangling component cannot live on the anchor side on this arm: the
+// arm only runs when nothing sits at the recorded path (a dangling symlink
+// there still claims present and routes to the ordinary archive), and a
+// dangling parent would fail the residue scan itself. What stays danglable
+// inside the bind is the registration's own spelling, so the fixture is a
+// hand-crafted `.git/worktrees` leaf — the same files `git worktree add`
+// writes — whose gitdir backpointer names a path under a deleted parent.
 func TestArchiveSession_DanglingAnchorSaysFixRemove(t *testing.T) {
 	manager, _, repoID, repoPath := newStatusTestManagerCapturingLogs(t)
 	inst, wtPath := registerArchivable(t, manager, repoID, repoPath, "dangling-anchor")
@@ -180,23 +190,33 @@ func TestArchiveSession_DanglingAnchorSaysFixRemove(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, os.MkdirAll(filepath.Dir(dest), 0o755))
 
-	// A real worktree moved under the residue name — its .git pointer and
-	// registration survive the raw rename, so the bind reaches the anchor
-	// comparison, which fails on the dangling link the recorded path now
-	// spells through.
-	secondWt := filepath.Join(filepath.Dir(wtPath), "second-wt")
-	gitOut(t, repoPath, "worktree", "add", "-b", "af/dangling-anchor-second", secondWt)
-	residue := filepath.Join(filepath.Dir(wtPath), ".af-source-"+strings.Repeat("d", 32))
-	require.NoError(t, os.Rename(secondWt, residue))
+	// The recorded source is gone, and a residue-shaped directory stands
+	// beside it whose .git pointer names a registration leaf under this
+	// repo's .git/worktrees — the same-repo check answers.
 	require.NoError(t, os.RemoveAll(wtPath))
-	require.NoError(t, os.Symlink(filepath.Join(filepath.Dir(wtPath), "nonexistent"), wtPath))
+	residue := filepath.Join(filepath.Dir(wtPath), ".af-source-"+strings.Repeat("d", 32))
+	require.NoError(t, os.Mkdir(residue, 0o755))
+	leaf := filepath.Join(repoPath, ".git", "worktrees", "dangling-registration")
+	require.NoError(t, os.MkdirAll(leaf, 0o755))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(residue, ".git"),
+		[]byte("gitdir: "+leaf+"\n"), 0o644))
+
+	// The leaf's gitdir backpointer spells a path through a symlink whose
+	// target was deleted: the anchor comparison's resolution fails on the
+	// link — ErrUnresolvedComponent, the dangling class of unproven.
+	link := filepath.Join(filepath.Dir(wtPath), "lost-parent")
+	require.NoError(t, os.Symlink(filepath.Join(filepath.Dir(wtPath), "gone"), link))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(leaf, "gitdir"),
+		[]byte(filepath.Join(link, "wt", ".git")+"\n"), 0o644))
 
 	_, _, err = manager.ArchiveSession(ArchiveSessionRequest{Title: "dangling-anchor", RepoID: repoID})
 	require.Error(t, err, "an unproven residue must refuse fail-closed")
 	assert.ErrorIs(t, err, sessiongit.ErrRelocateStateUnknown,
 		"the verdict stays Unknown — unproven never becomes ours or foreign")
 	assert.Contains(t, err.Error(),
-		"could not be read; "+wtPath+" is a dangling link: fix or remove it, or move the residue out; inspect "+residue,
+		"could not be read; "+link+" is a dangling link: fix or remove it, or move the residue out; inspect "+residue,
 		"the exact adjacency: the dangling-link clause names the link and its remedy, and the residue list lands on the inspect verb (#7900 R1+R3)")
 	assert.NotContains(t, err.Error(), "retry once",
 		"a dangling link is itself readable — the retry promise is only for a read a retry can complete")
