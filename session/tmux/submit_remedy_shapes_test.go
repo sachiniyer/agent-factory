@@ -485,6 +485,238 @@ func TestStillChipComposerWithholdsDraftRowsBelowABlankRow(t *testing.T) {
 	}
 }
 
+// TestStillChipComposerWithholdsAForeignClosingEdge is the #7912 item-2
+// class: the closing edge is the composer's OWN bottom edge — the LAST row
+// byte-identical to the top edge above the anchor, with only blank rows
+// between it and the region — never any column-0 all-"─" row or
+// ╰───╯-shaped row of the wrong width. Under the column-0 wrap model the
+// cursor proof accepts, a wrapped draft's continuation can draw an all-"─"
+// row at column 0 of any width, and on master it counted as "a hard border"
+// that excused every row beneath it. Every frame below remedies on master
+// for exactly that reason and must withhold here.
+//
+// The round-2 names N2c and N3b belong to different frames: the real N2c is
+// a typed column-0 rule faking the TOP edge (stillChipFirstRow's proof, not
+// this audit's), and the real N3b is a column-0 whitespace row faking
+// Codex's transcript gap. Both still remedy, as on master — N3b is inherent
+// to the column-0 wrap model: a whitespace row is indistinguishable from
+// the gap the lane already treats as bounding the composer. A ruled lane
+// remedies only when its byte-identical closing edge is in the frame; the
+// frames here are the wrong-edge cases this audit owns (#7913 R3).
+func TestStillChipComposerWithholdsAForeignClosingEdge(t *testing.T) {
+	chipText := normalizeDelivery(codexChip)
+	rule := strings.Repeat("─", 80)
+	devinChip := "❭ " + codexChip
+	claudeChipRow := "❯ " + claudeChip
+	for name, tc := range map[string]struct {
+		rows   []string
+		cursor paneCursorState
+		chip   string
+	}{
+		// X1h: a single "─" at column 0 is not the composer's bottom rule.
+		"X1h single dash closing edge": {
+			rows:   []string{"one", rule, devinChip, "", "─", "SWE-2 Max · bypass · 2 shells ↓ ctrl+o to expand edits"},
+			cursor: paneCursorState{Visible: true, Row: 2, Col: contentEndCol(devinChip)},
+			chip:   chipText,
+		},
+		// X1d: a wrapped draft's column-0 continuation narrower than the
+		// composer's own rule.
+		"X1d wrap-width rule below the cut": {
+			rows:   []string{"one", rule, devinChip, "", strings.Repeat("─", 40), "SWE-2 Max · bypass · 2 shells ↓ ctrl+o to expand edits"},
+			cursor: paneCursorState{Visible: true, Row: 2, Col: contentEndCol(devinChip)},
+			chip:   chipText,
+		},
+		// X1e: wider than the composer's own rule.
+		"X1e wider rule below the cut": {
+			rows:   []string{"one", rule, devinChip, "", strings.Repeat("─", 81), "SWE-2 Max · bypass · 2 shells ↓ ctrl+o to expand edits"},
+			cursor: paneCursorState{Visible: true, Row: 2, Col: contentEndCol(devinChip)},
+			chip:   chipText,
+		},
+		// X1f: a full-width-looking rule below a composer whose own top rule
+		// is narrower — right shape, wrong composer.
+		"X1f rule width from another composer": {
+			rows:   []string{"one", strings.Repeat("─", 40), devinChip, "", rule, "SWE-2 Max · bypass · 2 shells ↓ ctrl+o to expand edits"},
+			cursor: paneCursorState{Visible: true, Row: 2, Col: contentEndCol(devinChip)},
+			chip:   chipText,
+		},
+		// The same column-0 wrap in Claude's ruled lane — the draft row that
+		// ends the composer early hides everything below it as chrome.
+		"claude lane wrap-width rule below the cut": {
+			rows:   []string{"x", rule, claudeChipRow, "", strings.Repeat("─", 40), "  ? for shortcuts"},
+			cursor: paneCursorState{Visible: true, Row: 2, Col: contentEndCol(claudeChipRow)},
+			chip:   normalizeDelivery(claudeChip),
+		},
+		// A ╰───╯ bottom edge whose ─ span is not the box's own.
+		"box bottom wrong width": {
+			rows:   []string{"x", "╭────────────────╮", "│ > " + codexChip + "     │", "╰────────╯", "  ? for shortcuts"},
+			cursor: paneCursorState{Visible: true, Row: 2, Col: contentEndCol("│ > " + codexChip + "     │")},
+			chip:   chipText,
+		},
+		// R4: a typed or wrapped pane-width row byte-identical to the top
+		// rule is NOT the edge when the real edge still sits below it —
+		// the draft row between them is composer content, not chrome.
+		"typed identical rule before the real edge": {
+			rows:   []string{"one", rule, devinChip, "", rule, "  ship it now", rule, "SWE-2 Max · bypass · 2 shells ↓ ctrl+o to expand edits"},
+			cursor: paneCursorState{Visible: true, Row: 2, Col: contentEndCol(devinChip)},
+			chip:   chipText,
+		},
+		// R4: the same with only the fake edge above the real one — the
+		// first identical row is itself unaudited content.
+		"two identical rules before the footer": {
+			rows:   []string{"one", rule, devinChip, "", rule, rule, "SWE-2 Max · bypass · 2 shells ↓ ctrl+o to expand edits"},
+			cursor: paneCursorState{Visible: true, Row: 2, Col: contentEndCol(devinChip)},
+			chip:   chipText,
+		},
+		// R4: the box lane takes the same proof — a typed ╰───╯ twin row
+		// before the real bottom edge does not close the composer.
+		"typed box bottom before the real bottom": {
+			rows:   []string{"x", "╭────────────────╮", "│ > " + codexChip + "     │", "╰────────────────╯", "  draft row", "╰────────────────╯", "  ? for shortcuts"},
+			cursor: paneCursorState{Visible: true, Row: 2, Col: contentEndCol("│ > " + codexChip + "     │")},
+			chip:   chipText,
+		},
+		// A ruled › lane takes the same proof: when a rule bounds the
+		// composer's top, a "─" row of a different width below is a draft
+		// row, not Codex's edge.
+		"codex ruled lane foreign-width rule": {
+			rows:   []string{"one", rule, "› " + codexChip, strings.Repeat("─", 40), "  gpt-5 · ~/repo"},
+			cursor: paneCursorState{Visible: true, Row: 2, Col: contentEndCol("› " + codexChip)},
+			chip:   chipText,
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			pane := strings.Join(tc.rows, "\n") + "\n"
+			if ok, why := stillChipComposer(pane, pane, tc.cursor, tc.chip); ok {
+				t.Fatalf("ok=true why=%q, want ok=false (the closing edge is not byte-identical to the composer's own top edge)", why)
+			}
+		})
+	}
+}
+
+// TestStillChipComposerDevinContinuationIndentIsAnAssumption pins the
+// multi-line Devin composer shape the geometry rule ASSUMES — Devin's draft
+// continuations indent ("  "), so no draft renders at column 0 inside the
+// composer and the rows below the composer's own "─" edge are chrome.
+// UNVERIFIED: the repo has no real multi-line Devin capture —
+// task/devin_ready_test.go's real captures (devin 3000.2.17, 3000.11.234)
+// are all single-line composers, and the stagedDraftPane harness drew this
+// indent by construction. If a real Devin draws continuations at column 0,
+// only #7912's byte-identical closing edge keeps a wrapped "─" continuation
+// from faking the composer's bottom rule (item 2 applies to Devin's lane).
+func TestStillChipComposerDevinContinuationIndentIsAnAssumption(t *testing.T) {
+	chipText := normalizeDelivery(codexChip)
+	rule := strings.Repeat("─", 80)
+	// The assumed shape: a wrapped Devin chip whose continuation row carries
+	// the "  " draft indent, bounded by identical top and bottom rules.
+	pane := strings.Join([]string{
+		"one",
+		rule,
+		"❭ [Pasted Content 3207",
+		"  chars]",
+		"",
+		rule,
+		"SWE-2 Max · bypass · 2 shells ↓ ctrl+o to expand edits",
+	}, "\n") + "\n"
+	cursor := paneCursorState{Visible: true, Row: 3, Col: contentEndCol("  chars]")}
+	if ok, why := stillChipComposer(pane, pane, cursor, chipText); !ok {
+		t.Fatalf("ok=false why=%q, want ok=true (the assumed indented continuation still remedies under the byte-identical edge)", why)
+	}
+}
+
+// TestStillChipComposerWithholdsDraftsInCodexFooterShape is the #7912 item-1
+// class: the Codex model segment is a CLOSED vocabulary — a model token from
+// an enumerated family plus only effort-enum tier words and the fixtures'
+// enumerated codenames — so a draft line that borrows the "model · path"
+// shape without carrying a known model is composer content, not the footer.
+// Every frame below remedies on master — the prefix test, the
+// two-capitalized-words codename rule, or the warning-word prefix accepts
+// it — and must withhold here.
+func TestStillChipComposerWithholdsDraftsInCodexFooterShape(t *testing.T) {
+	chipText := normalizeDelivery(codexChip)
+	anchor := "› " + codexChip
+	for name, footer := range map[string]string{
+		// Y1b: a real model token followed by two capitalized draft words —
+		// "Ship It" is not a codename.
+		"Y1b known model plus draft words": "  gpt-5 Ship It · ~/repo",
+		// Y1c: bare "GPT" is not a family — the head carries no version.
+		"Y1c bare GPT plus draft words": "  GPT Deploy Prod · /srv/app",
+		// Y1d: a "gpt-" prefix is not a family — no version follows it.
+		"Y1d gpt- draft token": "  gpt-please-force-push-release · ~/notes.md",
+		// Y1e: a "codex-" prefix is not a family.
+		"Y1e codex- draft token": "  codex-then-delete-the-staging-bucket · /srv",
+		// Y1f: "GPTs" shares a family's prefix and matches none.
+		"Y1f GPTs plural": "  GPTs · ~/notes.md",
+		// Y6b: the warning word must be exactly "warning"/"warnings" — a
+		// word that merely opens with one is draft text.
+		"Y6b warning-word prefix": "  ⚠ 2 warningsforcepush",
+		// R5: a suffix repeats inside the token — "codex" appears twice.
+		"R5 repeated suffix": "  gpt-5-codex-codex-mini · ~/repo",
+		// R5: suffixes out of the id's order — "mini" before "codex".
+		"R5 out-of-order suffixes": "  gpt-5-mini-codex · ~/repo",
+		// R5: the GPT- line carries at most one codename in the token —
+		// a second is a chain no real id draws.
+		"R5 chained codenames": "  GPT-5-Terra-Astra · ~/repo",
+	} {
+		t.Run(name, func(t *testing.T) {
+			pane := strings.Join([]string{anchor, "", footer}, "\n") + "\n"
+			cursor := paneCursorState{Visible: true, Row: 0, Col: firstContentCol(anchor)}
+			if ok, why := stillChipComposer(pane, pane, cursor, chipText); ok {
+				t.Fatalf("ok=true why=%q, want ok=false (%q is not in Codex's closed footer vocabulary)", why, footer)
+			}
+		})
+	}
+}
+
+// TestStillChipComposerAcceptsCodexClosedFooterVocabulary pins the other
+// side of #7912 item 1: every real Codex footer shape still remedies — a
+// known model with a one-token path (Y3c), a Main [token] segment (Y4a),
+// the fixtures' codename draws, every tier in codex-rs's ReasoningEffort
+// enum (including xhigh, minimal and none, the words the old tier list did
+// not know), and each literal/meter segment the grammar owns.
+func TestStillChipComposerAcceptsCodexClosedFooterVocabulary(t *testing.T) {
+	chipText := normalizeDelivery(codexChip)
+	anchor := "› " + codexChip
+	end := contentEndCol(anchor)
+	for name, footers := range map[string][]string{
+		"Y3c known model, one-token path": {"  gpt-5 · ~/repo"},
+		"Y4a Main [token] segment":        {"  gpt-5 · ~/repo · Main [default]"},
+		"warning plural":                  {"  gpt-5 · ~/repo · ⚠ 2 warnings"},
+		"context-left meter":              {"  gpt-5 · ~/repo · 87% context left"},
+		"fixture Terra ultra":             {"  GPT-6.1 Terra ultra · ~/sahara/sahara-cheaper-ci · ⚠ 1 warning · f2 to view"},
+		"fixture Astra":                   {"  GPT-6-Astra ultra · ~/sahara/sahara-clean · Pursuing goal · Main [default]"},
+		"fixture sol max":                 {"  gpt-5.6-sol max · ~/agent-factory"},
+		"fixture luna low":                {"  gpt-5.6-luna low · ~/agent-factory"},
+		// codex-rs's catalog display names as their own segment word
+		// (amazon_bedrock/catalog.rs; startup_prompts.rs's "GPT-6 Sol").
+		"catalog Sol high":                {"  GPT-6.1 Sol high · ~/repo"},
+		"catalog Luna low":                {"  GPT-6 Luna low · ~/repo"},
+		"catalog Sol max with path":       {"  GPT-5.6 Sol max · ~/agent-factory"},
+		"catalog Mini medium":             {"  GPT-5.4 Mini medium · ~/repo"},
+		"catalog Sol ultra pursuing goal": {"  GPT-6 Sol ultra · ~/srv/app · Pursuing goal · Main [default]"},
+		"catalog codename inside token":   {"  GPT-6-Sol ultra · ~/repo"},
+		// ServiceTier's fast mode draws the tier after the effort word
+		// (codex-rs/protocol/src/config_types.rs, ServiceTier Fast | Flex).
+		"service tier fast": {"  gpt-5.4 high fast · ~/repo"},
+		"service tier flex": {"  gpt-5.4 xhigh flex · ~/repo"},
+		"effort none":       {"  gpt-5.2-codex none · ~/repo"},
+		"effort minimal":    {"  gpt-5.1-codex minimal · ~/repo"},
+		"effort xhigh":      {"  gpt-5.1-codex-max xhigh · ~/repo"},
+		"effort persistent": {"  gpt-5.2-codex persistent · ~/repo"},
+		"o-series mini":     {"  o4-mini medium · ~/repo"},
+		"codex-mini line":   {"  codex-mini-latest low · ~/repo"},
+		"hints row":         {"  ← for agents · ? for shortcuts ⚠ 1 warning · f2 to view"},
+		"esc interrupt row": {"  esc to interrupt"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			rows := append([]string{anchor, ""}, footers...)
+			pane := strings.Join(rows, "\n") + "\n"
+			cursor := paneCursorState{Visible: true, Row: 0, Col: end}
+			if ok, why := stillChipComposer(pane, pane, cursor, chipText); !ok {
+				t.Fatalf("ok=false why=%q, want ok=true (every footer row is in Codex's closed vocabulary)", why)
+			}
+		})
+	}
+}
+
 // TestStillChipComposerAcceptsEveryRealAgentFooter pins the whole-row
 // grammars against the footers the agents actually draw: every row below the
 // composer is provably that agent's own, so the chip-only composer still
