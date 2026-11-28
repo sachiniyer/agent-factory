@@ -140,6 +140,24 @@ func (p *dockerProvisioner) reap() error {
 		log.WarningLog.Printf("%v", reapErr)
 		return reapErr
 	}
+	// The rm provably NEVER reached an engine: dockerExec returned empty output
+	// with a non-nil error and no tripped deadline — the docker CLI was missing
+	// from PATH, the fork failed (ENOMEM/EAGAIN), or the CLI was killed (e.g. OOM)
+	// before printing anything. This matches neither the deadline branch above
+	// (no deadline tripped) nor a transport banner the CLI printed (below), so
+	// without this guard it fell through to the known-state latch and deleted the
+	// row while the rm never ran — orphaning a live container behind its only
+	// durable handle (the live-Kill reap path has no verifyEngineOnReap pre-check,
+	// unlike the restored-row reaper and orphan sweep which fail closed at the
+	// `docker info` identity check). Same unknown-state class as the deadline and
+	// transport branches: do NOT latch, so the daemon's kill-retry re-runs the rm.
+	// "No such container" is disjoint here by construction (empty output cannot
+	// contain it) and stays handled above as an answered, known-state teardown.
+	if len(strings.TrimSpace(string(out))) == 0 {
+		reapErr = fmt.Errorf("%w: %w", ErrWorkspaceStateUnknown, reapErr)
+		log.WarningLog.Printf("%v", reapErr)
+		return reapErr
+	}
 	// The "answer" was a TRANSPORT FAILURE — the daemon was unreachable (down or
 	// restarting, the socket/endpoint was refused, access was denied, or a pinned
 	// DOCKER_CONTEXT could not be resolved) — so the `docker rm -f` never reached an
