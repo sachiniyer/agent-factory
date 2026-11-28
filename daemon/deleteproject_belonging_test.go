@@ -228,6 +228,87 @@ func TestAbsentRootDeleteRefusesWhileASiblingWorktreeSessionKeysUnderTheBareIden
 	assertAbsentRowSurvives(t, manager, project.ID, []string{derived, bareID}, [][2]string{{bareID, "sibling-session"}})
 }
 
+// TestAbsentRootDeleteRefusesWhenItsRecordedRootResolvesAgainBeforeTheAbsenceProbe
+// pins the interleaving the three-way switch omitted: a legacy row is selected
+// only because its recorded root was determinately free, and a checkout that
+// reappears at that root between row selection and the bounded absence probe
+// answers `absent == false`. Without a case for that answer the switch fell
+// through silently — no scan, no refusal, no log — and the delete deregistered
+// the row while the #7854-protected session stayed live. The fix refuses the
+// same way the selector treats a resolving root: the stale derived id names
+// nothing it still is. A present-but-non-git root is the #3530 proven-mismatch
+// release the #7829 check already decided, not this reappearance.
+func TestAbsentRootDeleteRefusesWhenItsRecordedRootResolvesAgainBeforeTheAbsenceProbe(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	installOptionsRecordingBackend(t)
+	parent := testguard.CanonicalTempDir(t)
+	bare, worktree, sibling := bareWorktreeFixture(t, parent)
+	project := registerTestProject(t, worktree)
+	bareID := repoID(t, bare)
+	derived := config.DerivedRepoIDForUnresolvedRoot(filepath.Clean(worktree))
+	clearRecordedRepoID(t, project.ID)
+	if err := os.RemoveAll(worktree); err != nil {
+		t.Fatalf("remove the recorded root: %v", err)
+	}
+	manager, err := NewManager(config.DefaultConfig())
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	if recorded := onlyIdentityFor(t, project.ID); recorded != "" {
+		t.Fatalf("fixture must keep the row unreconciled, got %q", recorded)
+	}
+	liveSessionUnderIdentity(t, manager, bareID, "sibling-session", sibling)
+
+	// A checkout reappears at the recorded root between row selection and the
+	// bounded absence probe — the same seam
+	// TestReappearingCheckoutRefusesTheTransitioningDelete stretches for the
+	// transition gate. The selectors accepted this row only because its root
+	// was determinately free; restoring a git checkout one probe tick later
+	// must not let the delete deregister the row while the bare-identity
+	// session stays live.
+	t.Cleanup(func() { deleteProjectPostClaimantHookForTest = nil })
+	// Both request forms that deregister the row reach the same refusal: by
+	// path, and by the derived identity the row's reconciler invents.
+	for _, req := range []DeleteProjectRequest{
+		{RepoPath: worktree},
+		{RepoID: derived},
+	} {
+		// The recorded root must be absent at selection time so the row is
+		// selected as absent-rooted; the hook restores a checkout after the
+		// claimant scan, before the absence probe.
+		if err := os.RemoveAll(worktree); err != nil {
+			t.Fatalf("remove the recorded root before the delete: %v", err)
+		}
+		hookRan := false
+		deleteProjectPostClaimantHookForTest = func() {
+			if hookRan {
+				return
+			}
+			hookRan = true
+			if err := exec.Command("git", "init", worktree).Run(); err != nil {
+				t.Fatalf("restore a checkout mid-delete: %v", err)
+			}
+		}
+		result, delErr := manager.DeleteProject(req)
+		if !hookRan {
+			t.Fatalf("request %+v: the fixture never reached the absence probe, so it pins nothing", req)
+		}
+		if delErr == nil {
+			t.Fatalf("request %+v: the recorded root resolved again before the absence probe — the delete must refuse rather than deregister the row while the bare-identity session stays live", req)
+		}
+		for _, want := range []string{"nothing was changed", "resolved again", "delete again", worktree} {
+			if !strings.Contains(delErr.Error(), want) {
+				t.Fatalf("request %+v: the refusal must name %q: %v", req, want, delErr)
+			}
+		}
+		if len(result.Archived) != 0 || len(result.Killed) != 0 || result.Deregistered {
+			t.Fatalf("request %+v: a refused delete must archive, kill and deregister nothing: archived=%d killed=%d deregistered=%v",
+				req, len(result.Archived), len(result.Killed), result.Deregistered)
+		}
+	}
+	assertAbsentRowSurvives(t, manager, project.ID, []string{derived, bareID}, [][2]string{{bareID, "sibling-session"}})
+}
+
 // TestAbsentRootDeleteProceedsPastSessionsKeyedUnderUnrelatedRepositories
 // pins the discrimination: sessions that provably belong to OTHER clones —
 // one whose bare common dir carries a DIFFERENT registered checkout marker,

@@ -579,6 +579,25 @@ func (m *Manager) resolveDeleteProjectTarget(req DeleteProjectRequest) (deletePr
 				return deleteProjectTarget{repoID: repoID}, absentRootBelongingRefusal(repoID, belongingRoot, belonging.suspects)
 			}
 			absentBelonging = belonging
+		case !absent:
+			// A PRESENT answer means the recorded root came back between
+			// selection and this probe — selection accepted this row only
+			// because its root was determinately free, so a root that
+			// resolves again means the stale derived id names nothing it
+			// still is (the selector's own rule, pinned by
+			// TestStaleDerivedIDDoesNotSelectARowWhoseRootResolvesAgain).
+			// Refuse only a checkout that resumed resolving as git: a
+			// present-but-non-git root is the #3530 proven-mismatch release
+			// the #7829 check above already decided, not this reappearance
+			// — in that family the root never resolves as git. Falling
+			// through deregisters the row while the #7854-protected session
+			// stays live — the orphan this scan exists to prevent. The
+			// retry either targets the restored checkout's real identity
+			// (path form) or degrades to the idempotent no-op the selector
+			// pins (id form).
+			if _, gitErr := config.RepoFromPath(belongingRoot); gitErr == nil {
+				return deleteProjectTarget{repoID: repoID}, fmt.Errorf("delete project %s: its recorded root %s resolved again before af could establish which live sessions it owned — nothing was changed; delete again", repoID, belongingRoot)
+			}
 		}
 	}
 	carryWorkspace := ""
