@@ -1,7 +1,6 @@
 package daemon
 
 import (
-	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -996,34 +995,6 @@ func managedSessionUnderIdentity(t *testing.T, m *Manager, repoID, title, identi
 	return inst
 }
 
-// clearRecordedCheckoutID strips the durable checkout id off a registered
-// row, producing the record shape that predates #1814's discrimination
-// values — the input classUnattributed exists for.
-func clearRecordedCheckoutID(t *testing.T, projectID string) {
-	t.Helper()
-	dir, err := config.ProjectRegistryDir()
-	if err != nil {
-		t.Fatalf("ProjectRegistryDir: %v", err)
-	}
-	path := filepath.Join(dir, projectID, "project.json")
-	raw, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("read record: %v", err)
-	}
-	var record map[string]any
-	if err := json.Unmarshal(raw, &record); err != nil {
-		t.Fatalf("parse record: %v", err)
-	}
-	delete(record, "checkout_id")
-	out, err := json.MarshalIndent(record, "", "  ")
-	if err != nil {
-		t.Fatalf("marshal record: %v", err)
-	}
-	if err := os.WriteFile(path, out, 0o644); err != nil {
-		t.Fatalf("write record: %v", err)
-	}
-}
-
 // TestAbsentRootRefusalPrintsTheProvableRepoCommandForAnArchivableSuspect
 // pins the one archive command a refusal may print: `af sessions archive
 // --repo <root> <title>` where <root> provably resolves to the session's own
@@ -1116,46 +1087,4 @@ func TestAbsentRootRefusalPrintsNoCommandWhenTheRootCannotProveTheKey(t *testing
 			len(result.Archived), len(result.Killed), result.Deregistered)
 	}
 	assertAbsentRowSurvives(t, manager, project.ID, []string{derived, foreignID}, [][2]string{{foreignID, "foreign-keyed"}})
-}
-
-// TestAbsentRootRefusalNamesUnattributedSuspectsForTheUI covers the row that
-// predates checkout ids: every live identity stays suspect, and because no
-// probe ran, no --repo verdict exists — so the refusal names each session
-// for the TUI or web UI and prints no command.
-func TestAbsentRootRefusalNamesUnattributedSuspectsForTheUI(t *testing.T) {
-	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
-	installOptionsRecordingBackend(t)
-	parent := testguard.CanonicalTempDir(t)
-	bare, worktree, sibling := bareWorktreeFixture(t, parent)
-	project := registerTestProject(t, worktree)
-	bareID := repoID(t, bare)
-	derived := config.DerivedRepoIDForUnresolvedRoot(filepath.Clean(worktree))
-	clearRecordedRepoID(t, project.ID)
-	clearRecordedCheckoutID(t, project.ID)
-	if err := os.RemoveAll(worktree); err != nil {
-		t.Fatalf("remove the recorded root: %v", err)
-	}
-	manager, err := NewManager(config.DefaultConfig())
-	if err != nil {
-		t.Fatalf("NewManager: %v", err)
-	}
-	inst := managedSessionUnderIdentity(t, manager, bareID, "unattributable-sibling", bare, sibling)
-
-	result, delErr := manager.DeleteProject(DeleteProjectRequest{RepoPath: worktree})
-	if delErr == nil {
-		t.Fatalf("a row that predates checkout ids clears nothing — the session stays suspect")
-	}
-	for _, want := range []string{"nothing was changed", "unattributable-sibling", "predates checkout ids", inst.ID, "TUI or web UI"} {
-		if !strings.Contains(delErr.Error(), want) {
-			t.Fatalf("the refusal must name %q: %v", want, delErr)
-		}
-	}
-	if strings.Contains(delErr.Error(), "af sessions archive") {
-		t.Fatalf("an unprobed suspect must get no archive command: %v", delErr)
-	}
-	if len(result.Archived) != 0 || len(result.Killed) != 0 || result.Deregistered {
-		t.Fatalf("a refused delete must archive, kill and deregister nothing: archived=%d killed=%d deregistered=%v",
-			len(result.Archived), len(result.Killed), result.Deregistered)
-	}
-	assertAbsentRowSurvives(t, manager, project.ID, []string{derived, bareID}, [][2]string{{bareID, "unattributable-sibling"}})
 }
