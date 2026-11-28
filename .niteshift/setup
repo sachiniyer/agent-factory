@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+# Fresh-sandbox setup: put Go on PATH (it lives outside the default PATH),
+# fetch modules, and compile once so the build cache is warm.
+set -euo pipefail
+
+cd "$NITESHIFT_CHECKOUT_ROOT/agent-factory"
+
+if ! command -v go >/dev/null 2>&1; then
+	export PATH="/usr/local/go/bin:$PATH"
+fi
+
+go mod download
+go build ./...
