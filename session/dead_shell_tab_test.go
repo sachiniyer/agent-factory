@@ -220,6 +220,40 @@ func TestReconcileMirrorsShellExitBothDirections(t *testing.T) {
 	assert.Nil(t, inst.Tabs[1].Exit, "the daemon's cleared exit clears the local row too")
 }
 
+// An off-box (ssh/docker/sandbox) shell row has no local tmux to probe — the
+// agent-server's roster is its only evidence, and it is authoritative both
+// directions (R6): a stamped remote death lands on the row, and a cleared one
+// (the sandbox respawned the shell) clears it. The gen fence still applies: a
+// replacement incarnation's roster row must not inherit its predecessor's end.
+func TestOffBoxRosterMirrorsShellExitBothDirections(t *testing.T) {
+	log.Initialize(false)
+	t.Cleanup(log.Close)
+	inst := &Instance{started: true, Tabs: []*Tab{
+		{ID: "shell-id", Name: "terminal", Kind: TabKindShell, gen: "g1"},
+	}}
+
+	changed, _ := inst.applyOffBoxRoster(map[string]TabData{
+		"shell-id": {ID: "shell-id", Gen: "g1", Exit: &TabExitData{At: time.Unix(1726000000, 0)}},
+	})
+	assert.True(t, changed)
+	require.NotNil(t, inst.Tabs[0].Exit, "the agent-server's stamped exit lands on the off-box shell row")
+
+	changed, _ = inst.applyOffBoxRoster(map[string]TabData{
+		"shell-id": {ID: "shell-id", Gen: "g1"},
+	})
+	assert.True(t, changed)
+	assert.Nil(t, inst.Tabs[0].Exit, "the agent-server's cleared exit clears the row too")
+
+	// The generation fence: a stamped death for gen g0 must not land on the
+	// replacement shell running as g1.
+	inst.Tabs[0].Exit = nil
+	changed, _ = inst.applyOffBoxRoster(map[string]TabData{
+		"shell-id": {ID: "shell-id", Gen: "g0", Exit: &TabExitData{At: time.Unix(1726000000, 0)}},
+	})
+	assert.False(t, changed)
+	assert.Nil(t, inst.Tabs[0].Exit, "a stale-generation exit never reaches the replacement shell")
+}
+
 // TabDead is the interactive-entry read (#7944): true on the stamped exit and
 // nothing else — no probes, so it cannot block the Bubble Tea loop, and no
 // unproven absence, so it cannot steer a `w` at a maybe-live shell.
