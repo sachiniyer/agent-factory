@@ -2,6 +2,7 @@ package git
 
 import (
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -55,6 +56,15 @@ func removeRetainedArchiveTree(tree ArchiveRetainedTree) error {
 	if !tree.identity().same(current) {
 		return fmt.Errorf("refusing to remove retained archive tree %s because its private name identifies different data", path)
 	}
+	// A recorded creation pin must match too: a delete-and-recreate at this
+	// private name could hand the recycled (dev, ino) to different data
+	// (#7900). A probe that cannot answer a recorded pin fails closed with
+	// its own "could not read" wording — an unanswered question, not an
+	// answered mismatch (R4).
+	pin, pinErr := creationPin(parent, name)
+	if err := refuseUnreadableTreePin(tree, pin, pinErr, path); err != nil {
+		return err
+	}
 	root, _, err := openDirectoryAt(parent, name, path, "retained archive")
 	if err != nil {
 		return err
@@ -67,8 +77,39 @@ func removeRetainedArchiveTree(tree ArchiveRetainedTree) error {
 	if !tree.identity().same(opened) {
 		return fmt.Errorf("refusing to remove retained archive tree %s because its opened identity changed", path)
 	}
+	openedPin, openedPinErr := creationPinOpened(root)
+	if err := refuseUnreadableTreePin(tree, openedPin, openedPinErr, path); err != nil {
+		return err
+	}
 	if err := removeOpenedDirectory(parent, name, path, root, nil); err != nil {
 		return fmt.Errorf("remove retained archive tree %s: %w", path, err)
+	}
+	return nil
+}
+
+// errCreationStampUnavailable is what a pin probe that answers nothing means
+// for a record carrying one: the filesystem offered no birth time, so the
+// recorded stamp went unchecked — an unreadable pin, not a mismatched one.
+var errCreationStampUnavailable = errors.New("the filesystem answered no creation stamp")
+
+// refuseUnreadableTreePin checks a recorded creation pin against a fresh
+// probe for kill cleanup (#7900). A record carrying no pin has nothing to
+// check. A pin the probe cannot read — a failed statx/fstat, or a
+// filesystem that answered no stamp — refuses with "could not read the
+// creation stamp": that is a question that went unanswered, not an answered
+// mismatch, so it must not read "identifies different data" (#7900 R4).
+// Only a probe that answered and answered differently is different data.
+func refuseUnreadableTreePin(tree ArchiveRetainedTree, pin int64, pinErr error, path string) error {
+	if tree.CreationTime == 0 {
+		return nil
+	}
+	switch {
+	case pinErr != nil:
+		return fmt.Errorf("refusing to remove retained archive tree %s: could not read the creation stamp: %w", path, pinErr)
+	case pin == 0:
+		return fmt.Errorf("refusing to remove retained archive tree %s: could not read the creation stamp: %w", path, errCreationStampUnavailable)
+	case pin != tree.CreationTime:
+		return fmt.Errorf("refusing to remove retained archive tree %s because its private name identifies different data", path)
 	}
 	return nil
 }
@@ -103,5 +144,6 @@ func (g *GitWorktree) dropRetainedArchiveTree(removed ArchiveRetainedTree) {
 func sameRetainedArchiveTree(left, right ArchiveRetainedTree) bool {
 	return left.IdentityKnown == right.IdentityKnown &&
 		left.identity().same(right.identity()) &&
+		left.CreationTime == right.CreationTime &&
 		left.filesystemPath() == right.filesystemPath()
 }
