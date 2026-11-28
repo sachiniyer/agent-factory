@@ -300,19 +300,21 @@ func CheckoutIDsInCommonDir(commonDir string) (ids []string, present bool, err e
 	}
 	for _, entry := range entries {
 		name := entry.Name()
-		if entry.IsDir() || strings.HasSuffix(name, ".lock") {
-			// WithFileLock leaves a persistent <marker>.lock beside every
-			// marker; it is a companion, never evidence (#7914 review: a
-			// prefix-only match reads the empty lock and the invalid-ID error
-			// discards every valid marker beside it).
+		if entry.IsDir() || strings.HasSuffix(name, ".lock") || strings.Contains(name, ".tmp.") || strings.HasSuffix(name, ".tmp") {
+			// Companion files are never evidence: WithFileLock leaves a
+			// persistent <marker>.lock beside every marker (#7914 review: a
+			// prefix-only match reads the empty lock and the invalid-ID
+			// error discards every valid marker beside it), and
+			// AtomicWriteFile strands a <marker>.tmp.NNN when a write dies
+			// between create and rename.
 			continue
 		}
 		if !checkoutMarkerFileName(name) {
 			if strings.HasPrefix(name, checkoutMarkerFilePrefix) {
-				// Marker-shaped but not a marker name — a stranded temp
-				// write or an id scheme this build does not know. It could
-				// hold the row's id, so it is unverifiable evidence, never
-				// "absent" and never silently skipped.
+				// Marker-shaped but not a marker name — an id scheme this
+				// build does not know. It could hold the row's id, so it is
+				// unverifiable evidence, never "absent" and never silently
+				// skipped.
 				return nil, false, fmt.Errorf("unverifiable checkout-marker file %s under %s", name, filepath.Join(commonDir, checkoutMarkerDirName))
 			}
 			continue

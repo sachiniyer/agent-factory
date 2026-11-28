@@ -77,6 +77,56 @@ func liveSessionUnderIdentity(t *testing.T, m *Manager, repoID, title, worktreeP
 	return inst
 }
 
+// markerCheckoutID reads the checkout id a registration minted into the
+// clone's common dir — the value a row records, which the scan later sweeps
+// for under ANY home's file name.
+func markerCheckoutID(t *testing.T, commonDir string) string {
+	t.Helper()
+	ids, present, err := config.CheckoutIDsInCommonDir(commonDir)
+	if err != nil || !present || len(ids) == 0 {
+		t.Fatalf("the fixture clone's marker must read: ids=%v present=%v err=%v", ids, present, err)
+	}
+	return ids[0]
+}
+
+// fakeCommonDir builds a git-shaped metadata directory — HEAD beside
+// objects/ and refs/, the shape a resolved common directory must show — and,
+// when checkoutID is non-empty, an agent-factory marker directory holding it
+// under a real marker file name.
+func fakeCommonDir(t *testing.T, dir, checkoutID string) {
+	t.Helper()
+	for _, sub := range []string{"objects", "refs"} {
+		if err := os.MkdirAll(filepath.Join(dir, sub), 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", sub, err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(dir, "HEAD"), []byte("ref: refs/heads/main\n"), 0o644); err != nil {
+		t.Fatalf("write HEAD: %v", err)
+	}
+	if checkoutID != "" {
+		markerDir := filepath.Join(dir, "agent-factory")
+		if err := os.MkdirAll(markerDir, 0o755); err != nil {
+			t.Fatalf("mkdir marker dir: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(markerDir, "checkout-id-"+strings.Repeat("b", 32)), []byte(checkoutID+"\n"), 0o644); err != nil {
+			t.Fatalf("write marker: %v", err)
+		}
+	}
+}
+
+// sessionUnderRoot keys a live session under the repo identity root names —
+// the shape a session has when af's recorded identity for it is a directory
+// the scan then has to describe.
+func sessionUnderRoot(t *testing.T, m *Manager, title, root string) string {
+	t.Helper()
+	id := config.RepoIDFromRoot(filepath.Clean(root))
+	inst := runningInstance(t, title, root, root)
+	m.mu.Lock()
+	m.instances[daemonInstanceKey(id, title)] = inst
+	m.mu.Unlock()
+	return id
+}
+
 // runningInstance builds a live instance row the way a restored or in-flight
 // session can look: a recorded identity root and no resolvable worktree
 // backend behind it.
@@ -158,7 +208,7 @@ func TestAbsentRootDeleteRefusesWhileASiblingWorktreeSessionKeysUnderTheBareIden
 		if delErr == nil {
 			t.Fatalf("request %+v: the delete deregistered the row while a sibling-worktree session stayed live — the reported bug", req)
 		}
-		for _, want := range []string{"nothing was changed", "sibling-session", bare, "checkout marker", "af sessions archive --repo"} {
+		for _, want := range []string{"nothing was changed", "sibling-session", bare, "checkout marker", "af sessions archive"} {
 			if !strings.Contains(delErr.Error(), want) {
 				t.Fatalf("request %+v: the refusal must name %q: %v", req, want, delErr)
 			}
@@ -269,7 +319,7 @@ func TestAbsentRootDeleteRefusesWhileAPre3358SessionKeysUnderTheClonesParent(t *
 	if delErr == nil {
 		t.Fatalf("a session keyed under the clone's parent is as suspect as one keyed under the clone — the marker lives one level down")
 	}
-	for _, want := range []string{"nothing was changed", "legacy-sibling", "checkout marker", bare, "af sessions archive --repo"} {
+	for _, want := range []string{"nothing was changed", "legacy-sibling", "checkout marker", bare, "af sessions archive"} {
 		if !strings.Contains(delErr.Error(), want) {
 			t.Fatalf("the refusal must name %q: %v", want, delErr)
 		}
@@ -428,7 +478,7 @@ func TestAbsentRootDeleteReportsSessionsThatMaterializedDuringItsDeregister(t *t
 	if !result.Deregistered {
 		t.Fatalf("the row still comes off — the report is over what survived it")
 	}
-	for _, want := range []string{"late-sibling", "af sessions archive --repo"} {
+	for _, want := range []string{"late-sibling", "af sessions archive"} {
 		if !strings.Contains(delErr.Error(), want) {
 			t.Fatalf("the report must name %q: %v", want, delErr)
 		}
@@ -588,5 +638,300 @@ func TestConcurrentAbsentRootDeletesProbeEachRootWithItsOwnCheckoutID(t *testing
 	manager.mu.Unlock()
 	if inst == nil || inst.GetStatus() != session.Running {
 		t.Fatalf("the live session under the probed repo must stay live")
+	}
+}
+
+// TestIdentityRootCommonDirResolvesGitfileIndirections pins the .git-entry
+// layouts the marker sweep must describe rather than report unproven: a .git
+// symlink — to a metadata directory or to a redirect file — and a gitdir
+// pointer whose target path legitimately ends in whitespace (session/git's
+// resolveRepoMetadataRoot and parseGitdirPointerLine semantics, #7914
+// review).
+func TestIdentityRootCommonDirResolvesGitfileIndirections(t *testing.T) {
+	parent := testguard.CanonicalTempDir(t)
+
+	// A .git symlink to the metadata directory itself — git accepts the
+	// layout, and the link must be followed before classifying.
+	metaReal := filepath.Join(parent, "meta-real")
+	if err := os.MkdirAll(metaReal, 0o755); err != nil {
+		t.Fatalf("mkdir metadata: %v", err)
+	}
+	symlinked := filepath.Join(parent, "symlinked")
+	if err := os.MkdirAll(symlinked, 0o755); err != nil {
+		t.Fatalf("mkdir symlinked root: %v", err)
+	}
+	if err := os.Symlink(metaReal, filepath.Join(symlinked, ".git")); err != nil {
+		t.Fatalf("symlink .git: %v", err)
+	}
+	if common, shape, reason := identityRootCommonDir(symlinked); shape != shapeCommonDir || common != metaReal {
+		t.Fatalf("a .git symlink to a metadata dir must resolve: common=%q shape=%v reason=%q", common, shape, reason)
+	}
+
+	// A .git symlink to a redirect FILE resolves the file's pointer.
+	separate := filepath.Join(parent, "separate")
+	fakeCommonDir(t, separate, "")
+	redirect := filepath.Join(parent, "redirect.git")
+	if err := os.WriteFile(redirect, []byte("gitdir: "+separate+"\n"), 0o644); err != nil {
+		t.Fatalf("write redirect: %v", err)
+	}
+	linkRoot := filepath.Join(parent, "linkroot")
+	if err := os.MkdirAll(linkRoot, 0o755); err != nil {
+		t.Fatalf("mkdir linkroot: %v", err)
+	}
+	if err := os.Symlink(redirect, filepath.Join(linkRoot, ".git")); err != nil {
+		t.Fatalf("symlink redirect: %v", err)
+	}
+	if common, shape, reason := identityRootCommonDir(linkRoot); shape != shapeCommonDir || common != separate {
+		t.Fatalf("a .git symlink to a redirect file must resolve its pointer: common=%q shape=%v reason=%q", common, shape, reason)
+	}
+
+	// A gitdir target whose path ends in a space must survive the parse —
+	// trimming it names a directory that does not exist, and its missing
+	// markers then read as proof of a different clone.
+	spaced := filepath.Join(parent, "meta ")
+	fakeCommonDir(t, spaced, "")
+	spacedRoot := filepath.Join(parent, "spacedroot")
+	if err := os.MkdirAll(spacedRoot, 0o755); err != nil {
+		t.Fatalf("mkdir spacedroot: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(spacedRoot, ".git"), []byte("gitdir: "+spaced+"\n"), 0o644); err != nil {
+		t.Fatalf("write spaced pointer: %v", err)
+	}
+	if common, shape, reason := identityRootCommonDir(spacedRoot); shape != shapeCommonDir || common != filepath.Clean(spaced) {
+		t.Fatalf("a whitespace-suffixed gitdir target must be preserved: common=%q shape=%v reason=%q", common, shape, reason)
+	}
+
+	// A linked-worktree pointer resolves through the gitdir's commondir
+	// file — the way git actually answers --git-common-dir — to the real
+	// common directory.
+	common := filepath.Join(parent, "common")
+	fakeCommonDir(t, common, "")
+	leaf := filepath.Join(common, "worktrees", "leaf")
+	if err := os.MkdirAll(leaf, 0o755); err != nil {
+		t.Fatalf("mkdir worktree leaf: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(leaf, "commondir"), []byte("../..\n"), 0o644); err != nil {
+		t.Fatalf("write commondir: %v", err)
+	}
+	wtRoot := filepath.Join(parent, "wtroot")
+	if err := os.MkdirAll(wtRoot, 0o755); err != nil {
+		t.Fatalf("mkdir wtroot: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(wtRoot, ".git"), []byte("gitdir: "+leaf+"\n"), 0o644); err != nil {
+		t.Fatalf("write worktree pointer: %v", err)
+	}
+	if got, shape, reason := identityRootCommonDir(wtRoot); shape != shapeCommonDir || got != common {
+		t.Fatalf("a linked-worktree pointer must resolve through commondir: common=%q shape=%v reason=%q", got, shape, reason)
+	}
+}
+
+// TestAbsentRootDeleteRefusesWhileASessionsGitfilePointsUnderAWorktreesName
+// pins the narrow fail-open in resolving gitdir pointers by shape alone: a
+// --separate-git-dir metadata tree can legitimately sit under a directory
+// NAMED worktrees. Resolving the real common dir the way git does — through
+// commondir, not by climbing the path — finds the row's marker inside it;
+// climbing reads a parent that holds no marker and clears a possibly-owning
+// root.
+func TestAbsentRootDeleteRefusesWhileASessionsGitfilePointsUnderAWorktreesName(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	installOptionsRecordingBackend(t)
+	parent := testguard.CanonicalTempDir(t)
+	bare, worktree, _ := bareWorktreeFixture(t, parent)
+	project := registerTestProject(t, worktree)
+	chk := markerCheckoutID(t, bare)
+	derived := config.DerivedRepoIDForUnresolvedRoot(filepath.Clean(worktree))
+	clearRecordedRepoID(t, project.ID)
+	if err := os.RemoveAll(worktree); err != nil {
+		t.Fatalf("remove the recorded root: %v", err)
+	}
+	manager, err := NewManager(config.DefaultConfig())
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+
+	// The session's identity root carries a .git redirect file whose gitdir
+	// lives under a directory named "worktrees" — a --separate-git-dir
+	// layout, not a linked worktree. Its gitdir IS the common directory,
+	// and it holds the row's marker.
+	fakeParent := testguard.CanonicalTempDir(t)
+	metadata := filepath.Join(fakeParent, "worktrees", "proj")
+	fakeCommonDir(t, metadata, chk)
+	root := filepath.Join(fakeParent, "checkout")
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		t.Fatalf("mkdir root: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(root, ".git"), []byte("gitdir: "+metadata+"\n"), 0o644); err != nil {
+		t.Fatalf("write .git pointer: %v", err)
+	}
+	rootID := sessionUnderRoot(t, manager, "sepgit-session", root)
+
+	result, delErr := manager.DeleteProject(DeleteProjectRequest{RepoPath: worktree})
+	if delErr == nil {
+		t.Fatalf("a gitdir under a worktrees-named directory must resolve via commondir — the real common dir holds this record's marker")
+	}
+	for _, want := range []string{"nothing was changed", "sepgit-session", "checkout marker", metadata, "af sessions archive"} {
+		if !strings.Contains(delErr.Error(), want) {
+			t.Fatalf("the refusal must name %q: %v", want, delErr)
+		}
+	}
+	if len(result.Archived) != 0 || len(result.Killed) != 0 || result.Deregistered {
+		t.Fatalf("a refused delete must archive, kill and deregister nothing: archived=%d killed=%d deregistered=%v",
+			len(result.Archived), len(result.Killed), result.Deregistered)
+	}
+	assertAbsentRowSurvives(t, manager, project.ID, []string{derived}, [][2]string{{rootID, "sepgit-session"}})
+}
+
+// TestAbsentRootDeleteRefusesWhileAGitdirNameEndsInWhitespace pins the
+// pointer parse: a separate-git-dir name that legitimately ends in a space
+// must survive — trimming it names a different, nonexistent directory whose
+// missing markers then read as proof of a different clone.
+func TestAbsentRootDeleteRefusesWhileAGitdirNameEndsInWhitespace(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	installOptionsRecordingBackend(t)
+	parent := testguard.CanonicalTempDir(t)
+	bare, worktree, _ := bareWorktreeFixture(t, parent)
+	project := registerTestProject(t, worktree)
+	chk := markerCheckoutID(t, bare)
+	derived := config.DerivedRepoIDForUnresolvedRoot(filepath.Clean(worktree))
+	clearRecordedRepoID(t, project.ID)
+	if err := os.RemoveAll(worktree); err != nil {
+		t.Fatalf("remove the recorded root: %v", err)
+	}
+	manager, err := NewManager(config.DefaultConfig())
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+
+	fakeParent := testguard.CanonicalTempDir(t)
+	metadata := filepath.Join(fakeParent, "meta ")
+	fakeCommonDir(t, metadata, chk)
+	root := filepath.Join(fakeParent, "checkout")
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		t.Fatalf("mkdir root: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(root, ".git"), []byte("gitdir: "+metadata+"\n"), 0o644); err != nil {
+		t.Fatalf("write .git pointer: %v", err)
+	}
+	rootID := sessionUnderRoot(t, manager, "spaced-gitdir-session", root)
+
+	result, delErr := manager.DeleteProject(DeleteProjectRequest{RepoPath: worktree})
+	if delErr == nil {
+		t.Fatalf("a whitespace-suffixed gitdir must be preserved — the real common dir holds this record's marker")
+	}
+	for _, want := range []string{"nothing was changed", "spaced-gitdir-session", "checkout marker", "meta ", "af sessions archive"} {
+		if !strings.Contains(delErr.Error(), want) {
+			t.Fatalf("the refusal must name %q: %v", want, delErr)
+		}
+	}
+	if len(result.Archived) != 0 || len(result.Killed) != 0 || result.Deregistered {
+		t.Fatalf("a refused delete must archive, kill and deregister nothing: archived=%d killed=%d deregistered=%v",
+			len(result.Archived), len(result.Killed), result.Deregistered)
+	}
+	assertAbsentRowSurvives(t, manager, project.ID, []string{derived}, [][2]string{{rootID, "spaced-gitdir-session"}})
+}
+
+// TestAbsentRootDeleteRefusesWhileASessionsGitfileDangles pins the last
+// fail-open of the same class: a .git redirect whose target does not resolve
+// to an existing git-shaped directory leaves the real common dir
+// undetermined — its missing markers are not evidence of a different clone,
+// so the root is unproven and the delete refuses.
+func TestAbsentRootDeleteRefusesWhileASessionsGitfileDangles(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	installOptionsRecordingBackend(t)
+	parent := testguard.CanonicalTempDir(t)
+	_, worktree, _ := bareWorktreeFixture(t, parent)
+	project := registerTestProject(t, worktree)
+	derived := config.DerivedRepoIDForUnresolvedRoot(filepath.Clean(worktree))
+	clearRecordedRepoID(t, project.ID)
+	if err := os.RemoveAll(worktree); err != nil {
+		t.Fatalf("remove the recorded root: %v", err)
+	}
+	manager, err := NewManager(config.DefaultConfig())
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+
+	fakeParent := testguard.CanonicalTempDir(t)
+	root := filepath.Join(fakeParent, "checkout")
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		t.Fatalf("mkdir root: %v", err)
+	}
+	gone := filepath.Join(fakeParent, "moved-away")
+	if err := os.WriteFile(filepath.Join(root, ".git"), []byte("gitdir: "+gone+"\n"), 0o644); err != nil {
+		t.Fatalf("write .git pointer: %v", err)
+	}
+	rootID := sessionUnderRoot(t, manager, "dangling-gitfile-session", root)
+
+	result, delErr := manager.DeleteProject(DeleteProjectRequest{RepoPath: worktree})
+	if delErr == nil {
+		t.Fatalf("a gitfile that resolves nowhere git-shaped is unproven, not cleared — the delete must refuse")
+	}
+	for _, want := range []string{"nothing was changed", "dangling-gitfile-session", "cannot describe", "af sessions archive"} {
+		if !strings.Contains(delErr.Error(), want) {
+			t.Fatalf("the refusal must name %q: %v", want, delErr)
+		}
+	}
+	if len(result.Archived) != 0 || len(result.Killed) != 0 || result.Deregistered {
+		t.Fatalf("a refused delete must archive, kill and deregister nothing: archived=%d killed=%d deregistered=%v",
+			len(result.Archived), len(result.Killed), result.Deregistered)
+	}
+	assertAbsentRowSurvives(t, manager, project.ID, []string{derived}, [][2]string{{rootID, "dangling-gitfile-session"}})
+}
+
+// TestAbsentRootDeleteClearsAPlainParentWithCleanChildren pins the everyday
+// pre-#3358 layout: a session keyed under a PLAIN parent directory whose
+// children are readable and carry no marker with the row's id. Nothing the
+// sweep can see could hold the row's checkout, so the root clears and the
+// delete completes — healthy unrelated repositories must not refuse.
+func TestAbsentRootDeleteClearsAPlainParentWithCleanChildren(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	installOptionsRecordingBackend(t)
+	parent := testguard.CanonicalTempDir(t)
+	_, worktree, _ := bareWorktreeFixture(t, parent)
+	project := registerTestProject(t, worktree)
+	clearRecordedRepoID(t, project.ID)
+	if err := os.RemoveAll(worktree); err != nil {
+		t.Fatalf("remove the recorded root: %v", err)
+	}
+	manager, err := NewManager(config.DefaultConfig())
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+
+	plainParent := testguard.CanonicalTempDir(t)
+	// A bare clone one level down whose marker dir reads cleanly and holds a
+	// DIFFERENT checkout id — the usual unrelated child.
+	otherClone := filepath.Join(plainParent, "other.git")
+	fakeCommonDir(t, otherClone, "chk_"+strings.Repeat("d", 32))
+	// A second bare clone whose marker dir holds only a stranded atomic
+	// temp — a checkout-id-*.tmp.NNN is companion debris, never evidence.
+	tmpClone := filepath.Join(plainParent, "tmp.git")
+	fakeCommonDir(t, tmpClone, "")
+	if err := os.WriteFile(filepath.Join(tmpClone, "agent-factory", "checkout-id-"+strings.Repeat("c", 32)+".tmp.99"), []byte("chk_x\n"), 0o644); err != nil {
+		t.Fatalf("write stranded tmp: %v", err)
+	}
+	// A determinately-non-repository child — its agent-factory NAME is not
+	// even a directory, and none of that makes the parent unproven.
+	stray := filepath.Join(plainParent, "docs")
+	if err := os.MkdirAll(stray, 0o755); err != nil {
+		t.Fatalf("mkdir stray: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(stray, "agent-factory"), []byte("not a marker dir\n"), 0o644); err != nil {
+		t.Fatalf("write stray agent-factory: %v", err)
+	}
+	rootID := sessionUnderRoot(t, manager, "plain-parent-session", plainParent)
+
+	result, delErr := manager.DeleteProject(DeleteProjectRequest{RepoPath: worktree})
+	if delErr != nil {
+		t.Fatalf("a plain parent whose children all read cleanly must clear: %v", delErr)
+	}
+	if !result.Deregistered {
+		t.Fatalf("the absent-row delete must deregister the row once no possibly-belonging session survives")
+	}
+	manager.mu.Lock()
+	inst := manager.instances[daemonInstanceKey(rootID, "plain-parent-session")]
+	manager.mu.Unlock()
+	if inst == nil || inst.GetStatus() != session.Running {
+		t.Fatalf("the cleared session must stay live through the delete")
 	}
 }

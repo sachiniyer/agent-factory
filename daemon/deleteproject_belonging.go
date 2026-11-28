@@ -224,11 +224,14 @@ func sortedRepoIdentitySets(sets map[string]*liveRepoIdentity) []string {
 // rootBelongingVerdict is what one identity root's probe established. owner
 // is the affirmative evidence, and evidence names the common directory the
 // row's marker was found in — the root itself for a bare clone, one level
-// down for a pre-#3358 parent. cleared requires that every marker directory
-// the root could mean was readable AND carried no marker with the row's id —
-// a difference or an absence is proof of a different clone ONLY when the read
-// itself succeeded. unproven keeps persistent causes, transient the
-// wait-budget lapse the caller reads as retriable.
+// down for a pre-#3358 parent. cleared requires every place the row's
+// checkout id could live here — the established common dir, a plain root's
+// own marker dir, and each repository-or-indeterminate child's — to read
+// cleanly AND carry no marker with the row's id: a clean sweep clears
+// whatever the root's shape, because the evidence question was always where
+// the id lives, not what the root is. unproven keeps persistent causes —
+// including a repository af cannot describe — and transient the wait-budget
+// lapse the caller reads as retriable.
 type rootBelongingVerdict struct {
 	owner     bool
 	cleared   bool
@@ -300,15 +303,18 @@ var probeRootBelongingHookForTest func(root string)
 // markers there:
 //
 //   - <root>/.git as a directory names the common directory of a non-bare
-//     repository;
+//     repository (a .git symlink is followed first — git accepts links to a
+//     metadata directory or to a redirect file);
 //   - <root>/.git as a FILE is the worktree-side gitdir pointer (a linked
-//     worktree, a submodule, --separate-git-dir), which af resolves to the
-//     common directory rather than leaving the root undescribable;
+//     worktree, a submodule, --separate-git-dir), which af resolves the way
+//     git does — gitdir, then its commondir file — and counts only when the
+//     answer exists and is git-shaped;
 //   - a bare repository (HEAD next to objects/ and refs/) IS its common
 //     directory;
 //   - and one level down, <root>/*/agent-factory/ covers the pre-#3358
 //     identity: a session keyed under a bare clone's PARENT directory is
-//     provably that clone's when the clone holds the row's marker.
+//     provably that clone's when the clone holds the row's marker — while a
+//     child DETERMINATELY not a repository cannot hold one at all.
 //
 // Marker reads are by content under ANY home's file name, because a row
 // records the marker VALUE, not which home minted it. A common directory is
@@ -330,15 +336,21 @@ func probeRootBelonging(root, checkoutID string) rootBelongingVerdict {
 	case !info.IsDir():
 		return rootBelongingVerdict{unproven: true, reason: "the path is not a directory"}
 	}
-	commonDir, classifiable, classReason := identityRootCommonDir(root)
+	commonDir, shape, shapeReason := identityRootCommonDir(root)
+	if shape == shapeUnproven {
+		return rootBelongingVerdict{unproven: true, reason: shapeReason}
+	}
 
 	// The marker sweep runs over every agent-factory directory this root
-	// could own: its established common directory, the root itself when the
-	// shape leaves the question open (a de-gitted bare clone leaves the
-	// directory behind), and each immediate child — the pre-#3358 identity
-	// rooted here could be a bare clone one level down.
+	// could own: its established common directory, the root itself when it
+	// is not a repository (a de-gitted clone leaves the directory behind),
+	// and each immediate child — the pre-#3358 identity rooted here could
+	// be a bare clone one level down. A root whose whole sweep reads
+	// cleanly and carries no marker with the row's id is CLEARED, whatever
+	// its own shape was: the evidence question was always where the row's
+	// checkout id lives, and every place it could live here answered.
 	sweep := []string{}
-	if classifiable {
+	if shape == shapeCommonDir {
 		sweep = append(sweep, commonDir)
 	} else {
 		sweep = append(sweep, root)
@@ -352,7 +364,18 @@ func probeRootBelonging(root, checkoutID string) rootBelongingVerdict {
 			continue
 		}
 		childDir := filepath.Join(root, child.Name())
-		if classifiable && childDir == commonDir {
+		if shape == shapeCommonDir && childDir == commonDir {
+			continue
+		}
+		// A child that is DETERMINATELY not a repository — its .git entry
+		// and its bare shape both answered absent — cannot be the clone a
+		// pre-#3358 identity rooted here would mean, so whatever sits under
+		// an agent-factory name inside it cannot be the row's marker and
+		// never makes this root unproven (#7914 review). A child af cannot
+		// describe — an unreadable one included — stays in the sweep: it
+		// could still be a bare clone holding the row's marker, and its own
+		// marker-directory read decides.
+		if childPlainDir(childDir) {
 			continue
 		}
 		sweep = append(sweep, childDir)
@@ -374,74 +397,170 @@ func probeRootBelonging(root, checkoutID string) rootBelongingVerdict {
 			}
 		}
 	}
-	switch {
-	case unproven != "":
+	if unproven != "" {
 		return rootBelongingVerdict{unproven: true, reason: unproven}
-	case !classifiable:
-		return rootBelongingVerdict{unproven: true, reason: classReason}
-	default:
-		return rootBelongingVerdict{cleared: true}
 	}
+	return rootBelongingVerdict{cleared: true}
 }
+
+// childPlainDir reports whether a directory is DETERMINATELY not a
+// repository: every shape probe — the .git entry and the bare-metadata
+// triplet — answered "absent", not "unreadable". Any answer that failed
+// leaves the child in the sweep, where its marker directory's own read
+// decides.
+func childPlainDir(dir string) bool {
+	if _, err := os.Lstat(filepath.Join(dir, ".git")); err == nil || !errors.Is(err, os.ErrNotExist) {
+		return false
+	}
+	for _, name := range []string{"HEAD", "objects", "refs"} {
+		if _, err := os.Lstat(filepath.Join(dir, name)); err == nil || !errors.Is(err, os.ErrNotExist) {
+			return false
+		}
+	}
+	return true
+}
+
+// identityRootShape is what an identity root's .git entry says the root is:
+// a repository whose common directory could be named (shapeCommonDir), not a
+// repository at all (shapePlain — sweep it and its children for marker
+// directories), or a repository af cannot describe (shapeUnproven — never
+// cleared, because a gitfile that does not resolve to an existing git-shaped
+// common directory could still be the row's clone).
+type identityRootShape int
+
+const (
+	shapeCommonDir identityRootShape = iota
+	shapePlain
+	shapeUnproven
+)
 
 // identityRootCommonDir locates the common directory an identity root's
-// marker would live in, or reports the root undescribable. The .git entry is
-// read, never the worktree records inside the common directory itself.
-func identityRootCommonDir(root string) (commonDir string, ok bool, reason string) {
+// marker would live in, or classifies the root as plain (sweep it for marker
+// dirs) or unproven (a repository whose metadata af cannot describe). The
+// .git entry is read, never the worktree records inside the common directory
+// itself.
+func identityRootCommonDir(root string) (commonDir string, shape identityRootShape, reason string) {
 	dotgit := filepath.Join(root, ".git")
-	info, err := os.Lstat(dotgit)
-	if err == nil {
-		if info.IsDir() {
-			return dotgit, true, ""
+	resolved := dotgit
+	lst, lerr := os.Lstat(dotgit)
+	switch {
+	case lerr == nil && lst.Mode()&os.ModeSymlink != 0:
+		// A .git symlink — to the metadata directory OR to a gitdir
+		// redirect file — is a layout git accepts (#3278 review): resolve it
+		// before classifying, or a metadata DIRECTORY reads as a redirect
+		// file and the repository reports undescribable.
+		r, evalErr := filepath.EvalSymlinks(dotgit)
+		if evalErr != nil {
+			return "", shapeUnproven, "the .git symlink could not be resolved: " + evalErr.Error()
 		}
-		if common, ok := commonDirFromGitFile(dotgit); ok {
-			return common, true, ""
+		resolved = r
+	case lerr != nil && !errors.Is(lerr, os.ErrNotExist):
+		return "", shapeUnproven, "the .git entry could not be inspected: " + lerr.Error()
+	}
+	info, err := os.Stat(resolved)
+	switch {
+	case err == nil && info.IsDir():
+		return resolved, shapeCommonDir, ""
+	case err == nil:
+		if common, ok := gitfileCommonDir(resolved); ok {
+			return common, shapeCommonDir, ""
 		}
-		return "", false, "the .git file could not be resolved to a common directory"
+		// A .git file that does not resolve to an existing git-shaped
+		// common directory is a repository af cannot describe — unproven,
+		// never cleared: its real common dir could still hold the row's
+		// marker where the sweep cannot see it (#7914 review).
+		return "", shapeUnproven, "the .git file could not be resolved to a common directory that exists and is git-shaped"
+	case errors.Is(err, os.ErrNotExist):
+		if lerr == nil {
+			// The entry was there a moment ago — it changed mid-probe.
+			return "", shapeUnproven, "the .git entry changed while it was being inspected"
+		}
+		if identityRootBareShaped(root) {
+			return root, shapeCommonDir, ""
+		}
+		return "", shapePlain, ""
+	default:
+		return "", shapeUnproven, "the .git entry could not be inspected: " + err.Error()
 	}
-	if !errors.Is(err, os.ErrNotExist) {
-		return "", false, "the .git entry could not be inspected: " + err.Error()
-	}
-	if identityRootBareShaped(root) {
-		return root, true, ""
-	}
-	return "", false, "no .git entry and not bare-shaped"
 }
 
-// commonDirFromGitFile resolves the worktree-side gitdir pointer a .git file
-// holds — the same file `git rev-parse --git-common-dir` reads, durable under
-// af's housekeeping (nothing in af rewrites a checkout's own pointer). A
-// linked worktree's gitdir lives at <common>/worktrees/<name>; any other
-// gitdir (a submodule's module dir, --separate-git-dir) IS the common
-// directory.
-func commonDirFromGitFile(dotgit string) (string, bool) {
-	data, err := os.ReadFile(dotgit)
-	if err != nil {
-		return "", false
-	}
-	line, _, _ := strings.Cut(string(data), "\n")
-	target, ok := strings.CutPrefix(strings.TrimSpace(line), "gitdir:")
+// gitfileCommonDir resolves a .git file to the repository's real common
+// directory the way git does — the same file `git rev-parse
+// --git-common-dir` reads, durable under af's housekeeping (nothing in af
+// rewrites a checkout's own pointer). The pointer names the per-worktree
+// GITDIR; a linked worktree's gitdir then redirects through its `commondir`
+// file, while every other gitdir (a submodule's module dir, a
+// --separate-git-dir metadata tree) IS the common directory. The resolved
+// directory counts only when it exists and is git-shaped: an answer that
+// cannot be verified is no answer at all, so a moved, dangling or
+// whitespace-truncated target never reads as a clone that holds no markers
+// (#7914 review: clearing on an unverified resolution is a fail-open).
+func gitfileCommonDir(dotgit string) (string, bool) {
+	gitdir, ok := readGitdirPointer(dotgit)
 	if !ok {
 		return "", false
 	}
-	gitdir := strings.TrimSpace(target)
+	common := gitdir
+	if cd, err := readGitPointerLine(filepath.Join(gitdir, "commondir")); err == nil {
+		if filepath.IsAbs(cd) {
+			common = filepath.Clean(cd)
+		} else {
+			common = filepath.Join(gitdir, cd)
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		// commondir exists-or-not is part of the answer; a read that failed
+		// for another reason leaves the real common dir undetermined.
+		return "", false
+	}
+	if !identityRootBareShaped(common) {
+		return "", false
+	}
+	return common, true
+}
+
+// readGitPointerLine reads the single line a git pointer file holds — a
+// worktree's .git redirect or a gitdir's commondir — preserving the path
+// bytes: only the trailing line ending is stripped, never whitespace inside
+// the path (session/git's parseGitdirPointerLine, #3278 review — TrimSpace
+// truncated real metadata directory names ending in a space).
+func readGitPointerLine(path string) (string, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+	line, _, _ := strings.Cut(string(data), "\n")
+	return strings.TrimSuffix(line, "\r"), nil
+}
+
+// readGitdirPointer parses a .git file's `gitdir:` line into an absolute
+// path, relative targets resolving against the file's own directory. Only
+// the format's single separator space is stripped: git writes the target
+// literally, and a separate-git-dir name that genuinely ends in whitespace
+// must survive the parse.
+func readGitdirPointer(dotgit string) (string, bool) {
+	line, err := readGitPointerLine(dotgit)
+	if err != nil {
+		return "", false
+	}
+	target, ok := strings.CutPrefix(line, "gitdir:")
+	if !ok {
+		return "", false
+	}
+	gitdir := strings.TrimPrefix(target, " ")
 	if gitdir == "" {
 		return "", false
 	}
 	if !filepath.IsAbs(gitdir) {
 		gitdir = filepath.Join(filepath.Dir(dotgit), gitdir)
 	}
-	gitdir = filepath.Clean(gitdir)
-	if filepath.Base(filepath.Dir(gitdir)) == "worktrees" {
-		return filepath.Dir(filepath.Dir(gitdir)), true
-	}
-	return gitdir, true
+	return filepath.Clean(gitdir), true
 }
 
-// identityRootBareShaped reports whether root has the directory shape of a
-// bare repository — HEAD next to objects/ and refs/. It is not ownership
-// evidence (the ledger is never consulted); it only locates the common
-// directory the marker sweep targets.
+// identityRootBareShaped reports whether root has the directory shape of
+// git metadata — HEAD next to objects/ and refs/: a bare repository's top
+// level, or any resolved common directory. It is not ownership evidence
+// (the ledger is never consulted); it only verifies that a candidate
+// directory really is the metadata the marker sweep should read.
 func identityRootBareShaped(root string) bool {
 	head, err := os.Lstat(filepath.Join(root, "HEAD"))
 	if err != nil || head.IsDir() {
@@ -471,14 +590,17 @@ func (m *Manager) absentRootBelongingScan(checkoutID string) *absentRootBelongin
 }
 
 // archiveSuggestion renders the one command that resolves a suspect whose
-// resolution is archiving the session: --repo scoped to the repository af
-// saw it under, because titles are unique per repo, not fleet-wide.
+// resolution is archiving the session. It is deliberately the bare-title
+// form: --repo <root> would run RepoFromPath on a root af already could not
+// describe (a gone or unreadable root, a pre-#3358 parent that is not itself
+// a repository) and can even hash to a DIFFERENT repo id than the session is
+// keyed under (#7914 review). The bare form resolves across every project
+// and picks the named session; the #1814 ambiguity guard refuses to pick
+// between same-titled namesakes rather than archive the wrong one — which is
+// the one honest answer left when the CLI offers no stable session id to
+// name it by.
 func archiveSuggestion(s absentRootSuspect) string {
-	argv := []string{"sessions", "archive"}
-	if s.root != "" {
-		argv = append(argv, "--repo", s.root)
-	}
-	return shellsuggest.PositionalCommand("af", argv, s.title)
+	return shellsuggest.PositionalCommand("af", []string{"sessions", "archive"}, s.title)
 }
 
 // absentRootBelongingRefusal renders the delete refusal for live sessions the
@@ -555,7 +677,7 @@ func absentRootBelongingRefusal(repoID, repoPath string, suspects []absentRootSu
 		}
 		sort.Strings(parts)
 		clauses = append(clauses, fmt.Sprintf(
-			"session(s) %v are live under a repository af cannot describe (%s) — archive the ones that are this project's: %s; for the rest, restoring the repository so af can describe it also clears them",
+			"session(s) %v are live under a repository af cannot describe (%s) — archive the ones that are this project's: %s; for the rest, making the repository readable again (restoring it, fixing permissions, or removing the unreadable entry) also clears them",
 			names(persistents), strings.Join(parts, "; "), cmds(persistents)))
 	}
 	if len(unattributed) > 0 {
