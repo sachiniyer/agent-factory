@@ -684,15 +684,16 @@ func (w *TabbedWindow) String() string {
 	return layout.ClampToRect(w.frameStyle().Render(inner), w.rect)
 }
 
-// deadTabClause names a tab whose PTY has recorded its exit, as a header
-// fragment (" · dead") inside the tab identity, and is empty for a live or
-// out-of-range tab (#7944). The stamped Exit is the same evidence the tree
-// row's " · dead" marker and the roster's `exit` field read, so the three
-// surfaces agree by construction; a death not yet stamped shows on the pane's
-// own "Pane is dead" screen.
+// deadTabClause names a SHELL tab whose exit is recorded, as a header
+// fragment (" · dead") inside the tab identity, and is empty for a live,
+// non-shell, or out-of-range tab (#7944). The stamped Exit is the same
+// evidence the tree row's " · dead" marker and the roster's `exit` field
+// read, so the three surfaces agree by construction. Shell kind only: a dead
+// process pane holds tmux's own "Pane is dead" screen, which is master's
+// marker and stays the only one it gets.
 func deadTabClause(inst *session.Instance, tab int) string {
 	tabs := inst.GetTabs()
-	if tab >= 0 && tab < len(tabs) && tabs[tab].Exit != nil {
+	if tab >= 0 && tab < len(tabs) && tabs[tab].Kind == session.TabKindShell && tabs[tab].Exit != nil {
 		return " · dead"
 	}
 	return ""

@@ -400,15 +400,23 @@ func (i *Instance) applyOffBoxRoster(byID map[string]TabData) (changed bool, ado
 		// adopted false so a later sweep retries the intent once the session is
 		// started and the spawn-block fence has lifted.
 	}
+	// The remote roster's exit is authoritative for an off-box tab — mirrored
+	// both directions and gen-fenced (#7944): a stamped death lands here the
+	// same way it always did for a process tab, and a cleared one (the remote
+	// respawned the shell) clears the local row too, or a live replacement
+	// would read dead forever.
 	for idx, tab := range i.Tabs {
-		if tab.Kind != TabKindProcess || tab.tmux != nil || tab.Exit != nil || tab.gen == "" {
+		if (tab.Kind != TabKindProcess && tab.Kind != TabKindShell) || tab.tmux != nil || tab.gen == "" {
 			continue
 		}
 		td, ok := byID[tab.ID]
-		if !ok || td.Gen != tab.gen || td.Exit == nil {
+		if !ok || td.Gen != tab.gen {
 			continue
 		}
 		exit := tabExitFromData(td.Exit)
+		if tabExitEqual(tab.Exit, exit) {
+			continue
+		}
 		i.replaceTabFieldLocked(idx, func(c *Tab) { c.Exit = exit })
 		i.touchLocked()
 		changed = true

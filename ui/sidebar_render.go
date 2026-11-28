@@ -435,7 +435,9 @@ func (s *Sidebar) renderTabRow(item SidebarItem, selected bool) string {
 	}
 	dead := false
 	if tabs := inst.GetTabs(); item.TabIndex < len(tabs) {
-		dead = tabs[item.TabIndex].Exit != nil
+		// Shell kind only: a stamped process tab keeps master's unmarked row —
+		// its pane already says "Pane is dead" (#7944 review R5).
+		dead = tabs[item.TabIndex].Kind == session.TabKindShell && tabs[item.TabIndex].Exit != nil
 	}
 	return s.renderer.RenderTab(labels[item.TabIndex], item.TabIndex+1,
 		item.TabIndex == len(labels)-1, selected, s.proj.FindOpenPane(inst, item.TabIndex) != nil, dead)

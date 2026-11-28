@@ -194,12 +194,6 @@ func (i *Instance) AddShellTabWithID(id string) (resultTab *Tab, resultErr error
 	if err != nil {
 		return nil, fmt.Errorf("failed to prepare shell tab: %w", err)
 	}
-	// remain-on-exit must be in place before the shell can exit (Ctrl-D,
-	// `exit`, a SIGHUP death), so it goes into the new-session invocation
-	// itself (see SetRemainOnExit): without a held pane the session vanishes
-	// at death and the exit is unobservable — the same rule a process tab's
-	// one-shot command follows (#7944).
-	shellTmux.SetRemainOnExit()
 	if err := shellTmux.Start(worktreePath); err != nil {
 		return i.adoptOnSpawnFailure(id, TabKindShell, "",
 			fmt.Errorf("failed to start shell tab: %w", err))

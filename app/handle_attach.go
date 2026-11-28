@@ -313,18 +313,21 @@ func webTabAttachGuard(inst *session.Instance, tabIdx int) error {
 	}
 }
 
-// interactiveTabGuard fences INTERACTIVE entry off a tab whose PTY is gone
-// (#7944): a shell or process tab can end under a live session (Ctrl-D,
-// `exit`, a killed command) while its row still reads open, and entering then
-// binds a dead pane — every keystroke silently swallowed. It is an
-// enter-pane guard only: full-screen attach still reaches the tab, which is
-// how the dead pane's "Pane is dead" screen stays visible. The refusal names
-// the existing respawn path — close the tab and open a new one — reading the
-// live bindings the way restoreKeyHint does. Only shell and process kinds are
-// checked: the agent tab's liveness is interactiveGuard's session-level fence
-// (its pane cannot be closed or recreated via the tab keys anyway), and
-// web/vscode/docs kinds are webTabAttachGuard's. A nil error means the tab is
-// enterable.
+// interactiveTabGuard fences INTERACTIVE entry off a SHELL tab whose exit is
+// stamped (#7944): the shell can end under a live session (Ctrl-D, `exit`)
+// while its row still reads open, and entering then binds a dead pane —
+// every keystroke silently swallowed. It is an enter-pane guard only:
+// full-screen attach still reaches the tab. The refusal names the existing
+// respawn path — close the tab and open a new one — reading the live bindings
+// the way restoreKeyHint does; `t` opens the Terminal/VS Code picker, which
+// is exactly the kind it replaces. Only the shell kind is fenced: the agent
+// tab's liveness is interactiveGuard's session-level check, web/vscode/docs
+// kinds are webTabAttachGuard's, and process tabs keep master's behavior
+// exactly (a dead process pane holds its output — #4506 — and `t` cannot
+// recreate its command). TabDead reads only the stamped exit — positive
+// evidence, no tmux call — so the guard cannot block the event loop or steer
+// a user into closing a shell that might be live. A nil error means the tab
+// is enterable.
 func interactiveTabGuard(inst *session.Instance, tabIdx int) error {
 	if inst == nil {
 		return nil
@@ -333,9 +336,7 @@ func interactiveTabGuard(inst *session.Instance, tabIdx int) error {
 	if tabIdx < 0 || tabIdx >= len(tabs) {
 		return nil
 	}
-	switch kind := tabs[tabIdx].Kind; {
-	case kind != session.TabKindShell && kind != session.TabKindProcess,
-		!inst.TabDead(tabIdx):
+	if tabs[tabIdx].Kind != session.TabKindShell || !inst.TabDead(tabIdx) {
 		return nil
 	}
 	return fmt.Errorf("tab '%s' is dead — press %s to close it, then %s for a new one",

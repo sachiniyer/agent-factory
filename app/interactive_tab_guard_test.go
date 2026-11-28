@@ -9,11 +9,13 @@ import (
 	"github.com/sachiniyer/agent-factory/session"
 )
 
-// interactiveTabGuard is the #7944 fence: a shell or process tab whose PTY is
-// gone must refuse interactive entry with a one-line hint naming the EXISTING
-// respawn affordance — close the tab (w), open a new one (t). Before it, Enter
-// put the dead pane in interactive mode and every keystroke vanished into a
-// blank pane.
+// interactiveTabGuard is the #7944 fence: a SHELL tab whose tmux session is
+// provably gone must refuse interactive entry with a one-line hint naming the
+// EXISTING respawn affordance — close the tab (w), open a new one (t). Before
+// it, Enter put the dead pane in interactive mode and every keystroke vanished
+// into a blank pane. Process tabs keep master's behaviour byte-identical: they
+// are not fenced here — a stamped process exit still binds, surfacing the
+// process tab's own dead state exactly as before.
 func TestInteractiveTabGuard(t *testing.T) {
 	deadShell := &session.Instance{Tabs: []*session.Tab{
 		{Kind: session.TabKindAgent, Name: "Agent"},
@@ -36,11 +38,15 @@ func TestInteractiveTabGuard(t *testing.T) {
 	assert.NoError(t, interactiveTabGuard(deadShell, 9), "out of range high is not a tab")
 	assert.NoError(t, interactiveTabGuard(nil, 0), "a nil instance is not this guard's case")
 
-	// A live shell tab — no stamped exit, its tmux handle live or simply
-	// unprobed — is left to the bind exactly as before.
-	liveShell := &session.Instance{Tabs: []*session.Tab{
+	// Every other kind is left exactly as master had it — including a process
+	// tab whose exit is stamped: its dead state is its own surfacing, not a
+	// refused bind (R5).
+	otherKinds := &session.Instance{Tabs: []*session.Tab{
 		{Kind: session.TabKindAgent, Name: "Agent"},
+		{Kind: session.TabKindProcess, Name: "serve",
+			Exit: &session.TabExit{StatusKnown: true, Status: 0}},
 		{Kind: session.TabKindWeb, Name: "preview"},
 	}}
-	assert.NoError(t, interactiveTabGuard(liveShell, 1), "non-shell/process kinds are not fenced")
+	assert.NoError(t, interactiveTabGuard(otherKinds, 1), "a dead process tab binds as on master")
+	assert.NoError(t, interactiveTabGuard(otherKinds, 2), "non-shell kinds are not fenced")
 }

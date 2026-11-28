@@ -388,10 +388,13 @@ func (m *home) enforceInteractiveInvariant() {
 	}
 }
 
-// tabExited reports whether the tab at idx already carries a recorded exit —
-// the stamped evidence the roster reconcile mirrors — without probing tmux.
-// Callers running per-keystroke pay only a lock; a provable death that has not
-// been stamped yet is interactiveTabGuard's probe, not this read (#7944).
+// tabExited reports whether the SHELL tab at idx already carries a recorded
+// exit — the stamped evidence the roster reconcile mirrors — without probing
+// tmux. Callers running per-keystroke pay only a lock; a provable death that
+// has not been stamped yet is interactiveTabGuard's read, not this one
+// (#7944). Only the shell kind ends interactive mode: a dead process tab's
+// pane still exists (remain-on-exit), so interactive there stays exactly as
+// on master.
 func tabExited(inst *session.Instance, idx int) bool {
 	if inst == nil {
 		return false
@@ -400,7 +403,7 @@ func tabExited(inst *session.Instance, idx int) bool {
 	if idx < 0 || idx >= len(tabs) {
 		return false
 	}
-	return tabs[idx].Exit != nil
+	return tabs[idx].Kind == session.TabKindShell && tabs[idx].Exit != nil
 }
 
 // setInteractive flips interactive mode (#1089, RFC §2.3) and keeps every

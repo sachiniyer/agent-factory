@@ -143,12 +143,16 @@ func (i *Instance) ReconcileTabsFromData(target []TabData) (bool, error) {
 			}
 		}
 	}
-	// Process-tab exit state is stamped on the daemon's roster when a held dead
-	// pane is observed (#4479); sync it onto the already-present local row the
-	// same way a rename propagates, so the finished state is not a
-	// restart-only discovery.
+	// Per-tab exit state is stamped on the daemon's roster when a held dead
+	// pane is observed (process tabs, #4479) or a shell's session is provably
+	// gone (#7944); sync it onto the already-present local row the same way a
+	// rename propagates, so the finished state is not a restart-only
+	// discovery. The mirror is bidirectional: a daemon row whose exit was
+	// cleared — the shell it described was replaced by a live respawn — clears
+	// the local one too, or the client keeps reading the old incarnation's
+	// death against the live shell forever.
 	for _, td := range target {
-		if td.ID == "" || td.Exit == nil {
+		if td.ID == "" {
 			continue
 		}
 		exit := tabExitFromData(td.Exit)

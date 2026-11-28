@@ -1783,13 +1783,15 @@ _expect_dead_shell_tab_renders() {
         af_send_to_pane exit || rc=1
     fi
     if [ "$rc" -eq 0 ]; then
-        # The daemon records the exit off the held pane; without remain-on-exit
-        # the session vanishes and this poll can never observe anything.
+        # The daemon stamps the exit on its next probe pass (async — a
+        # shell's session is gone outright, so the evidence is a
+        # liveness-proven absence, and `exit` carries no status). kind_name is
+        # the wire's kind string; kind is an integer.
         deadline=$(( $(_af_now) + 15 ))
         until AGENT_FACTORY_HOME="$AGENT_FACTORY_HOME" "$bin" sessions get cycle --repo "$AF_DRIVER_REPO" 2>/dev/null \
-            | jq -e '.tabs[] | select(.kind == "shell") | .exit.status_known == true' >/dev/null 2>&1; do
+            | jq -e '.tabs[] | select(.kind_name == "shell") | .exit != null' >/dev/null 2>&1; do
             if [ "$(_af_now)" -ge "$deadline" ]; then
-                _af_fail 'the dead shell tab never reported a known exit status'
+                _af_fail 'the dead shell tab never reported a stamped exit'
                 rc=1
                 break
             fi
@@ -1804,8 +1806,11 @@ _expect_dead_shell_tab_renders() {
         af_resize "$saved_cols" 40 || rc=1
         deadline=$(( $(_af_now) + AF_DRIVER_TIMEOUT ))
         while [ "$rc" -eq 0 ]; do
-            if af_capture | grep -qE -- '· dead' \
-                && _af_pane_header_row | grep -qE -- 'dead'; then
+            # "Terminal · dead" is text only the fix produces, on the shell
+            # tab's row only — never the one-shot's row, never tmux's own
+            # "Pane is dead" banner (which says nothing about the tab row).
+            if af_capture | grep -qE -- 'Terminal · dead' \
+                && _af_pane_header_row | grep -qE -- '· dead'; then
                 break
             fi
             if [ "$(_af_now)" -ge "$deadline" ]; then
@@ -1831,7 +1836,9 @@ _expect_dead_shell_tab_renders() {
                 af_send Enter
                 next_enter=$(( $(_af_now) + 3 ))
             fi
-            if af_capture | grep -qE -- 'is dead|press w to close'; then
+            # The guard's own hint, verbatim — "is dead" alone would match
+            # tmux's "Pane is dead" banner wherever it renders.
+            if af_capture | grep -qE -- 'press w to close it, then t for a new one'; then
                 break
             fi
             if [ "$(_af_now)" -ge "$deadline" ]; then

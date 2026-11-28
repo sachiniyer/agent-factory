@@ -55,12 +55,11 @@ func restoreLocalTabs(instance *Instance, data InstanceData) {
 			var ts *tmux.TmuxSession
 			if td.TmuxName != "" {
 				ts = restoreTmuxSession(td.TmuxName, tabProgram(kind, td.Command, data.Program))
-				// Keep the restored handle consistent with a fresh tab's: the
-				// flag only matters if Start is ever invoked, and after #4479
-				// nothing invokes it — but the invariant costs nothing and
-				// keeps a future Start caller honest. Shell tabs carry the same
-				// flag since #7944 gave them the held-dead-pane contract.
-				if ts != nil && (kind == TabKindProcess || kind == TabKindShell) {
+				// Keep the restored handle consistent with a fresh process
+				// tab's: the flag only matters if Start is ever invoked, and
+				// after #4479 nothing invokes it — but the invariant costs
+				// nothing and keeps a future Start caller honest.
+				if ts != nil && kind == TabKindProcess {
 					ts.SetRemainOnExit()
 				}
 				// Anchor coverage (#7435 R6): the persisted runtime pair names

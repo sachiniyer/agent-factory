@@ -125,47 +125,113 @@ func clearTabExit(i *Instance, tabID string) {
 	})
 }
 
+// exitProbe is one tab worth probing for exit evidence: its stable id (the
+// updateTabByID key) and the tmux handle captured under i.mu, so the probe
+// outside the lock races neither a tab close nor a rebinding.
+type exitProbe struct {
+	id   string
+	kind TabKind
+	tmux *tmux.TmuxSession
+}
+
+// probeTabLiveness is the exit-evidence probe for a shell tab (probeLiveness,
+// #4135): the server answered AND the session is gone — and only that —
+// proves the shell died. A timeout, an unlinked socket under a possibly-live
+// server, EACCES, or any other non-answer is unknown, never dead: absence
+// must be PROVEN, never assumed (#7944). A package var so tests can inject
+// the answer matrix.
+var probeTabLiveness = func(session *tmux.TmuxSession) (bool, bool) {
+	return session.ProbeSessionLiveness()
+}
+
+// stampShellTabExit records a shell tab's exit when its tmux session is
+// provably gone. A shell is never held by remain-on-exit — restore replaces a
+// missing shell outright (#991), so there is no dead pane to read a status
+// from: the stamp is "the shell ended", status unknown, at probe time. The
+// recordTabExit incarnation fence applies unchanged: a concurrent respawn
+// that swapped the handle makes the stamp skip rather than land on the
+// replacement.
+func stampShellTabExit(i *Instance, tabID string, tabTmux *tmux.TmuxSession) bool {
+	exists, known := probeTabLiveness(tabTmux)
+	if !known || exists {
+		return false
+	}
+	return recordTabExit(i, tabID, tabTmux, &TabExit{At: time.Now()})
+}
+
+// KickShellExitProbe starts the local shell-exit refresh on its own goroutine
+// and returns at once — the snapshot projection path calls it on every read,
+// so it must never wait on tmux (#7944): projection latency cannot depend on
+// tmux responsiveness. Once in flight per instance: a death found this pass
+// is stamped for the NEXT read.
+func (i *Instance) KickShellExitProbe() {
+	if !i.shellExitProbeRunning.CompareAndSwap(false, true) {
+		return
+	}
+	go func() {
+		defer i.shellExitProbeRunning.Store(false)
+		i.probeShellExits()
+	}()
+}
+
+// probeShellExits is KickShellExitProbe's synchronous body — the same
+// proven-absence evidence RecordTabExits gathers for a shell tab, probed on
+// the background pass. Tests call it directly rather than racing the goroutine.
+func (i *Instance) probeShellExits() {
+	i.mu.RLock()
+	var probes []exitProbe
+	for _, tab := range i.Tabs {
+		if tab.Kind != TabKindShell || tab.Exit != nil || tab.tmux == nil {
+			continue
+		}
+		probes = append(probes, exitProbe{id: tab.ID, tmux: tab.tmux})
+	}
+	i.mu.RUnlock()
+	for _, p := range probes {
+		stampShellTabExit(i, p.id, p.tmux)
+	}
+}
+
 // RecordTabExits probes every PTY-bearing tab (process, and since #7944 shell)
-// with no recorded exit and stamps the ones whose pane's process tmux reports
-// finished (#5571 W4.3). It is the roster-read counterpart of stampTabExit's
+// with no recorded exit and stamps the ones whose end tmux can prove
+// (#5571 W4.3). It is the roster-read counterpart of stampTabExit's
 // restore path: exit evidence is only discovered when something looks, and on
 // a LIVE instance nothing looks — so a tab whose process exits while the
 // agent-server runs would report an un-stamped Exit on /v1/agent/tabs forever. The roster handler runs this
-// first; the probe is the same bounded has-session/pane_dead pair the restore
-// path spends. Inert or tmux-less rows are skipped rather than probed: absence
-// is not evidence of how the command ended (restoreProcessTab's rule), and
-// inventing one would fabricate the record this field exists to keep honest.
-// The eligible rows AND their tmux handles are captured under i.mu: the kill
-// path nils tab.tmux under the same lock (clearClosedTmuxRefs), so reading the
-// handle unlocked races it and could hand ProbePaneExit a nil receiver; the
-// captured handle stays valid past a concurrent kill — its probe just reports
-// the now-gone session as such — and the ID-based update lands on the row's
-// current copy or skips it when the row already records an ending.
+// first. The evidence differs by kind: a process tab's held dead pane answers
+// pane_dead/status (#4479); a shell's session is gone outright and only a
+// probeLiveness-proven absence counts (unproven absence would fabricate the
+// record this field exists to keep honest). Inert or tmux-less rows are
+// skipped rather than probed (restoreProcessTab's rule). The eligible rows
+// AND their tmux handles are captured under i.mu: the kill path nils tab.tmux
+// under the same lock (clearClosedTmuxRefs), so reading the handle unlocked
+// races it and could hand a probe a nil receiver; the captured handle stays
+// valid past a concurrent kill — its probe just reports the now-gone session
+// as such — and the ID-based update lands on the row's current copy or skips
+// it when the row already records an ending.
 func (i *Instance) RecordTabExits() {
-	type probe struct {
-		id   string
-		tmux *tmux.TmuxSession
-	}
 	i.mu.RLock()
-	var probes []probe
+	var probes []exitProbe
 	for _, tab := range i.Tabs {
 		if (tab.Kind != TabKindProcess && tab.Kind != TabKindShell) || tab.Exit != nil || tab.inert || tab.tmux == nil {
 			continue
 		}
-		probes = append(probes, probe{id: tab.ID, tmux: tab.tmux})
+		probes = append(probes, exitProbe{id: tab.ID, kind: tab.Kind, tmux: tab.tmux})
 	}
 	i.mu.RUnlock()
-	// A shared wall-clock budget bounds the pass: snapshot reads call this on
-	// the projection path, and a wedged tmux makes each probe pay its full
-	// bounded wait (~10s). ProbePaneExit's !known cannot tell "wedged" from
-	// "session gone" (both are an unreadable display-message), so the check is
-	// time spent, not answer kind: one stalled probe spends the budget and the
-	// pass ends after it instead of multiplying the stall by tab count, while
-	// a genuinely absent session answers fast and never eats into it.
+	// A shared wall-clock budget bounds the pass: a wedged tmux makes each
+	// probe pay its full bounded wait (~10s). The check is time spent, not
+	// answer kind — a "can't find session" answer is fast and free — so one
+	// stalled probe spends the budget and the pass ends after it instead of
+	// multiplying the stall by tab count.
 	start := time.Now()
 	for _, p := range probes {
 		if time.Since(start) > recordExitsBudget {
 			break
+		}
+		if p.kind == TabKindShell {
+			stampShellTabExit(i, p.id, p.tmux)
+			continue
 		}
 		dead, status, statusKnown, at, known := p.tmux.ProbePaneExit()
 		if !known {
