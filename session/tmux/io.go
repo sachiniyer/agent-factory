@@ -620,12 +620,36 @@ type paneCursorState struct {
 	Row     int
 	Col     int
 	Visible bool
+	// PaneWidth is tmux's own #{pane_width}, asked for in the same
+	// display-message as the cursor so the width and the position describe
+	// one instant (#7901). Zero means the answer carried no usable width —
+	// an older producer's 3-field shape, an unparseable field, or a
+	// non-positive value — and consumers must read it as "width unknown",
+	// never as a 0-column pane.
+	PaneWidth int
 }
 
-const paneCursorStateFormat = "#{cursor_y} #{cursor_x} #{?cursor_flag,1,0}"
+const paneCursorStateFormat = "#{cursor_y} #{cursor_x} #{?cursor_flag,1,0} #{pane_width}"
+
+// parsePaneCursorState parses one cursor-state answer line. The first three
+// fields must all parse or the answer is unreadable; the fourth — the pane
+// width #7901 added — is optional: an older producer's 3-field answer still
+// parses with PaneWidth 0 ("width unknown"). An unparseable fourth field also
+// leaves the width unknown rather than failing the read, since the only
+// consumer of the width — the exact-fill remedy check — withholds on unknown.
+func parsePaneCursorState(line string) (paneCursorState, error) {
+	var state paneCursorState
+	var visible int
+	n, _ := fmt.Sscanf(line, "%d %d %d %d", &state.Row, &state.Col, &visible, &state.PaneWidth)
+	if n < 3 {
+		return paneCursorState{}, fmt.Errorf("want at least 3 fields in %q, parsed %d", line, n)
+	}
+	state.Visible = visible != 0
+	return state, nil
+}
 
 // readPaneCursorState reports cursor position and whether the pane application
-// exposes that cursor. Keeping this focused three-field query separate from the
+// exposes that cursor. Keeping this focused query separate from the
 // terminal-mode snapshot means a diagnostic cannot silently change the shared
 // snapshot wire shape (#2225 review).
 func (t *TmuxSession) readPaneCursorState() (paneCursorState, error) {
@@ -638,12 +662,10 @@ func (t *TmuxSession) readPaneCursorState() (paneCursorState, error) {
 		}
 		return paneCursorState{}, fmt.Errorf("failed to read tmux cursor state: %v", err)
 	}
-	var state paneCursorState
-	var visible int
-	if _, err := fmt.Sscanf(strings.TrimSpace(string(output)), "%d %d %d", &state.Row, &state.Col, &visible); err != nil {
+	state, err := parsePaneCursorState(strings.TrimSpace(string(output)))
+	if err != nil {
 		return paneCursorState{}, fmt.Errorf("failed to parse tmux cursor state %q: %v", string(output), err)
 	}
-	state.Visible = visible != 0
 	return state, nil
 }
 

@@ -64,6 +64,13 @@ type stagedDraftPane struct {
 	// rows, so a wrapped transcript line shifts every row index below it —
 	// the two capture modes disagree by construction (#4530 review).
 	paneWidth int
+	// reportedPaneWidth, when >0, is appended to the cursor-state wire as its
+	// fourth field — the #{pane_width} a producer carrying the #7901 field
+	// answers. Left unset the mock answers the older 3-field shape: width
+	// unknown. It is deliberately independent of paneWidth, so a test can
+	// report a width that does not match the grid the capture draws (#7901's
+	// mismatched-width withhold).
+	reportedPaneWidth int
 	// height, when >0, caps the pane's visible rows: content that grows past
 	// the cap scrolls older transcript rows off the top — a history-less pane.
 	height int
@@ -198,9 +205,13 @@ func (m *stagedDraftPane) cursorLineLocked() string {
 		col = m.cursorCol
 	}
 	if m.movedCursor {
-		return fmt.Sprintf("0 0 %d", flag)
+		row, col = 0, 0
 	}
-	return fmt.Sprintf("%d %d %d", row, col, flag)
+	line := fmt.Sprintf("%d %d %d", row, col, flag)
+	if m.reportedPaneWidth > 0 {
+		line += fmt.Sprintf(" %d", m.reportedPaneWidth)
+	}
+	return line
 }
 
 // userPastes models an attached user pasting a multiline draft into the
@@ -782,4 +793,76 @@ func TestWrappedChipTailCursorNoNewlineSwallowStillRemedies(t *testing.T) {
 	require.Equal(t, 1, pastes, "the remedy must never re-paste")
 	require.Equal(t, 2, enters, "a still wrapped chip with the cursor at the wrapped tail (no-newline swallow) gets exactly one remedy Enter")
 	require.Equal(t, PromptSentUnverified, status)
+}
+
+// TestExactFillWrappedChipTailStillRemedies is the #7901 shape end-to-end: the
+// chip's last wrapped row fills the pane exactly ("› [Pasted Content 89
+// chars]" is 27 runes — three full 9-cell rows at pane width 9), so tmux parks
+// the cursor on that row's LAST cell at paneWidth-1, one column inside the
+// one-past-end column contentEndCol reports. The cursor-state wire carries
+// tmux's own #{pane_width}, which proves the fill, so the strand gets its one
+// remedy Enter. Master withholds this frame: the parked column never equalled
+// contentEndCol, and no pane width rode the cursor answer.
+func TestExactFillWrappedChipTailStillRemedies(t *testing.T) {
+	chipRow := "› " + codexChipRender(redeliverPrompt)[0]
+	m := &stagedDraftPane{
+		swallowedEnters:   1,
+		swallowNoNewline:  true,
+		render:            codexChipRender,
+		paneWidth:         9,
+		reportedPaneWidth: 9,
+		cursorCol:         wrappedTailCol(chipRow, 9) - 1,
+	}
+	status, pastes, enters := sendStaged(t, m, redeliverPrompt)
+	require.Equal(t, 1, pastes, "the remedy must never re-paste")
+	require.Equal(t, 2, enters, "an exact-fill chip tail parked at paneWidth-1 with tmux's matching width gets exactly one remedy Enter")
+	require.Equal(t, PromptSentUnverified, status)
+}
+
+// TestExactFillWrappedChipTailWidthGateWithholds bounds the #7901 widening
+// end-to-end: the cursor sitting one column inside the tail row's content end
+// is accepted ONLY when tmux's reported pane width proves that row fills the
+// pane. A short tail row, an unreported width (the older 3-field answer), and
+// a mismatched width each keep master's withhold — the park position of an
+// exact fill is the only shape the new accept exists for.
+func TestExactFillWrappedChipTailWidthGateWithholds(t *testing.T) {
+	chipRow := "› " + codexChipRender(redeliverPrompt)[0]
+	for name, m := range map[string]*stagedDraftPane{
+		// At pane width 7 the chip's last wrapped row is "chars]" — 6
+		// cells of a 7-pane, one column short of filling it.
+		"tail row one column short of the pane width": {
+			swallowedEnters:   1,
+			swallowNoNewline:  true,
+			render:            codexChipRender,
+			paneWidth:         7,
+			reportedPaneWidth: 7,
+			cursorCol:         wrappedTailCol(chipRow, 7) - 1,
+		},
+		// The exact-fill tail row with the older 3-field cursor answer —
+		// tmux reported no width, so nothing proves the fill.
+		"pane width unreported": {
+			swallowedEnters:  1,
+			swallowNoNewline: true,
+			render:           codexChipRender,
+			paneWidth:        9,
+			cursorCol:        wrappedTailCol(chipRow, 9) - 1,
+		},
+		// tmux's reported width does not equal the row's rendered width —
+		// the proof compares the wire to the row, not to the cursor.
+		"pane width mismatched": {
+			swallowedEnters:   1,
+			swallowNoNewline:  true,
+			render:            codexChipRender,
+			paneWidth:         9,
+			reportedPaneWidth: 10,
+			cursorCol:         wrappedTailCol(chipRow, 9) - 1,
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			status, pastes, enters := sendStaged(t, m, redeliverPrompt)
+			require.Equal(t, 1, pastes, "the remedy must never re-paste")
+			require.Equal(t, 1, enters, "without a proved exact fill the remedy Enter stays withheld")
+			require.Equal(t, PromptSentUnverified, status)
+		})
+	}
 }
