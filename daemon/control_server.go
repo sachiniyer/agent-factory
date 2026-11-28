@@ -528,12 +528,31 @@ func (s *controlServer) createSession(ctx context.Context, req CreateSessionRequ
 	// A remote client sends the project path as typed; expand ~ against this daemon's
 	// home before anything resolves it. A still-relative path would resolve against
 	// the DAEMON's working directory and could silently pick a different checkout (#5743).
+	//
+	// A task fire (TaskOrigin) replays a stored ProjectPath whose retained RepoID
+	// was computed from the raw bytes via RepoFromPath (task.repoIDForPath, no
+	// trim). ResolveDaemonHostPath trims surrounding whitespace, which would
+	// change the repo a trailing-space path (e.g. "/p/repo ") resolves to and
+	// break the retained-RepoID check in reserveCreateWithWorktreeAdmission for
+	// a bound task — failing every fire of a task whose path names a real repo,
+	// or silently moving a legacy unbound task to the trimmed sibling repo
+	// (#6996 fixed this for the sibling DeliverPrompt boundary; CreateSession is
+	// the other arm the same task fire reaches through, and was left unpatched).
+	// TaskOrigin is daemon-internal provenance (json:"-", never set by a remote
+	// HTTP caller) and the path was validated at task create/update, so enforce
+	// absoluteness without trimming the bytes a task's retained RepoID depends on.
 	if strings.TrimSpace(req.RepoPath) != "" {
-		resolved, err := config.ResolveDaemonHostPath(req.RepoPath)
-		if err != nil {
-			return err
+		if req.TaskOrigin {
+			if !filepath.IsAbs(req.RepoPath) {
+				return fmt.Errorf("path %q must be absolute (or start with ~/): the daemon resolves it on its own filesystem and has no access to your working directory", req.RepoPath)
+			}
+		} else {
+			resolved, err := config.ResolveDaemonHostPath(req.RepoPath)
+			if err != nil {
+				return err
+			}
+			req.RepoPath = resolved
 		}
-		req.RepoPath = resolved
 	}
 	req.Account = strings.TrimSpace(req.Account) // mirror trimProgramEnumIfBare (#5123)
 	// A whitespace-only host pick is "no pick" — validateCreateFirst already
