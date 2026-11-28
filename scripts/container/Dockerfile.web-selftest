@@ -36,8 +36,10 @@ FROM mcr.microsoft.com/playwright:v1.56.1-noble
 COPY ci-apt-install.sh /usr/local/lib/agent-factory/ci-apt-install.sh
 
 # tmux + git are what the daemon drives to run sessions; procps provides pgrep for
-# the daemon's SIGTERM fallback path — the same trio Dockerfile.test installs.
-RUN bash /usr/local/lib/agent-factory/ci-apt-install.sh tmux git procps ca-certificates \
+# the daemon's SIGTERM fallback path — the same trio Dockerfile.test installs —
+# and less keeps `git log` in those panes on the real pager rather than
+# util-linux more at (END), same as Dockerfile.test (#7945).
+RUN bash /usr/local/lib/agent-factory/ci-apt-install.sh tmux git procps ca-certificates less \
     && rm -rf /var/lib/apt/lists/*
 
 # Go 1.25 (the repo floor, CLAUDE.md). Fetched from the official tarball for the

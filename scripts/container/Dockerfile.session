@@ -23,12 +23,14 @@ FROM node:22-trixie-slim
 # Workspace tooling: git clones /workspace, tmux drives the agent PTY, and
 # ca-certificates lets the HTTPS clone and the agent API calls verify TLS. sh,
 # sleep, and dd (used to stream the live PTY) already come from the base coreutils.
+# less is the pager a real Debian box has: without it `git log`/`git diff` in a
+# session pane resolves `pager` to /bin/more and parks at (END) (#7945).
 # procps (ps/pgrep) is NOT needed by the in-container `af agent-server` — af's
 # only pgrep use is the host daemon's SIGTERM-fallback scan, which never runs
 # here — but it is kept so an operator can inspect a contained session's process
 # tree (`docker exec <c> ps -ef`), which is the point of running sessions boxed.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends git tmux procps ca-certificates \
+    && apt-get install -y --no-install-recommends git tmux procps ca-certificates less \
     && rm -rf /var/lib/apt/lists/*
 
 # Stable in-container git identity so no clone or commit depends on host git config
