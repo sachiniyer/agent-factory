@@ -8,6 +8,10 @@ import (
 	"path/filepath"
 )
 
+// repoGoneCleanupRetainedTrees is the seam both cleanup paths run inside a
+// deadline-bound worker: this file's repo-gone goroutine, and the plain kill's
+// spawned worker in worktree_ops.go (#7928). Production always uses the real
+// loop; tests substitute it to place a controlled stall inside the worker.
 var repoGoneCleanupRetainedTrees = func(worktree *GitWorktree) error {
 	return worktree.cleanupRetainedArchiveTrees()
 }
@@ -194,7 +198,13 @@ func (g *GitWorktree) cleanupClaimedRepoGone(claim RelocationClaim) (CleanupStat
 		// Current archives may carry complete retained source trees for files the
 		// published copy could not read. Consume those handles and the primary
 		// archive inside one deadline-bound transaction.
-		err := cleanupRetained(g)
+		//
+		// The retained phase runs under the shared per-tree fence
+		// (worktree_archive_cleanup.go): if this worker is itself abandoned at
+		// the deadline mid-tree, a later attempt's retained cleanup — this path's
+		// own retry or the plain kill's — refuses fast instead of stacking a
+		// second worker onto the same stalled tree (#7928 review R2).
+		err := runRetainedCleanupClaimed(g, cleanupRetained)
 		if err != nil {
 			deleteDone <- fmt.Errorf("remove retained archive trees before repo-gone cleanup: %w", err)
 			return

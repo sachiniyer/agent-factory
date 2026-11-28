@@ -7,12 +7,128 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 )
+
+// retainedCleanupInFlight is the process-local fence behind "at most one
+// cleanup worker per retained tree" (#7928, #7937 review R1/R2). It records the
+// durable filesystem path of every retained archive tree a cleanup worker
+// claimed but has not finished removing.
+//
+// It is keyed on the tree's RECORDED path — the same string a durable
+// archive_report row carries — so the decision survives a GitWorktree rebuilt
+// from storage: the ghost path and a restored session rebuild `gw`, and the
+// report they reload names the same tree the earlier attempt fenced.
+//
+// It is deliberately NOT durable and NOT on the GitWorktree. A worker stuck
+// forever in an uninterruptible syscall holds its entries until the process
+// restarts — which is the correct bound, because the only way to clear a
+// permanently wedged worker is for the process that owns it to die. An
+// in-memory `gw` flag could never reach a rebuilt handle, and a durable record
+// outlives the worker's own return: the #7937 head latched a successful
+// slow-tree delete behind "restart the daemon" forever (R1).
+var retainedCleanupInFlight = struct {
+	sync.Mutex
+	paths map[string]struct{}
+}{paths: make(map[string]struct{})}
+
+// retainedCleanupOutstanding reports whether a claimed tree in this report is
+// still owned by an outstanding worker, naming the first fenced path. It is the
+// advisory half of the fence: callers use it to refuse BEFORE spawning a
+// worker, so a retry against a stalled filesystem starts nothing. The claim
+// inside runRetainedCleanupClaimed is the authoritative half — it decides
+// atomically under the same mutex, so two attempts that both pass this check
+// still serialize onto a single worker.
+func retainedCleanupOutstanding(report ArchiveReport) string {
+	retainedCleanupInFlight.Lock()
+	defer retainedCleanupInFlight.Unlock()
+	for _, tree := range report.RetainedTrees {
+		if _, ok := retainedCleanupInFlight.paths[tree.filesystemPath()]; ok {
+			return tree.filesystemPath()
+		}
+	}
+	return ""
+}
+
+// claimRetainedCleanupTrees atomically claims every tree in the report for one
+// worker: either all paths register and a release func comes back, or none do
+// and the already-claimed path is named. All-or-nothing matters — claiming a
+// subset would let two workers each hold half a report while believing the
+// other idle. The release func belongs to the worker alone: a deadline that
+// abandons it must not drop the fence, or the next retry would start a second
+// worker against the same stalled tree (the #7937/Codex P1 leak). A returned
+// worker releases every path it claimed — success frees the next retry to
+// settle, failure frees it to start fresh.
+func claimRetainedCleanupTrees(report ArchiveReport) (release func(), outstanding string) {
+	retainedCleanupInFlight.Lock()
+	defer retainedCleanupInFlight.Unlock()
+	for _, tree := range report.RetainedTrees {
+		if _, ok := retainedCleanupInFlight.paths[tree.filesystemPath()]; ok {
+			return nil, tree.filesystemPath()
+		}
+	}
+	claimed := make([]string, 0, len(report.RetainedTrees))
+	for _, tree := range report.RetainedTrees {
+		path := tree.filesystemPath()
+		// An empty path is refused by removeRetainedArchiveTree before any
+		// syscall, so it can never stall — and two unrelated records must never
+		// share a fence key.
+		if path == "" {
+			continue
+		}
+		retainedCleanupInFlight.paths[path] = struct{}{}
+		claimed = append(claimed, path)
+	}
+	return func() {
+		retainedCleanupInFlight.Lock()
+		for _, path := range claimed {
+			delete(retainedCleanupInFlight.paths, path)
+		}
+		retainedCleanupInFlight.Unlock()
+	}, ""
+}
+
+// retainedCleanupOutstandingError is what a fenced retry gets: the cleanup is
+// still running on a stalled or slow filesystem and the kill retries
+// automatically. It is a plain error, never a refusal sentinel — the record
+// stays kept for exactly the paced retry this message describes.
+func retainedCleanupOutstandingError(path string) error {
+	return fmt.Errorf(
+		"retained archive tree cleanup at %s is still running from an earlier attempt on a stalled or slow filesystem; "+
+			"the kill retries automatically — refusing to start a second cleanup worker", path)
+}
+
+// runRetainedCleanupClaimed runs fn — the retained-tree cleanup — while holding
+// this report's fence. The claim is taken inside the worker's own run and
+// released by its return, so the fence's lifetime IS the worker's lifetime: an
+// abandoned worker holds it until it finishes or the process ends, and nothing
+// else — no deadline, no retry, no rebuilt GitWorktree — clears it.
+//
+// An empty report fences nothing, but fn is still invoked: the seam standing in
+// for it is "the retained-tree call" to its tests, so skipping the call here
+// would silently change what the repo-gone deadline contract runs.
+func runRetainedCleanupClaimed(g *GitWorktree, fn func(*GitWorktree) error) error {
+	report := g.GetArchiveReport()
+	if report.Empty() {
+		return fn(g)
+	}
+	release, outstanding := claimRetainedCleanupTrees(report)
+	if outstanding != "" {
+		return retainedCleanupOutstandingError(outstanding)
+	}
+	defer release()
+	return fn(g)
+}
 
 // cleanupRetainedArchiveTrees consumes every complete source tree owned by this
 // report. Kill calls it before deleting the ordinary worktree and session record,
 // so retained bytes cannot outlive the destructive action that removed their
 // only durable handle.
+//
+// Every caller must route it through runRetainedCleanupClaimed (or an
+// equivalent claim): the filesystem work inside is raw and unbounded, so the
+// per-tree fence is what keeps a second worker from stacking onto a tree an
+// abandoned one is still inside.
 func (g *GitWorktree) cleanupRetainedArchiveTrees() error {
 	for {
 		report := g.GetArchiveReport()
