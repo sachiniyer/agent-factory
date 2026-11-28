@@ -120,12 +120,32 @@ func (p *dockerProvisioner) cloneWorkspace() error {
 // /workspace's main tree (#1592 Phase 4 PR6). The `<branch>:<branch>` refspec
 // creates refs/heads/<branch> from origin/<branch>; the in-container local
 // backend's Setup then finds that local ref and adds the session worktree from
-// it (setupFromExistingBranch), bringing the pushed commits back. It stays on the
-// main tree's default branch so the later `git worktree add <path> <branch>` does
-// not collide with a checked-out branch.
+// it (setupFromExistingBranch), bringing the pushed commits back.
+//
+// git refuses to fetch into the branch a non-bare repo has checked out, and the
+// fresh clone has the origin's default branch checked out — the very branch the
+// restore brings when the archived name coincides with the default branch name
+// (e.g. an operator who set branch_prefix="" on a session titled "main", or a
+// legacy row whose recorded branch is the default-branch name). Detach HEAD
+// before the refspec fetch, mirroring seedFromBundle's guard: the clone was
+// made a moment ago and is clean, so this moves nothing on disk, and the
+// session's worktree is created later by the in-container LOCAL backend on its
+// own branch.
+//
+// The unborn-HEAD arm (an empty origin whose HEAD points at a branch with no
+// commits) is handled the same way as the seed path: --update-head-ok admits
+// the fetch into the occupied unborn branch, and a fetch that "borns" HEAD is
+// followed by detach + reset --hard to free the branch for the agent-server's
+// later `git worktree add`; a fetch that leaves HEAD unborn (the restore branch
+// is not the one HEAD is unborn on) needs no cleanup.
 func (p *dockerProvisioner) fetchRestoreBranch(branch string) error {
-	script := fmt.Sprintf("git -C %s fetch origin %s:%s",
-		shellQuote(dockerWorkspaceDir), shellQuote(branch), shellQuote(branch))
+	ws := shellQuote(dockerWorkspaceDir)
+	refspec := shellQuote(branch + ":" + branch)
+	script := fmt.Sprintf(
+		"if git -C %[1]s rev-parse -q --verify HEAD >/dev/null; then git -C %[1]s checkout -q --detach && git -C %[1]s fetch origin %[2]s; "+
+			"else git -C %[1]s fetch --update-head-ok origin %[2]s && if git -C %[1]s rev-parse -q --verify HEAD >/dev/null; then git -C %[1]s checkout -q --detach && git -C %[1]s reset -q --hard; fi; "+
+			"fi",
+		ws, refspec)
 	out, err := p.execSessionSh(dockerProvisionStepTimeout, script)
 	if err != nil {
 		return fmt.Errorf("backend=docker: restoring archived branch %q into the container failed (was it pushed to origin?): %s: %w",
