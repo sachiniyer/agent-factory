@@ -595,31 +595,47 @@ func (m *Manager) resolveDeleteProjectTarget(req DeleteProjectRequest) (deletePr
 			//
 			//   - resolves as a git checkout: the absent-root scan above
 			//     never ran on the occupant's repository, so refusing is the
-			//     only answer that stays fail-closed. The retry is the path
-			//     form — for a derived-id request "delete again" is no
-			//     remedy at all: once the root resolves, the derived
+			//     only answer that stays fail-closed. When the checkout is
+			//     rooted at the recorded root the retry is the path form —
+			//     for a derived-id request "delete again" alone is no
+			//     remedy at all, since once the root resolves the derived
 			//     selector matches nothing and returns a zero-count
-			//     success over the surviving row (review R7).
+			//     success over the surviving row (review R7). A path that
+			//     resolves to a root ELSEWHERE names what resolved and gets
+			//     a remedy that settles instead, since "delete by path"
+			//     there would aim at the enclosing repository's project
+			//     (#7948 review R4).
 			//   - provably non-git AND the recorded identity is disproven:
-			//     the only release. The marker evidence that already
-			//     disproved the row's claimed identity transfers to the
-			//     fresh plain directory; #7934 released on RepoFromPath
+			//     the release — of the #7829 refusal, NOT of the belonging
+			//     scan (#7948 review R1). A settled mismatch says which
+			//     identity the row's own sessions were filed under; it says
+			//     nothing about whether another live identity's sessions
+			//     could belong to the root, so the scan runs exactly as it
+			//     does on a proven-absent answer and its post-deregister
+			//     vetting comes with it. #7934 released on RepoFromPath
 			//     == nil alone, which the Codex P1 caught — a plain dir
 			//     does not answer who owns it.
 			//   - anything else — a plain dir without disproof, a dangling
 			//     .git, a safe.directory rejection, EACCES, or an
 			//     ErrRepoProbeUnanswered non-answer — is a git failure or a
 			//     non-answer, and every non-answer refuses.
-			_, gitErr := config.RepoFromPath(filepath.Clean(belongingRoot))
+			resolved, gitErr := config.RepoFromPath(filepath.Clean(belongingRoot))
 			switch {
 			case errors.Is(gitErr, config.ErrNotGitRepository) && m.recordedRootIdentityDisproven(repoID):
-				// The released case: identity disproven stands.
+				belonging := m.absentRootBelongingScan(belongingCheckoutID)
+				if len(belonging.suspects) > 0 {
+					return deleteProjectTarget{repoID: repoID}, absentRootBelongingRefusal(repoID, belongingRoot, belonging.suspects)
+				}
+				absentBelonging = belonging
 			case gitErr == nil:
-				return deleteProjectTarget{repoID: repoID}, fmt.Errorf("delete project %s: its recorded root %s resolved as a git checkout again before af could establish which live sessions it owned — nothing was changed; delete the project by its path %s, then delete again", repoID, belongingRoot, belongingRoot)
+				if pathutil.ResolveForCompare(resolved.Root) == pathutil.ResolveForCompare(filepath.Clean(belongingRoot)) {
+					return deleteProjectTarget{repoID: repoID}, fmt.Errorf("delete project %s: its recorded root %s resolved as a git checkout again before af could establish which live sessions it owned — nothing was changed; delete the project by its path %s, then delete again", repoID, belongingRoot, belongingRoot)
+				}
+				return deleteProjectTarget{repoID: repoID}, fmt.Errorf("delete project %s: its recorded root %s resolved again before af could establish which live sessions it owned — the checkout af can name at that path is rooted at %s — nothing was changed; move it away, then delete the project as absent", repoID, belongingRoot, resolved.Root)
 			case errors.Is(gitErr, config.ErrNotGitRepository):
 				return deleteProjectTarget{repoID: repoID}, fmt.Errorf("delete project %s: its recorded root %s is present but no longer a git checkout, so af cannot establish which live sessions it owned — nothing was changed; restore the checkout's git metadata and delete the project by its path %s, or remove the directory and delete it as absent", repoID, belongingRoot, belongingRoot)
 			default:
-				return deleteProjectTarget{repoID: repoID}, fmt.Errorf("delete project %s: its recorded root %s came back between selection and the ownership scan but git cannot read it, so af cannot establish which live sessions it owned — nothing was changed; repair the checkout's access or metadata and retry: %w", repoID, belongingRoot, gitErr)
+				return deleteProjectTarget{repoID: repoID}, fmt.Errorf("delete project %s: its recorded root %s came back between selection and the ownership scan but git cannot read it, so af cannot establish which live sessions it owned — nothing was changed; repair the checkout's access or metadata and delete the project by its path %s, or remove the directory and delete it as absent: %w", repoID, belongingRoot, belongingRoot, gitErr)
 			}
 		}
 	}
