@@ -108,7 +108,7 @@ func TestAccountScopedFinishedProcessPaneIsKeptWithItsExit(t *testing.T) {
 // record. The probe now refuses a pane af did not launch (one carrying no
 // @af_pane_pid stamp), so the roster read leaves the row unstamped and the
 // command's own stop or exit can still be recorded.
-func TestRecordProcessTabExitsIgnoresAnUnstampedForeignPane(t *testing.T) {
+func TestRecordTabExitsIgnoresAnUnstampedForeignPane(t *testing.T) {
 	log.Initialize(false)
 	defer log.Close()
 	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
@@ -144,7 +144,7 @@ func TestRecordProcessTabExitsIgnoresAnUnstampedForeignPane(t *testing.T) {
 	require.NotNil(t, before[1])
 	require.Nil(t, before[1].Exit, "the roster reports no exit until something looks")
 
-	inst.RecordProcessTabExits()
+	inst.RecordTabExits()
 
 	after := inst.TabsData()
 	require.NotNil(t, after[1])

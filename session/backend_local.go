@@ -784,6 +784,16 @@ func (b *LocalBackend) setupTabs(i *Instance) (setupErr error) {
 				restoreProcessTab(i, tab, worktreePath)
 				continue
 			}
+			if tab.Kind == TabKindShell {
+				// Same heal restoreProcessTab runs for a process tab: a shell
+				// spawned before #7944 lacks remain-on-exit, so its eventual
+				// exit would take the whole session down unobserved. With the
+				// option on, the death is held as a dead pane instead. The flag
+				// rides along so Restore's lazy-respawn — a shell whose session
+				// is gone entirely — carries the option in ITS new-session too.
+				tab.tmux.SetRemainOnExit()
+				tab.tmux.ApplyRemainOnExit()
+			}
 			if err := refreshTabSessionEnvironment(i, tab); err != nil {
 				if account != "" {
 					return fmt.Errorf("prepare account-scoped tab %q for %q: %w", tab.Name, i.Title, err)
@@ -802,6 +812,13 @@ func (b *LocalBackend) setupTabs(i *Instance) (setupErr error) {
 				if account != "" {
 					respawnedAccountTabs = append(respawnedAccountTabs, tab.tmux)
 				}
+			} else if err == nil && tab.Kind == TabKindShell && tab.Exit == nil {
+				// The reattach landed on a pane held dead by remain-on-exit
+				// (#7944): record the exit it reports — the same stamp
+				// restoreProcessTab runs — so the tab reads dead rather than
+				// looking like a live shell. A live pane answers not-dead and
+				// the stamp is skipped.
+				stampTabExit(i, tab.ID, tab.tmux)
 			}
 			if err != nil {
 				// One predicate decides every row kind. An account-scoped row refuses
@@ -919,6 +936,10 @@ func (b *LocalBackend) setupTabs(i *Instance) (setupErr error) {
 			log.WarningLog.Printf("prepare shell tab %q for %q failed: %v", name, i.Title, err)
 			continue
 		}
+		// Same as the create path (AddShellTabWithID): the option must ride the
+		// new-session invocation so the replacement shell's eventual exit is
+		// held as an observable dead pane too (#7944).
+		shellTmux.SetRemainOnExit()
 		if err := shellTmux.Start(worktreePath); err != nil {
 			log.WarningLog.Printf("start shell tab %q for %q failed: %v", name, i.Title, err)
 			continue

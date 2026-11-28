@@ -421,7 +421,8 @@ func (s *Sidebar) renderInstance(idx int, selected bool) string {
 
 // renderTabRow renders one tab child row of an expanded instance. The label
 // set comes from tree.TabLabels — the same slots the tab bar shows — and the
-// row whose instance and slot match an open pane carries the " · open" marker.
+// row whose instance and slot match an open pane carries the " · open" marker;
+// a tab with a recorded exit carries " · dead" instead (#7944).
 func (s *Sidebar) renderTabRow(item SidebarItem, selected bool) string {
 	instances := s.proj.GetInstances()
 	if item.ItemIndex < 0 || item.ItemIndex >= len(instances) {
@@ -432,8 +433,12 @@ func (s *Sidebar) renderTabRow(item SidebarItem, selected bool) string {
 	if item.TabIndex < 0 || item.TabIndex >= len(labels) {
 		return ""
 	}
+	dead := false
+	if tabs := inst.GetTabs(); item.TabIndex < len(tabs) {
+		dead = tabs[item.TabIndex].Exit != nil
+	}
 	return s.renderer.RenderTab(labels[item.TabIndex], item.TabIndex+1,
-		item.TabIndex == len(labels)-1, selected, s.proj.FindOpenPane(inst, item.TabIndex) != nil)
+		item.TabIndex == len(labels)-1, selected, s.proj.FindOpenPane(inst, item.TabIndex) != nil, dead)
 }
 
 // archivedHeaderLabel counts the archived sessions for the collapsed folder's

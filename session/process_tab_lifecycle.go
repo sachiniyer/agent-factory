@@ -66,20 +66,21 @@ func restoreProcessTab(i *Instance, tab *Tab, worktreePath string) {
 	// tmux holds the pane when the command exits and pane_dead records it.
 	tab.tmux.ApplyRemainOnExit()
 	if tab.Exit == nil {
-		stampProcessTabExit(i, tab.ID, tab.tmux)
+		stampTabExit(i, tab.ID, tab.tmux)
 	}
 	if err := tab.tmux.ReattachOnly(worktreePath, true); err != nil {
 		log.WarningLog.Printf("reattach process tab %q for %q failed: %v", tab.Name, i.Title, err)
 	}
 }
 
-// stampProcessTabExit records a process tab's exit when its command is observed
-// finished, and reports whether it did. A stamp is durable evidence discovered
+// stampTabExit records a tab's exit when its pane's process is observed
+// finished — a process tab's command, or a shell tab's $SHELL (#7944) — and
+// reports whether it did. A stamp is durable evidence discovered
 // while restoring, so it also enrolls the row for the daemon's load checkpoint:
 // nothing else writes a row whose runtime was not replaced, and a reboot before
 // any later mutation would lose the pane and the only record of how its command
 // ended (#4506 review).
-func stampProcessTabExit(i *Instance, tabID string, tabTmux *tmux.TmuxSession) bool {
+func stampTabExit(i *Instance, tabID string, tabTmux *tmux.TmuxSession) bool {
 	dead, status, statusKnown, at, known := tabTmux.ProbePaneExit()
 	if !known || !dead {
 		return false
@@ -104,12 +105,12 @@ func stampProcessTabExit(i *Instance, tabID string, tabTmux *tmux.TmuxSession) b
 	return stamped
 }
 
-// RecordProcessTabExits probes every process tab with no recorded exit and
-// stamps the ones whose command tmux reports finished (#5571 W4.3). It is the
-// roster-read counterpart of stampProcessTabExit's restore path: exit evidence
-// is only discovered when something looks, and on a LIVE instance nothing looks
-// — so a process tab that exits while the agent-server runs would report an
-// un-stamped Exit on /v1/agent/tabs forever. The roster handler runs this
+// RecordTabExits probes every PTY-bearing tab (process, and since #7944 shell)
+// with no recorded exit and stamps the ones whose pane's process tmux reports
+// finished (#5571 W4.3). It is the roster-read counterpart of stampTabExit's
+// restore path: exit evidence is only discovered when something looks, and on
+// a LIVE instance nothing looks — so a tab whose process exits while the
+// agent-server runs would report an un-stamped Exit on /v1/agent/tabs forever. The roster handler runs this
 // first; the probe is the same bounded has-session/pane_dead pair the restore
 // path spends. Inert or tmux-less rows are skipped rather than probed: absence
 // is not evidence of how the command ended (restoreProcessTab's rule), and
@@ -120,7 +121,7 @@ func stampProcessTabExit(i *Instance, tabID string, tabTmux *tmux.TmuxSession) b
 // captured handle stays valid past a concurrent kill — its probe just reports
 // the now-gone session as such — and the ID-based update lands on the row's
 // current copy or skips it when the row already records an ending.
-func (i *Instance) RecordProcessTabExits() {
+func (i *Instance) RecordTabExits() {
 	type probe struct {
 		id   string
 		tmux *tmux.TmuxSession
@@ -128,14 +129,14 @@ func (i *Instance) RecordProcessTabExits() {
 	i.mu.RLock()
 	var probes []probe
 	for _, tab := range i.Tabs {
-		if tab.Kind != TabKindProcess || tab.Exit != nil || tab.inert || tab.tmux == nil {
+		if (tab.Kind != TabKindProcess && tab.Kind != TabKindShell) || tab.Exit != nil || tab.inert || tab.tmux == nil {
 			continue
 		}
 		probes = append(probes, probe{id: tab.ID, tmux: tab.tmux})
 	}
 	i.mu.RUnlock()
 	for _, p := range probes {
-		stampProcessTabExit(i, p.id, p.tmux)
+		stampTabExit(i, p.id, p.tmux)
 	}
 }
 
@@ -164,7 +165,7 @@ func stampProcessTabStopped(i *Instance, tab *Tab, reason string) {
 // would destroy that output and the exit status for nothing (#4506 review).
 func keepFinishedProcessPane(i *Instance, tab *Tab) bool {
 	if tab.Exit == nil {
-		stampProcessTabExit(i, tab.ID, tab.tmux)
+		stampTabExit(i, tab.ID, tab.tmux)
 	}
 	return tab.tmux.FinishedAndQuiet()
 }

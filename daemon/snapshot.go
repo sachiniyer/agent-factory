@@ -389,6 +389,16 @@ func (m *Manager) SnapshotWithSkipped(repoID string) ([]session.InstanceData, []
 	for _, entry := range entries {
 		projected := entry.pending
 		if entry.instance != nil {
+			// Refresh exit evidence before projecting, the same refresh the
+			// in-sandbox /v1/agent/tabs handler runs on its own roster read
+			// (#5571 W4.3): exit evidence is only discovered when something
+			// looks, and on a live instance only a restore or a reader looks —
+			// without it a shell or process tab whose pane finished since the
+			// last read reports exit: null forever (#7944). The probe is the
+			// bounded has-session/pane_dead pair the restore path spends, and
+			// rows with a recorded exit, no tmux binding (remote projections),
+			// or an inert flag are skipped before any tmux call.
+			entry.instance.RecordTabExits()
 			// The client payload is a PROJECTION: InstanceData doubles as the
 			// instances.json record, so it carries the daemon-side limit-wall
 			// machinery (raw pane anchors, runtime pins, the retired shadow)

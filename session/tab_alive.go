@@ -1,5 +1,7 @@
 package session
 
+import "github.com/sachiniyer/agent-factory/session/tmux"
+
 // TabAlive reports whether the tab at idx has a live tmux session, as a LOSSY
 // bool: true means "alive OR could-not-determine (wedged/timeout)", false means
 // "no binding, or definitively gone". It is deliberately kept lossy because its
@@ -37,4 +39,33 @@ func (i *Instance) TabAlive(idx int) bool {
 		return rosterTab.Exit == nil
 	}
 	return false
+}
+
+// TabDead reports whether the tab at idx owns no live PTY, as a LOSSY bool in
+// the opposite direction of TabAlive: true means "provably ended" — the tab's
+// exit is stamped, its held pane is dead (pane_dead, the remain-on-exit
+// contract process tabs have had since #4479 and shell tabs since #7944), or
+// its session is definitively gone — and false means "live, or could not be
+// proven dead". The consumer is interactive-mode entry (#7944): entering a
+// dead pane binds a terminal that swallows every keystroke, so a provable
+// death refuses there rather than after the user has typed. A remote tab whose
+// death its agent-server has not yet stamped answers false — the bind reaches
+// the remote pane, which shows its own dead screen — the same
+// alive-or-unknown direction TabAlive takes for a wedged server (#1962).
+func (i *Instance) TabDead(idx int) bool {
+	i.mu.RLock()
+	var exit *TabExit
+	var ts *tmux.TmuxSession
+	if idx >= 0 && idx < len(i.Tabs) {
+		exit = i.Tabs[idx].Exit
+		ts = i.Tabs[idx].tmux
+	}
+	i.mu.RUnlock()
+	if exit != nil {
+		return true
+	}
+	if ts == nil {
+		return false
+	}
+	return ts.PaneDead() || !ts.ExistsOrUnknown()
 }

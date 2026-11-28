@@ -114,14 +114,14 @@ func (hs *headlessServer) TabClose(req agentTabCloseRequest, resp *agentOKRespon
 }
 
 // agentTabsResponse is the roster: every tab with its stable id, kind, name,
-// and — for process tabs — the exit evidence RecordProcessTabExits just
-// refreshed (status, time, stopped_by).
+// and — for PTY tabs (process, and shell since #7944) — the exit evidence
+// RecordTabExits just refreshed (status, time, stopped_by).
 type agentTabsResponse struct {
 	Tabs []session.TabData `json:"tabs"`
 }
 
-// Tabs answers the workspace's tab roster. It refreshes process-exit evidence
-// first: a process tab whose command finished since the last roster read would
+// Tabs answers the workspace's tab roster. It refreshes exit evidence
+// first: a PTY tab whose command finished since the last roster read would
 // otherwise report a stale un-exited row forever — the restore path stamps this
 // on load, but a LIVE sandbox has no load, so the roster read is where a live
 // exit gets recorded.
@@ -130,7 +130,7 @@ func (hs *headlessServer) Tabs(_ struct{}, resp *agentTabsResponse) error {
 	if err != nil {
 		return err
 	}
-	tabs.RecordProcessTabExits()
+	tabs.RecordTabExits()
 	resp.Tabs = tabs.TabsData()
 	return nil
 }

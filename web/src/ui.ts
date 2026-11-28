@@ -93,6 +93,7 @@ import {
   type LifecycleAction,
   type SessionData,
   type SkippedRepo,
+  type TabExitData,
   type TabKindAllowance,
   type TaskData,
   TabKind,
@@ -3570,7 +3571,7 @@ function tabCenters(bar: HTMLElement): number[] {
  *  handled once, via delegation, on the bar container (AppShell.attachTabDrag) so a tab
  *  created after load is a drag source with no per-button rebinding (#1737). */
 function tabButton(
-  tab: { id?: string; name: string; kind: number },
+  tab: { id?: string; name: string; kind: number; exit?: TabExitData | null },
   index: number,
   active: boolean,
   shown: boolean,
@@ -3599,7 +3600,10 @@ function tabButton(
    *  commit can tell a vanished tab from the user's own session switch. */
   selectedSessionId: string,
 ): HTMLElement {
-  const cls = `af-tab${active ? " af-tab-active" : ""}${shown && !active ? " af-tab-shown" : ""}`;
+  // A tab with a recorded exit owns a dead pane (#7944): the strip dims it the
+  // same way the TUI tree marks the row " · dead", so the strip reads dead
+  // before the pane it points at is even looked at.
+  const cls = `af-tab${active ? " af-tab-active" : ""}${shown && !active ? " af-tab-shown" : ""}${tab.exit != null ? " af-tab-dead" : ""}`;
   const btn = h("button", { type: "button", class: cls, draggable: true });
   btn.setAttribute("role", "tab");
   btn.setAttribute("aria-selected", active ? "true" : "false");
@@ -3623,7 +3627,7 @@ function tabButton(
   // parameters — one bool here is what stranded closable tabs behind a create
   // verdict (#3060).
   const renameable = canRename && isRenameableTab(tab.kind);
-  btn.title = renameable ? `${tabDisplayLabel(tab)} — double-click to rename` : tabDisplayLabel(tab);
+  btn.title = `${tabDisplayLabel(tab)}${tab.exit != null ? " — dead" : ""}${renameable ? " — double-click to rename" : ""}`;
   if (renameable) {
     tabRenameIntents.set(btn, {
       identity: liveIdentity,

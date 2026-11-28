@@ -848,21 +848,32 @@ func formatPaneChurnAge(churnAt, now time.Time) string {
 // previews another tab. Reserve it before truncating the label.
 const activeTabMarker = " · open"
 
+// deadTabMarker names a tab whose PTY has recorded its exit (#7944): it
+// replaces activeTabMarker — a dead tab open in a pane still reads dead,
+// because the pane shows the "Pane is dead" screen, and " · open" on it would
+// repeat exactly the live-looking lie the bug reported. Reserve it before
+// truncating the label, same as the live marker.
+const deadTabMarker = " · dead"
+
 // RenderTab renders one tab child row of an expanded instance: an indented
 // ├/└ connector, the 1-based slot number (matching the 1-9 jump keys), the
 // tab's label, and the activeTabMarker on the tab the content pane is
-// showing. selected highlights the row under the tree cursor.
+// showing — or the deadTabMarker on a tab whose exit is recorded, whether or
+// not a pane shows it. selected highlights the row under the tree cursor.
 //
 // When the row overflows, the LABEL is what gets truncated: the marker is
 // reserved so an active tab always reads as active. See the truncation comment
 // below.
-func (r *InstanceRenderer) RenderTab(label string, oneBased int, isLast, selected, active bool) string {
+func (r *InstanceRenderer) RenderTab(label string, oneBased int, isLast, selected, active, dead bool) string {
 	connector := "├"
 	if isLast {
 		connector = "└"
 	}
 	marker := ""
-	if active {
+	switch {
+	case dead:
+		marker = deadTabMarker
+	case active:
 		marker = activeTabMarker
 	}
 	prefix := fmt.Sprintf("%s%s %d ",

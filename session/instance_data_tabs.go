@@ -26,8 +26,8 @@ func (i *Instance) tabDataLocked(tab *Tab) TabData {
 // ToInstanceData serializes, agent tab at index 0 — so a peer can consume the
 // roster without the rest of the instance record. It is the /v1/agent/tabs
 // payload the in-sandbox agent-server reports to the driving daemon (#5571
-// W4.3). It does NOT refresh process-exit evidence: stampProcessTabExit runs on
-// restore/attach paths, and the roster endpoint runs RecordProcessTabExits
+// W4.3). It does NOT refresh process-exit evidence: stampTabExit runs on
+// restore/attach paths, and the roster endpoint runs RecordTabExits
 // first — the separation keeps a pure read a pure read.
 func (i *Instance) TabsData() []TabData {
 	i.mu.RLock()
@@ -55,11 +55,12 @@ func restoreLocalTabs(instance *Instance, data InstanceData) {
 			var ts *tmux.TmuxSession
 			if td.TmuxName != "" {
 				ts = restoreTmuxSession(td.TmuxName, tabProgram(kind, td.Command, data.Program))
-				// Keep the restored handle consistent with a fresh process
-				// tab's: the flag only matters if Start is ever invoked, and
-				// after #4479 nothing invokes it — but the invariant costs
-				// nothing and keeps a future Start caller honest.
-				if ts != nil && kind == TabKindProcess {
+				// Keep the restored handle consistent with a fresh tab's: the
+				// flag only matters if Start is ever invoked, and after #4479
+				// nothing invokes it — but the invariant costs nothing and
+				// keeps a future Start caller honest. Shell tabs carry the same
+				// flag since #7944 gave them the held-dead-pane contract.
+				if ts != nil && (kind == TabKindProcess || kind == TabKindShell) {
 					ts.SetRemainOnExit()
 				}
 				// Anchor coverage (#7435 R6): the persisted runtime pair names

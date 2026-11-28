@@ -371,17 +371,36 @@ func (m *home) interactivePollPauseCmd() tea.Cmd {
 
 // enforceInteractiveInvariant drops back to nav mode whenever interactive mode's
 // premise breaks: the mode means "keystrokes forward into the FOCUSED pane's live
-// attachment", so a closed/hidden pane, focus moved off the pane, or a missing
-// attachment each end it. Every keystroke and every sync tick funnels through
+// attachment", so a closed/hidden pane, focus moved off the pane, a missing
+// attachment, or a tab whose PTY has recorded its exit each end it. A dead pane
+// keeps its repaint-only attachment — the "Pane is dead" screen is live content —
+// so the missing-attachment check alone never fires for it; the stamped Exit is
+// the readable signal, landing via the roster reconcile a poll or two after tmux
+// held the pane (#7944). Every keystroke and every sync tick funnels through
 // this, so the stale-mode window is at most one tick. Idempotent.
 func (m *home) enforceInteractiveInvariant() {
 	if !m.interactive {
 		return
 	}
 	p := m.focusedOpenPane()
-	if p == nil || m.liveTerms[p.ID()] == nil {
+	if p == nil || m.liveTerms[p.ID()] == nil || tabExited(p.Instance(), p.Tab()) {
 		m.setInteractive(false)
 	}
+}
+
+// tabExited reports whether the tab at idx already carries a recorded exit —
+// the stamped evidence the roster reconcile mirrors — without probing tmux.
+// Callers running per-keystroke pay only a lock; a provable death that has not
+// been stamped yet is interactiveTabGuard's probe, not this read (#7944).
+func tabExited(inst *session.Instance, idx int) bool {
+	if inst == nil {
+		return false
+	}
+	tabs := inst.GetTabs()
+	if idx < 0 || idx >= len(tabs) {
+		return false
+	}
+	return tabs[idx].Exit != nil
 }
 
 // setInteractive flips interactive mode (#1089, RFC §2.3) and keeps every
