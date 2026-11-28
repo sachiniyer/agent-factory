@@ -185,7 +185,7 @@ func TestArchiveSession_DanglingAnchorSaysFixRemove(t *testing.T) {
 	// comparison, which fails on the dangling link the recorded path now
 	// spells through.
 	secondWt := filepath.Join(filepath.Dir(wtPath), "second-wt")
-	gitOut(t, repoPath, "worktree", "add", "-b", "af/dangling-anchor", secondWt)
+	gitOut(t, repoPath, "worktree", "add", "-b", "af/dangling-anchor-second", secondWt)
 	residue := filepath.Join(filepath.Dir(wtPath), ".af-source-"+strings.Repeat("d", 32))
 	require.NoError(t, os.Rename(secondWt, residue))
 	require.NoError(t, os.RemoveAll(wtPath))
