@@ -423,10 +423,16 @@ user's real home and mounts it only if it exists, so:
       `GIT_CONFIG_NOSYSTEM`/`XDG_CONFIG_HOME` with a host value exempts
       only that slot — the other slots stay af's, and only claiming every
       slot lifts the lockdown whole. Two claim details follow from git's
-      own resolution: an XDG-only claim redirects `GIT_CONFIG_GLOBAL` at
-      `$XDG_CONFIG_HOME/git/config` (a `GIT_CONFIG_GLOBAL` export replaces
-      the XDG global too, so af's own file would shadow the claim — the
-      redirect still suppresses the image's `~/.gitconfig`), and the
+      own resolution: on the account path an XDG-only claim redirects
+      `GIT_CONFIG_GLOBAL` at `$XDG_CONFIG_HOME/git/config` (a
+      `GIT_CONFIG_GLOBAL` export replaces the XDG global too, so af's own
+      file would shadow the claim — the redirect still suppresses the
+      image's `~/.gitconfig`); on the credential-mount path the
+      `XDG_CONFIG_HOME` forward can never deliver — af re-asserts it to
+      the session home after run_args — so the name is dropped from the
+      claim set and `AF_GIT_FORWARDED` entirely, and the XDG slot stays
+      af's unconditionally (a claim there would redirect into the
+      image-controlled home). The
       provisioning `safe.directory` write targets `$GIT_CONFIG_GLOBAL`
       after the preamble resolves it — af's file, the claimed XDG file,
       or the operator's forwarded global — with its directory created

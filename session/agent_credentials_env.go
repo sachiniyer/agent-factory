@@ -3,6 +3,7 @@ package session
 import (
 	"encoding/json"
 	"os"
+	"slices"
 	"sort"
 	"strings"
 
@@ -878,6 +879,13 @@ func (p *dockerProvisioner) containerEnvironmentNames() []string {
 			names = append(names, twins...)
 			sort.Strings(names)
 		}
+		// XDG_CONFIG_HOME is re-asserted to the session home after
+		// run_args on this path, so the operator's forward can never
+		// reach the container — and AF_GIT_FORWARDED (built from this
+		// list) must not name it either, or af's git would redirect
+		// GIT_CONFIG_GLOBAL at the re-asserted home's image-controlled
+		// git/config (#7891 F16).
+		names = slices.DeleteFunc(names, func(n string) bool { return n == "XDG_CONFIG_HOME" })
 	}
 	if p.spec.Account.Dir != "" {
 		names = append(names,

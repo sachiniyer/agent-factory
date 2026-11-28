@@ -237,8 +237,10 @@ func TestRunContainer_ReassertsGitConfigRoots(t *testing.T) {
 // The AF_GIT_CONFIG marker keeps carrying the lockdown when the operator
 // forwards ONE git-config-route name with a host value — the per-slot rule
 // (#7891 N1): the claim exempts only its own slot, and AF_GIT_FORWARDED
-// tells the agent-server which names were claimed. Only claiming EVERY
-// route slot lifts the lockdown whole.
+// tells the agent-server which names were claimed. On credential-mount the
+// XDG slot is never claimable — af re-asserts XDG_CONFIG_HOME to the
+// session home after run_args, so the forward never reaches the container
+// and the name is dropped from the claim set entirely (#7891 F15/F16).
 func TestRunContainer_AfGitConfigMarkerFollowsTheClaim(t *testing.T) {
 	t.Setenv("GIT_CONFIG_GLOBAL", "/operator/global.gitconfig")
 	runCalled, _, runArgv := provisionDockerCredentialGrantPassthrough(t, tmux.ProgramGemini,
@@ -250,6 +252,9 @@ func TestRunContainer_AfGitConfigMarkerFollowsTheClaim(t *testing.T) {
 	require.Contains(t, joined, "AF_GIT_FORWARDED=",
 		"the marker must carry the host-valued claim set for the agent-server's git")
 
+	// Claiming every DELIVERABLE route name: the other slots exempt, but
+	// the undeliverable XDG forward can never claim its slot — the marker
+	// stays emitted and must not name XDG_CONFIG_HOME.
 	t.Setenv("GIT_CONFIG_SYSTEM", "/operator/gitconfig")
 	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
 	t.Setenv("XDG_CONFIG_HOME", "/operator/xdg")
@@ -257,8 +262,12 @@ func TestRunContainer_AfGitConfigMarkerFollowsTheClaim(t *testing.T) {
 		nil, []string{"GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM", "GIT_CONFIG_NOSYSTEM", "XDG_CONFIG_HOME"})
 	require.True(t, runCalled)
 	joined = strings.Join(runArgv, "\x00")
-	require.NotContains(t, joined, "AF_GIT_CONFIG",
-		"claiming every route slot lifts the lockdown whole — no marker may be emitted")
+	require.Contains(t, joined, "-e\x00AF_GIT_CONFIG=/root/.af-gitconfig\x00",
+		"the undeliverable XDG claim must not lift the lockdown — af's git would read the image-controlled home")
+	require.NotContains(t, joined, "AF_GIT_FORWARDED=GIT_CONFIG_GLOBAL,GIT_CONFIG_SYSTEM,GIT_CONFIG_NOSYSTEM,XDG_CONFIG_HOME",
+		"AF_GIT_FORWARDED must not carry XDG_CONFIG_HOME — it is re-asserted away before the container sees it")
+	require.Contains(t, joined, "AF_GIT_FORWARDED=GIT_CONFIG_GLOBAL,GIT_CONFIG_NOSYSTEM,GIT_CONFIG_SYSTEM",
+		"the deliverable claims still reach the agent-server's git")
 }
 
 // TestRunContainer_OperatorForwardKeepsFirstPartyEndpoint is the

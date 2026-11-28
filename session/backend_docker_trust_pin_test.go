@@ -175,30 +175,41 @@ func TestTrustPathUnpinnedScriptLockdownIsPerSlot(t *testing.T) {
 		t.Fatalf("an ambient NOSYSTEM must be dropped so the claimed system file is read: %q", got)
 	}
 
-	// Forwarded XDG_CONFIG_HOME with the global slot unclaimed: the claimed
-	// file only reaches git if af's GIT_CONFIG_GLOBAL redirect points AT it
-	// — a GIT_CONFIG_GLOBAL export replaces the XDG global too, so af's own
-	// file would silently shadow the operator's claim (Codex on #7891 N1).
-	// The image's ~/.gitconfig stays shadowed either way.
+	// Forwarded XDG_CONFIG_HOME with the global slot unclaimed: on
+	// credential-mount the claim is undeliverable (af re-asserts
+	// XDG_CONFIG_HOME to the session home after run_args), so the name is
+	// dropped from the claim set entirely — af's file stays the global and
+	// the redirect would otherwise point at the image-controlled home's
+	// git/config (#7891 F15). On the ACCOUNT path the forward does reach
+	// the container, so the claim holds there: GIT_CONFIG_GLOBAL redirects
+	// at the claimed file — an export replaces the XDG global too, so af's
+	// own file would silently shadow it (Codex on #7891 N1).
 	t.Setenv("XDG_CONFIG_HOME", "/operator/xdg")
 	got = newP("XDG_CONFIG_HOME").trustPathUnpinnedScript("true")
-	if !strings.Contains(got, `export GIT_CONFIG_GLOBAL="${XDG_CONFIG_HOME%/}/git/config"`) {
-		t.Fatalf("an XDG-only claim must redirect af's global at the claimed XDG file: %q", got)
-	}
-	for _, clause := range []string{"af-gitconfig", "unset XDG_CONFIG_HOME"} {
-		if strings.Contains(got, clause) {
-			t.Fatalf("the claimed XDG slot must reach git — %q would shadow or drop it: %q", clause, got)
-		}
-	}
-	for _, clause := range []string{"export GIT_CONFIG_NOSYSTEM=1", "unset GIT_CONFIG_SYSTEM"} {
+	for _, clause := range []string{
+		"export GIT_CONFIG_GLOBAL='/root/.af-gitconfig'", "unset XDG_CONFIG_HOME",
+	} {
 		if !strings.Contains(got, clause) {
-			t.Fatalf("the unclaimed slots stay af's under an XDG claim — %q must still apply: %q", clause, got)
+			t.Fatalf("an undeliverable XDG claim must not exempt its slot — %q must still apply: %q", clause, got)
 		}
+	}
+	if strings.Contains(got, "${XDG_CONFIG_HOME%/}/git/config") {
+		t.Fatalf("the XDG redirect must never point at the image-controlled home: %q", got)
+	}
+	got = (&dockerProvisioner{
+		spec: ProvisionSpec{
+			Account:               sessionenv.Account{Agent: "gemini", Dir: "/acct"},
+			SessionEnvPassthrough: []string{"XDG_CONFIG_HOME"},
+		},
+	}).trustPathUnpinnedScript("true")
+	if !strings.Contains(got, `export GIT_CONFIG_GLOBAL="${XDG_CONFIG_HOME%/}/git/config"`) {
+		t.Fatalf("an XDG-only claim must redirect af's global at the claimed XDG file where the forward is deliverable: %q", got)
 	}
 	os.Unsetenv("XDG_CONFIG_HOME")
 
-	// Every route name claimed: the lockdown lifts whole — the ambient
-	// environment IS the operator's claim.
+	// Every DELIVERABLE route name claimed on credential-mount: the XDG
+	// slot can never be claimed there (the forward never reaches the
+	// container), so its unset stands while the other slots exempt.
 	t.Setenv("GIT_CONFIG_GLOBAL", "/operator/global.gitconfig")
 	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
 	t.Setenv("XDG_CONFIG_HOME", "/operator/xdg")
@@ -206,10 +217,31 @@ func TestTrustPathUnpinnedScriptLockdownIsPerSlot(t *testing.T) {
 		trustPathUnpinnedScript("true")
 	for _, clause := range []string{
 		"export GIT_CONFIG_NOSYSTEM", "export GIT_CONFIG_GLOBAL", "af-gitconfig",
+		"unset GIT_CONFIG_SYSTEM", "unset GIT_CONFIG_NOSYSTEM",
+	} {
+		if strings.Contains(got, clause) {
+			t.Fatalf("claiming the deliverable route names exempts their slots — %q must not appear: %q", clause, got)
+		}
+	}
+	if !strings.Contains(got, "unset XDG_CONFIG_HOME") {
+		t.Fatalf("XDG_CONFIG_HOME cannot be claimed on credential-mount — its unset must stand: %q", got)
+	}
+
+	// On the account path every route name claimed lifts the lockdown
+	// whole — XDG is deliverable there, so the ambient environment IS the
+	// operator's claim.
+	got = (&dockerProvisioner{
+		spec: ProvisionSpec{
+			Account:               sessionenv.Account{Agent: "gemini", Dir: "/acct"},
+			SessionEnvPassthrough: afGitConfigRouteNames,
+		},
+	}).trustPathUnpinnedScript("true")
+	for _, clause := range []string{
+		"export GIT_CONFIG_NOSYSTEM", "export GIT_CONFIG_GLOBAL", "af-gitconfig",
 		"unset GIT_CONFIG_SYSTEM", "unset XDG_CONFIG_HOME", "unset GIT_CONFIG_NOSYSTEM",
 	} {
 		if strings.Contains(got, clause) {
-			t.Fatalf("claiming every route name lifts the lockdown — %q must not appear: %q", clause, got)
+			t.Fatalf("claiming every route name lifts the lockdown on the account path — %q must not appear: %q", clause, got)
 		}
 	}
 

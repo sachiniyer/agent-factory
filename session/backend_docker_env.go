@@ -93,6 +93,12 @@ func (p *dockerProvisioner) forwardedEnvNames() []string {
 	if len(p.credentialMounts) > 0 {
 		twins, _ := credentialMountGroupForwarding(p.spec.SessionEnvPassthrough, source)
 		names = append(names, twins...)
+		// XDG_CONFIG_HOME is never deliverable on this path: af
+		// re-asserts it to the session home after run_args, so the
+		// operator's value never reaches the container — and a claim
+		// here would redirect GIT_CONFIG_GLOBAL at the re-asserted
+		// (image-controlled) home's git/config instead (#7891 F15).
+		names = slices.DeleteFunc(names, func(n string) bool { return n == "XDG_CONFIG_HOME" })
 	}
 	return names
 }

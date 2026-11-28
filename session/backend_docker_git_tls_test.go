@@ -152,13 +152,32 @@ func TestAfGitConfigMarkerEmittedOnCredentialPaths(t *testing.T) {
 	require.Contains(t, args, "AF_GIT_FORWARDED=GIT_CONFIG_GLOBAL",
 		"the marker carries the host-valued claim set for the agent-server (N2)")
 
-	// Only claiming EVERY route name lifts the lockdown whole.
+	// On credential-mount the XDG slot can never be claimed — the forward
+	// is re-asserted away before the container sees it (#7891 F15/F16), so
+	// the name is dropped from the claim set entirely: the marker stays
+	// emitted even when all four route names are forwarded, and
+	// AF_GIT_FORWARDED must not carry the undeliverable name.
 	t.Setenv("GIT_CONFIG_SYSTEM", "/operator/gitconfig")
 	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
 	t.Setenv("XDG_CONFIG_HOME", "/operator/xdg")
 	p.spec.SessionEnvPassthrough = afGitConfigRouteNames
+	forwarded := p.forwardedEnvNames()
+	args = p.afGitConfigMarkerArgs(forwarded)
+	require.Contains(t, args, "AF_GIT_CONFIG=/root/.af-gitconfig",
+		"the undeliverable XDG claim cannot lift the lockdown on credential-mount")
+	require.NotContains(t, forwarded, "XDG_CONFIG_HOME",
+		"XDG_CONFIG_HOME must drop from the claim set — it is re-asserted before the container sees it")
+	require.NotContains(t, strings.Join(args, "\x00"), "XDG_CONFIG_HOME",
+		"AF_GIT_FORWARDED must not name it — af's git would redirect into the image-controlled home")
+
+	// On the account path — where the XDG forward IS deliverable — claiming
+	// every route name still lifts the lockdown whole.
+	p = &dockerProvisioner{spec: ProvisionSpec{
+		Account:               sessionenv.Account{Agent: "gemini", Dir: "/acct"},
+		SessionEnvPassthrough: afGitConfigRouteNames,
+	}}
 	require.Empty(t, p.afGitConfigMarkerArgs(p.forwardedEnvNames()),
-		"claiming every route slot lifts the lockdown whole — no marker")
+		"claiming every route slot lifts the lockdown whole on the account path — no marker")
 
 	// AF_GIT_CONFIG and AF_GIT_FORWARDED are refused to run_args on both
 	// paths — a repo value would aim af's git at a repo file or smuggle
@@ -335,6 +354,54 @@ func provisionDockerCapturingExecs(t *testing.T, program string, passthrough []s
 		SessionEnvPassthrough: passthrough,
 	})
 	return execScripts
+}
+
+// #7891 F15/F16 (the hard-stop fix): a forwarded XDG_CONFIG_HOME on a
+// credential-mount session must leave af's git on the af-owned global.
+// The forward is re-asserted to the session home after run_args and can
+// never deliver the operator's value, so the claim is dropped everywhere
+// af's git consults it: the preamble unsets the name and keeps the
+// af-file export (the redirect would otherwise aim at the re-asserted —
+// image-controlled — home's git/config), and AF_GIT_FORWARDED never
+// names it for the agent-server's git. On the account path the forward
+// IS deliverable, so the claim stands there.
+func TestXdgClaimOnCredentialMountKeepsAfGitGlobal(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", "/operator/xdg")
+	p := &dockerProvisioner{
+		credentialMounts: []string{"mount"},
+		spec:             ProvisionSpec{SessionEnvPassthrough: []string{"XDG_CONFIG_HOME"}},
+	}
+	forwarded := p.forwardedEnvNames()
+	require.NotContains(t, forwarded, "XDG_CONFIG_HOME",
+		"the undeliverable forward must drop from the claim set on credential-mount")
+	require.NotContains(t, p.containerEnvironmentNames(), "XDG_CONFIG_HOME",
+		"AF_GIT_FORWARDED is built from this list — the undeliverable name must not reach it")
+
+	claimed := p.afGitConfigClaims(forwarded)
+	require.False(t, claimed["XDG_CONFIG_HOME"], "the XDG slot must stay af's on credential-mount")
+	require.True(t, afGitConfigActive(claimed))
+
+	got := p.trustPathUnpinnedScript("true")
+	require.Contains(t, got, "export GIT_CONFIG_GLOBAL='/root/.af-gitconfig'",
+		"af's own file stays the global — the claim cannot redirect it")
+	require.Contains(t, got, "unset XDG_CONFIG_HOME",
+		"the undeliverable name is unset like every unclaimed route name")
+	require.NotContains(t, got, "git/config",
+		"the XDG redirect must never point at the image-controlled home")
+
+	require.NotContains(t, strings.Join(p.afGitConfigMarkerArgs(forwarded), "\x00"), "XDG_CONFIG_HOME",
+		"AF_GIT_FORWARDED must not name the undeliverable claim for the agent-server's git")
+
+	// The account path delivers the forward, so the claim — and the
+	// redirect — stand there.
+	p = &dockerProvisioner{spec: ProvisionSpec{
+		Account:               sessionenv.Account{Agent: "gemini", Dir: "/acct"},
+		SessionEnvPassthrough: []string{"XDG_CONFIG_HOME"},
+	}}
+	forwarded = p.forwardedEnvNames()
+	require.Contains(t, forwarded, "XDG_CONFIG_HOME",
+		"the deliverable forward keeps its claim on the account path")
+	require.True(t, p.afGitConfigClaims(forwarded)["XDG_CONFIG_HOME"])
 }
 
 // M1 (#7891 N4): the clone the provisioning boundary runs must carry
