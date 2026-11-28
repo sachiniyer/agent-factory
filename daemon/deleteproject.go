@@ -707,26 +707,55 @@ func (m *Manager) deleteProject(resolved deleteProjectTarget) (DeleteProjectResu
 	for _, id := range fenced {
 		escaped = append(escaped, m.repoSessionTitlesLocked(id, false)...)
 	}
+	var unvettedSets map[string]*liveRepoIdentity
 	if resolved.absentBelonging != nil {
 		// The absent-root scan cleared every live repository identity it saw
 		// at resolution; a session materialized during the deregister under
-		// an identity it never saw is unvetted, and unvetted fails closed the
-		// same way a suspect does (#7854). Identities proven clear stay clear
-		// for later arrivals — the evidence that cleared them names the
-		// clone, not the session.
-		escaped = append(escaped, resolved.absentBelonging.unvettedTitles(m.liveSessionTitlesByRepoLocked())...)
+		// an identity it never saw is unvetted (#7854). Identities proven
+		// clear stay clear for later arrivals — the evidence that cleared
+		// them names the clone, not the session.
+		unvettedSets = resolved.absentBelonging.unvettedIdentities(m.liveRepoIdentitiesLocked())
 	}
 	m.mu.Unlock()
-	if len(escaped) > 0 {
+	// Vet the unvetted OUTSIDE m.mu, the same way the resolution scan did —
+	// the marker evidence still reads because it lives in the clone's common
+	// directory and survives the row's removal. A session vetted owner or
+	// unproven here fails closed exactly like a resolution-time suspect.
+	var unvetted []absentRootSuspect
+	if resolved.absentBelonging != nil {
+		unvetted = resolved.absentBelonging.vetIdentities(unvettedSets)
+	}
+	if len(escaped) > 0 || len(unvetted) > 0 {
 		escaped = session.DedupeSorted(escaped)
-		if result.Deregistered {
-			return result, deleteProjectFailure(result, fmt.Errorf(
-				"delete project %s: archived %d, tore down %d, but a session materialized for this project during its deregister (%v); the project's registry record was removed but a live session survives — delete the project again to archive it and finish (a retry re-archives nothing that is already archived)",
-				repoID, len(result.Archived), len(result.Killed), escaped))
+		var clauses []string
+		switch {
+		case len(escaped) > 0 && result.Deregistered:
+			clauses = append(clauses, fmt.Sprintf(
+				"a session materialized for this project during its deregister (%v); the project's registry record was removed but a live session survives — delete the project again to archive it and finish (a retry re-archives nothing that is already archived)",
+				escaped))
+		case len(escaped) > 0:
+			clauses = append(clauses, fmt.Sprintf(
+				"a session materialized for this project during its deregister (%v); the project was NOT removed — delete again to finish",
+				escaped))
+		}
+		if len(unvetted) > 0 {
+			if result.Deregistered {
+				// The record is already gone, so a retry cannot vet these —
+				// it finds no row, runs no scan and fences nothing. The
+				// remedy is archiving the sessions that are the removed
+				// project's.
+				clauses = append(clauses, fmt.Sprintf(
+					"the registry record was removed but session(s) could not be vetted against it, and no retry vets them now — it finds no row, runs no scan and fences nothing — %s",
+					absentRootEscapedReports(unvetted)))
+			} else {
+				clauses = append(clauses, fmt.Sprintf(
+					"the project was NOT removed and session(s) arrived under an identity af could not clear — archive the ones that are this project's (%s), then delete again to finish",
+					absentRootEscapedReports(unvetted)))
+			}
 		}
 		return result, deleteProjectFailure(result, fmt.Errorf(
-			"delete project %s: archived %d, tore down %d, but a session materialized for this project during its deregister (%v); the project was NOT removed — delete again to finish",
-			repoID, len(result.Archived), len(result.Killed), escaped))
+			"delete project %s: archived %d, tore down %d, but %s",
+			repoID, len(result.Archived), len(result.Killed), strings.Join(clauses, "; ")))
 	}
 
 	m.info().Printf("deleted project %s: archived %d session(s), tore down %d in-place session(s)", repoID, len(result.Archived), len(result.Killed))

@@ -273,23 +273,44 @@ func projectRootUsesGitCommonDir(root, commonDir string) bool {
 	return err == nil && sameProjectPath(binding.gitCommonDir, commonDir)
 }
 
-// CheckoutIDInCommonDir reads af's checkout marker directly inside a
-// repository's common directory — the clone identity a registered project
-// records durably — without resolving a workspace or asking git's worktree
-// ledger anything. It is the ownership evidence a delete can consult for a
-// session's BARE identity root: `git worktree prune` erases the worktree
-// ledger on every archive, but nothing in af deletes the marker (#7854). The
-// read parks on the shared marker flight and the wait runs under ctx, so a
-// common directory on an unresponsive filesystem cannot wedge the caller — a
-// deadline that ends the wait reports an error carrying the flight's
-// completion, never a verdict of "absent".
-func CheckoutIDInCommonDir(ctx context.Context, commonDir string) (string, bool, error) {
-	markerName, err := checkoutMarkerName()
-	if err != nil {
-		return "", false, err
+// CheckoutIDsInCommonDir lists every checkout id a repository's common
+// directory durably holds — under ANY home's marker file name. A registry row
+// records the marker VALUE, not which home minted it, so the ownership
+// question a delete asks is "does any checkout-id-* here carry this id", not
+// "is this home's file present" (#7854, #7853's ledger lesson: the read is
+// af's own evidence, never git's worktree records).
+//
+// The return distinguishes three answers the caller must not conflate:
+// (ids, true, nil) means the marker directory was listed, empty or not;
+// (_, false, nil) means it provably does not exist — registration mints into
+// the common directory that owns a checkout, so a clone with no marker
+// directory never hosted one; and (_, _, err) means evidence exists or might
+// exist but could not be read — a marker directory that cannot be listed, or
+// a marker file that cannot be verified — which is never "absent".
+//
+// The read is synchronous and bounded by the CALLER: the daemon's ownership
+// scan runs it inside a parked, time-boxed observation.
+func CheckoutIDsInCommonDir(commonDir string) (ids []string, present bool, err error) {
+	entries, err := os.ReadDir(filepath.Join(commonDir, checkoutMarkerDirName))
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, false, nil
 	}
-	flight := checkoutMarkerRead(filepath.Join(commonDir, checkoutMarkerDirName, markerName))
-	return awaitCheckoutMarkerRead(ctx, commonDir, flight)
+	if err != nil {
+		return nil, false, fmt.Errorf("list checkout markers under %s: %w", filepath.Join(commonDir, checkoutMarkerDirName), err)
+	}
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasPrefix(entry.Name(), checkoutMarkerFilePrefix) {
+			continue
+		}
+		id, exists, err := readCheckoutID(filepath.Join(commonDir, checkoutMarkerDirName, entry.Name()))
+		if err != nil {
+			return nil, false, err
+		}
+		if exists {
+			ids = append(ids, id)
+		}
+	}
+	return ids, true, nil
 }
 
 // projectBindingIdentityRaceHookForTest, when non-nil, runs between the probes

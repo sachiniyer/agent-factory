@@ -549,21 +549,31 @@ func (m *Manager) resolveDeleteProjectTarget(req DeleteProjectRequest) (deletePr
 	// an unvetted identity fails closed too. Nothing has been mutated yet, so
 	// a refusal here is literally "nothing was changed".
 	var absentBelonging *absentRootBelonging
-	// The scan asks the same question of the row whichever selector reached
-	// it: the derived id when the PATH matched the record, and the
-	// unattributed legacy record when the REQUESTED identity is the hash of
-	// its recorded root — both name the same absent root and deregister it.
+	// The scan guards exactly the deletes that DEREGISTER the absent-rooted
+	// row: the path and derived-id forms, which selected a record the durable
+	// removal below will take. A delete by the row's own path-hash identity
+	// reaches the same row only as unattributed — DeregisterProject matches
+	// nothing for it (a legacy row recorded no RepoID), so the only thing a
+	// scan there could add is a refusal that protects nothing, and master's
+	// unattributed refusal already names the record and its sessions.
 	belongingRoot, belongingCheckoutID := "", ""
-	switch {
-	case rowFound && config.IsDerivedRepoID(repoID) && repoPath != "":
+	if rowFound && config.IsDerivedRepoID(repoID) && repoPath != "" {
 		belongingRoot, belongingCheckoutID = repoPath, recordedCheckoutID
-	case unattributed.ID != "":
-		belongingRoot, belongingCheckoutID = unattributed.Root, unattributed.CheckoutID
 	}
 	if belongingRoot != "" {
-		if absent, err := boundedRecordRootAbsent(belongingRoot); err != nil {
+		absent, timedOut, err := boundedRecordRootAbsentVerdict(belongingRoot)
+		switch {
+		case err != nil:
 			return deleteProjectTarget{repoID: repoID}, fmt.Errorf("delete project %s: could not determine whether its recorded root %s is absent, so af cannot establish which live sessions it owned — nothing was changed; repair access to the path and retry: %w", repoID, belongingRoot, err)
-		} else if absent {
+		case timedOut:
+			// "Unanswered" is NOT "present": treating the lapse as presence
+			// selects the unscanned path, which deregisters the row exactly
+			// like master's delete does — the orphan this scan exists to
+			// prevent. The honest answer to a probe that did not answer is a
+			// refusal to proceed, and the remedy is the retry that gets a
+			// responsive filesystem.
+			return deleteProjectTarget{repoID: repoID}, fmt.Errorf("delete project %s: could not observe whether its recorded root %s is absent within %s, so af cannot establish which live sessions it owned — nothing was changed; retry the delete", repoID, belongingRoot, boundedRecordRootAbsentTimeout)
+		case absent:
 			belonging := m.absentRootBelongingScan(belongingCheckoutID)
 			if len(belonging.suspects) > 0 {
 				return deleteProjectTarget{repoID: repoID}, absentRootBelongingRefusal(repoID, belongingRoot, belonging.suspects)
@@ -590,6 +600,21 @@ func (m *Manager) resolveDeleteProjectTarget(req DeleteProjectRequest) (deletePr
 // reports NOT absent, which declines whatever the caller would have done on
 // absence — the conservative direction every reader of this signal takes.
 func boundedRecordRootAbsent(root string) (bool, error) {
+	absent, timedOut, err := boundedRecordRootAbsentVerdict(root)
+	if timedOut {
+		log.WarningLog.Printf("delete project: could not observe recorded root %s within %s; treating it as present, which declines the identity-matched deregistration this pass", root, boundedRecordRootAbsentTimeout)
+		return false, nil
+	}
+	return absent, err
+}
+
+// boundedRecordRootAbsentVerdict is the three-answer form for the caller
+// whose safe direction on "unanswered" is NOT "present" but "refuse": the
+// absent-root ownership scan (#7854) runs only when absence is PROVEN, and a
+// lapsed bound must refuse the delete rather than select the unscanned path.
+// It shares the recordRootAbsentProbe seam so a test can hold the observation
+// open the way an unresponsive mount does.
+func boundedRecordRootAbsentVerdict(root string) (absent, timedOut bool, err error) {
 	type answer struct {
 		absent bool
 		err    error
@@ -605,10 +630,9 @@ func boundedRecordRootAbsent(root string) (bool, error) {
 	}()
 	select {
 	case a := <-done:
-		return a.absent, a.err
+		return a.absent, false, a.err
 	case <-time.After(boundedRecordRootAbsentTimeout):
-		log.WarningLog.Printf("delete project: could not observe recorded root %s within %s; treating it as present, which declines the identity-matched deregistration this pass", root, boundedRecordRootAbsentTimeout)
-		return false, nil
+		return false, true, nil
 	}
 }
 
