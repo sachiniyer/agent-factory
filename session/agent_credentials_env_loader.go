@@ -239,6 +239,9 @@ func credentialMountDeniedReason(agent, name string) (string, bool) {
 	if _, ok := credentialMountSharedGitEnvNames[name]; ok {
 		return "it injects git configuration through the environment for every git run in the container, and af pins it defined-and-empty", true
 	}
+	if _, ok := credentialMountSharedGitTLSEnvNames[name]; ok {
+		return "it changes the TLS trust or verification of af's credentialed git runs (clone, credential config, restore fetch) inside the container — the name stays af's or the operator's own through session_env_passthrough, never the repository's", true
+	}
 	if strings.HasPrefix(name, "GIT_CONFIG_KEY_") || strings.HasPrefix(name, "GIT_CONFIG_VALUE_") {
 		return "it supplies the indexed pairs a forwarded GIT_CONFIG_COUNT would activate — the family stays af's or the operator's own through session_env_passthrough, never the repository's", true
 	}

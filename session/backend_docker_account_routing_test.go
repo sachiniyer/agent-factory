@@ -318,18 +318,23 @@ func TestAccountDockerRunArgs_NoRegression_GeminiKeepIfSetProxyKeepsRemedy(t *te
 	}
 }
 
-// TestAccountDockerRunArgs_NoRegression_GitConfigForClaudeCodex pins that the
-// GIT_CONFIG_* family stays allowed for claude and codex (agents that pin
-// nothing) — the safe.directory workaround rides run_args (#7555).
-func TestAccountDockerRunArgs_NoRegression_GitConfigForClaudeCodex(t *testing.T) {
-	for _, agent := range []string{tmux.ProgramClaude, tmux.ProgramCodex} {
+// TestAccountDockerRunArgs_RefusesGitConfigForEveryAgent pins #7891 N3: the
+// GIT_CONFIG_* family is refused for claude and codex too — the preamble
+// unsets it for af's credentialed git and the account env drops it for the
+// agent's own, so accepting it silently dropped a repo value that master
+// once honoured. The remedy the refusal names is session_env_passthrough.
+func TestAccountDockerRunArgs_RefusesGitConfigForEveryAgent(t *testing.T) {
+	for _, agent := range []string{tmux.ProgramClaude, tmux.ProgramCodex, tmux.ProgramGemini} {
 		for _, args := range [][]string{
 			{"-e", "GIT_CONFIG_COUNT=1"},
+			{"-e", "GIT_CONFIG_PARAMETERS=x"},
 			{"-e", "GIT_CONFIG_KEY_0=safe.directory"},
 			{"-e", "GIT_CONFIG_VALUE_0=/work"},
 		} {
 			err := validateAccountDockerRunArgs(args, agent, nil)
-			require.NoErrorf(t, err, "%s: %v must stay allowed (safe.directory workaround)", agent, args)
+			require.Errorf(t, err, "%s: %v must be refused — the value reaches no git af honours", agent, args)
+			require.Contains(t, err.Error(), "session_env_passthrough",
+				"%s: the refusal must name the forward remedy", agent)
 		}
 	}
 }

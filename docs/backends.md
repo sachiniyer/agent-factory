@@ -242,7 +242,9 @@ user's real home and mounts it only if it exists, so:
     `HOME`/`XDG_*`, `SHELL`, GitHub token and SSH-agent names, `GH_HOST`,
     `DBUS_SESSION_BUS_ADDRESS`, gpg's keyring and agent names, git's config
     roots and credential-answer programs (`GIT_CONFIG_*`, `GIT_SSH*`/
-    `GIT_ASKPASS`/`SSH_ASKPASS`), editor/pager names, af's own state and tmux
+    `GIT_ASKPASS`/`SSH_ASKPASS`), git's TLS names (`GIT_SSL_*`,
+    `GIT_PROXY_SSL_*`, `GIT_HTTP_PROXY_AUTHMETHOD`), editor/pager names,
+    af's own state and tmux
     names (`AF_*`, `AGENT_FACTORY_*`, `TMUX*`), and the endpoint names an
     agent's own `.env` loader can restore after the boundary (gemini's
     `CODE_ASSIST_*` and `GOOGLE_*_BASE_URL`) — plus the program-choice name
@@ -293,7 +295,10 @@ user's real home and mounts it only if it exists, so:
       the mount's real roots, `SHELL` to `/bin/sh`, `PATH` to the image's own
       `Config.Env` `PATH`, `GIT_CONFIG_GLOBAL`/`GIT_CONFIG_SYSTEM` to the
       locations git would consult under the boundary's own roots (an empty
-      pin there is not neutral — it breaks `git config --global`), the
+      pin there is not neutral — it breaks `git config --global`),
+      `GIT_CONFIG_NOSYSTEM` to `1` so the image's `/etc/gitconfig` cannot
+      hand any git af or the agent runs an `http.sslVerify=false` or a
+      repo-chosen `sslCAInfo` (#7891), the
       program-selector names to working defaults — `GIT_SSH`/`GIT_SSH_COMMAND`
       to `ssh` (empty literally names `""` as the executable and every SSH
       transport fails), `GIT_ASKPASS`/`SSH_ASKPASS`/`EDITOR`/`VISUAL` to
@@ -351,9 +356,27 @@ user's real home and mounts it only if it exists, so:
       environment-config names `GIT_CONFIG_COUNT` and
       `GIT_CONFIG_PARAMETERS` (git parses `""` as count 0 — making every
       indexed `GIT_CONFIG_KEY_*`/`GIT_CONFIG_VALUE_*` pair inert — and as
-      zero `-c` pairs) — so the loader finds every link claimed and the
-      agent's own read falls back to the safe
-      default. Every pinned or re-asserted name is one the agent-server's
+      zero `-c` pairs). git's own TLS names are classified as a group
+      (#7891) — the names git 2.43 actually reads (`GIT_SSL_NO_VERIFY`,
+      `GIT_SSL_CAINFO`, `GIT_SSL_CAPATH`, `GIT_SSL_CERT`, `GIT_SSL_KEY`,
+      `GIT_SSL_CERT_TYPE`, `GIT_SSL_KEY_TYPE`,
+      `GIT_SSL_CERT_PASSWORD_PROTECTED`, `GIT_SSL_VERSION`,
+      `GIT_SSL_CIPHER_LIST`, the `GIT_PROXY_SSL_*` twins,
+      `GIT_HTTP_PROXY_AUTHMETHOD`, and `GIT_TEMPLATE_DIR`) are never
+      pinned and never resolved: `GIT_SSL_NO_VERIFY=` itself disables
+      verification (git reads it by getenv, so `=0` disables too), an env
+      `GIT_SSL_CAINFO` outranks a config-file CA the operator forwarded,
+      and a resolved bundle widens a dir-only forward — so the only safe
+      spelling is absent. The provisioning preamble unsets each one an
+      image or `docker.run_args` could set, and every filtered hop simply
+      drops them — while a name the operator forwards with a host value
+      reaches git verbatim. The agent's own git in the pane keeps master's
+      pins and config writes (safe.directory, identity) unchanged — the
+      lockdown scopes to af's own git only, and the residual there is
+      #7528: af's credential helper is persisted into the clone's
+      `.git/config`, so the agent's own git carries af's credential too;
+      closing that is its own issue. Every pinned or re-asserted name is
+      one the agent-server's
       exec filter admits, so the boundary survives the hop to the agent
       process itself.
 
@@ -374,18 +397,66 @@ user's real home and mounts it only if it exists, so:
       repo-written `sh` to intercept the agent-server launch. Commands
       *inside* those scripts (`git`, `cat`, `chmod`) resolve through the
       `PATH` re-asserted above — the image's own binaries. Each script also
-      opens by unsetting the session's pinned `SSL_CERT_FILE`/`SSL_CERT_DIR`
-      — the two names whose measured empty read is a path — so no
-      provisioning child can inherit a defined-empty name an OpenSSL-family
-      TLS stack would load as zero roots (#7889). An
-      operator-FORWARDED trust name is not a pin and is never unset — the
-      clone needs that CA to reach a private-CA remote.
+      opens by unsetting the session's trust names — the path-valued pins
+      (`SSL_CERT_FILE`/`SSL_CERT_DIR`) whose measured empty read is a
+      path, and every git TLS/env name (git's real env set — see above)
+      no defined or resolved value is safe for — so no provisioning child
+      can inherit a defined-empty name an OpenSSL-family TLS stack would
+      load as zero roots, or an image's claim that turns verification off
+      for af's credentialed clone and fetch (#7889, #7891). The scripts
+      then point af's OWN git at config files af created and nothing
+      else: `GIT_CONFIG_NOSYSTEM=1`, `GIT_CONFIG_GLOBAL` at a file af
+      creates fresh in the session home (only safe.directory written into
+      it), `GIT_CONFIG_SYSTEM`/`XDG_CONFIG_HOME` dropped, and `git clone
+      --template=` so no image template writes into the clone's
+      `.git/config` (the flag stays off once the operator forwards
+      `GIT_TEMPLATE_DIR`, and plain-docker and SSH clones keep the
+      unflagged argv — only the unclaimed credential boundary suppresses
+      templates); an `AF_GIT_CONFIG` marker env carries the same roots
+      to the agent-server's own fetch/push/worktree git, plus an
+      `AF_GIT_FORWARDED` marker listing the bare names the operator
+      forwarded WITH a host value — af's git admits a trust name only
+      through that set, so a claimed-but-hostless passthrough entry
+      cannot deliver the image's own `GIT_SSL_NO_VERIFY` to the
+      credentialed fetch and push; af-blanked `-e NAME=` entries are
+      admitted by their bare name (the empty value is af's, not the
+      image's), and a `GIT_CONFIG_COUNT` whose required pairs did not
+      all arrive usable is neutralized empty after the filter, the same
+      pin the container boundary installs. The route-name exemptions are
+      per-slot: forwarding `GIT_CONFIG_GLOBAL`/`GIT_CONFIG_SYSTEM`/
+      `GIT_CONFIG_NOSYSTEM`/`XDG_CONFIG_HOME` with a host value exempts
+      only that slot — the other slots stay af's, and only claiming every
+      slot lifts the lockdown whole. Two claim details follow from git's
+      own resolution: on the account path an XDG-only claim redirects
+      `GIT_CONFIG_GLOBAL` at `$XDG_CONFIG_HOME/git/config` (a
+      `GIT_CONFIG_GLOBAL` export replaces the XDG global too, so af's own
+      file would shadow the claim — the redirect still suppresses the
+      image's `~/.gitconfig`); on the credential-mount path the
+      `XDG_CONFIG_HOME` forward can never deliver — af re-asserts it to
+      the session home after run_args — so the name is dropped from the
+      claim set and `AF_GIT_FORWARDED` entirely, and the XDG slot stays
+      af's unconditionally (a claim there would redirect into the
+      image-controlled home). The
+      provisioning `safe.directory` write targets `$GIT_CONFIG_GLOBAL`
+      after the preamble resolves it — af's file, the claimed XDG file,
+      or the operator's forwarded global — with its directory created
+      when absent and the write best-effort since a claimed file may be
+      read-only or unmounted — plus the agent's own resolved global,
+      which `agentGitConfigFile` follows through the same claim and whose
+      write takes the same shape when the global slot is claimed.
+      An operator-FORWARDED trust name is
+      not a pin and is never unset — the clone needs that CA to reach a
+      private-CA remote.
     - At the exec itself: the pins also reach the in-container agent-server,
       whose pane launch re-asserts each one **immediately
       before the agent execs** — after tmux's shell hop or a tmux config file
       could have re-set one — defined-and-empty for the falsy-safe classes,
       or to the first existing platform trust-store path for
-      `SSL_CERT_FILE`/`SSL_CERT_DIR` (#7889).
+      `SSL_CERT_FILE`/`SSL_CERT_DIR` (#7889). The presence-read git names
+      are dropped there instead — no defined spelling neutralizes them —
+      unless the operator forwarded one (#7891); the agent-server applies
+      the same resolve-or-strip at startup so its non-pane children
+      (hooks, helpers) never inherit an image's trust claim either.
     - On tmux: every tmux invocation the agent-server runs carries
       `-f /dev/null`, so the image's `/etc/tmux.conf` or a `~/.tmux.conf`
       cannot pick `default-shell`, run hooks, or write session environment

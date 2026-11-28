@@ -3,6 +3,7 @@ package session
 import (
 	"encoding/json"
 	"os"
+	"slices"
 	"sort"
 	"strings"
 
@@ -165,6 +166,17 @@ var credentialMountReassertedNames = map[string]struct{}{
 	"GIT_CONFIG_SYSTEM": {},
 	"SHELL":             {},
 	"PATH":              {},
+	// AF_GIT_CONFIG selects the global gitconfig af's OWN credentialed git
+	// reads inside the container (the lockdown in trustPathUnpinnedScript
+	// and gitCommandEnvironment, #7891). A repo value would point af's git
+	// at a repository file, so it is refused to run_args and pin-exempt:
+	// af emits the real path itself where the lockdown applies.
+	"AF_GIT_CONFIG": {},
+	// AF_GIT_FORWARDED carries the host-valued claim set the agent-server's
+	// own git admits through — a repo value would smuggle trust names into
+	// af's credentialed git, so it is refused and pin-exempt the same way
+	// (#7891 N2).
+	"AF_GIT_FORWARDED": {},
 }
 
 // credentialMountSharedConfigRootNames are common-allowlist names that
@@ -178,6 +190,34 @@ var credentialMountSharedConfigRootNames = map[string]struct{}{
 	"GIT_CONFIG_NOSYSTEM": {},
 	"GNUPGHOME":           {},
 	"XDG_RUNTIME_DIR":     {},
+}
+
+// credentialMountSharedGitTLSEnvNames are the env names git 2.43 reads
+// that change TLS trust, verification, the handshake, or template content
+// — af's credentialed clone, credential-config and restore fetch all run
+// `git` over https inside the container (#7891). None can be pinned or
+// resolved (sessionenv.trustStripNames records the per-name measured
+// reads): `GIT_SSL_NO_VERIFY=` itself disables verification, an env CAINFO
+// outranks a config-file CA the operator forwarded, and a resolved bundle
+// widens a dir-only forward — so every member is UNSET at the provisioning
+// preamble instead, and simply absent at every filtered hop.
+var credentialMountSharedGitTLSEnvNames = map[string]struct{}{
+	"GIT_SSL_NO_VERIFY":                     {},
+	"GIT_SSL_CAINFO":                        {},
+	"GIT_SSL_CAPATH":                        {},
+	"GIT_SSL_CERT":                          {},
+	"GIT_SSL_KEY":                           {},
+	"GIT_SSL_VERSION":                       {},
+	"GIT_SSL_CIPHER_LIST":                   {},
+	"GIT_SSL_CERT_TYPE":                     {},
+	"GIT_SSL_KEY_TYPE":                      {},
+	"GIT_SSL_CERT_PASSWORD_PROTECTED":       {},
+	"GIT_PROXY_SSL_CAINFO":                  {},
+	"GIT_PROXY_SSL_CERT":                    {},
+	"GIT_PROXY_SSL_KEY":                     {},
+	"GIT_PROXY_SSL_CERT_PASSWORD_PROTECTED": {},
+	"GIT_HTTP_PROXY_AUTHMETHOD":             {},
+	"GIT_TEMPLATE_DIR":                      {},
 }
 
 // credentialMountSharedProgramEntries are common-allowlist names that select
@@ -492,6 +532,7 @@ func credentialMountDeniedNames(agent string) map[string]struct{} {
 	add(credentialMountReassertedNames)
 	add(credentialMountProgramLoaderNames)
 	add(credentialMountSharedGitEnvNames)
+	add(credentialMountSharedGitTLSEnvNames)
 	add(credentialMountIdentityEnvNames[agent])
 	add(credentialMountConfigRootNames[agent])
 	add(credentialMountRoutingNames[agent])
@@ -525,6 +566,15 @@ func credentialMountPinnedNames(agent string, passthrough []string) []string {
 	out := make([]string, 0)
 	for name := range credentialMountDeniedNames(agent) {
 		if _, reasserted := credentialMountReassertedNames[name]; reasserted {
+			continue
+		}
+		// The git trust names are refused to run_args but never pinned:
+		// no defined value is inert for them — `GIT_SSL_NO_VERIFY=` would
+		// itself disable verification (getenv presence read, measured on
+		// git 2.43), and a resolved CA name outranks or widens an
+		// operator-forwarded trust — so they are unset at the provisioning
+		// preamble and simply absent at every filtered hop (#7891).
+		if sessionenv.TrustStripName(name) {
 			continue
 		}
 		// The loader names are refused to run_args but never pinned: an
@@ -829,6 +879,13 @@ func (p *dockerProvisioner) containerEnvironmentNames() []string {
 			names = append(names, twins...)
 			sort.Strings(names)
 		}
+		// XDG_CONFIG_HOME is re-asserted to the session home after
+		// run_args on this path, so the operator's forward can never
+		// reach the container — and AF_GIT_FORWARDED (built from this
+		// list) must not name it either, or af's git would redirect
+		// GIT_CONFIG_GLOBAL at the re-asserted home's image-controlled
+		// git/config (#7891 F16).
+		names = slices.DeleteFunc(names, func(n string) bool { return n == "XDG_CONFIG_HOME" })
 	}
 	if p.spec.Account.Dir != "" {
 		names = append(names,

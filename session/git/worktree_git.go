@@ -291,6 +291,118 @@ func (e endedByContext) Error() string   { return e.err.Error() }
 func (e endedByContext) Unwrap() []error { return []error{e.err, errEndedByContext} }
 
 func (g *GitWorktree) gitCommandEnvironment() []string {
-	return append(sessionenv.Filter(os.Environ(), "", g.HookEnvironment()),
+	return append(afGitScopedEnvironment(sessionenv.Filter(os.Environ(), "", g.HookEnvironment())),
 		"GIT_TERMINAL_PROMPT=0", "LC_ALL=C")
+}
+
+// afGitConfigEnvName marks "af's own git reads only config files af
+// created" on a credential-carrying docker session: the runtime emits it
+// into the container env with the af-owned global gitconfig path, and the
+// agent-server's env filter admits it, so it is present exactly where the
+// lockdown was applied for provisioning children (#7891 R1). It is unset
+// on the host daemon, on plain sessions, and whenever the operator claimed
+// every git-config route slot — in all of which git keeps its ambient
+// config roots unchanged.
+const afGitConfigEnvName = "AF_GIT_CONFIG"
+
+// afGitForwardedEnvName carries the forwarded-WITH-value name set the
+// runtime computed on the daemon side, so af's own git can tell an
+// operator claim from an image value the env filter admitted. A
+// passthrough-listed name whose host had no value emits no -e; the
+// image's own ENV is what the claim then admits, and af's git must not
+// honour it (#7891 N2). Emitted alongside AF_GIT_CONFIG.
+const afGitForwardedEnvName = "AF_GIT_FORWARDED"
+
+// afGitScopedEnvironment points git's config reads at the af-owned global
+// file when the lockdown marker is set, one slot at a time (#7891 N1): a
+// route name the operator forwarded with a host value keeps the
+// operator's value and exempts only its own slot — a claimed system file
+// stays claimed (no NOSYSTEM asserted over it), a claimed global keeps
+// its file. Every UNclaimed slot gets af's root: NOSYSTEM=1, the af-owned
+// GLOBAL file, SYSTEM and XDG redirects dropped. And every trust-family
+// env name the operator did not forward with a value is dropped outright
+// (#7891 N2): a claimed-but-hostless passthrough name would otherwise
+// admit the image's GIT_SSL_NO_VERIFY or GIT_CONFIG_* pairs into af's
+// credentialed git through the filter extras.
+func afGitScopedEnvironment(environ []string) []string {
+	file := os.Getenv(afGitConfigEnvName)
+	if file == "" {
+		return environ
+	}
+	forwarded := afGitForwardedSet()
+	out := make([]string, 0, len(environ)+2)
+	for _, entry := range environ {
+		name, _, _ := strings.Cut(entry, "=")
+		if afGitTrustName(name) && !forwarded[name] {
+			continue
+		}
+		out = append(out, entry)
+	}
+	if !forwarded["GIT_CONFIG_NOSYSTEM"] && !forwarded["GIT_CONFIG_SYSTEM"] {
+		out = append(out, "GIT_CONFIG_NOSYSTEM=1")
+	}
+	global := ""
+	if forwarded["XDG_CONFIG_HOME"] {
+		if xdg := afGitEnvValue(environ, "XDG_CONFIG_HOME"); xdg != "" {
+			// GIT_CONFIG_GLOBAL replaces the XDG global too, so an
+			// XDG-only claim delivers nothing under af's own file —
+			// redirect af's git at the claimed file, which also keeps the
+			// image's ~/.gitconfig shadowed (Codex on #7891 N1).
+			global = strings.TrimSuffix(xdg, "/") + "/git/config"
+		}
+	}
+	if !forwarded["GIT_CONFIG_GLOBAL"] {
+		if global == "" {
+			global = file
+		}
+		out = append(out, "GIT_CONFIG_GLOBAL="+global)
+	}
+	// A forwarded GIT_CONFIG_COUNT whose required pairs did not all arrive
+	// usable fails every git call it animates — the same inert empty pin
+	// the container boundary already installs (Codex on #7891).
+	out, _ = sessionenv.NeutralizeIncompleteGitConfigCount(out)
+	return out
+}
+
+// afGitEnvValue reads name's value out of a KEY=VALUE environ slice.
+func afGitEnvValue(environ []string, name string) string {
+	for _, entry := range environ {
+		if value, ok := strings.CutPrefix(entry, name+"="); ok {
+			return value
+		}
+	}
+	return ""
+}
+
+// afGitForwardedSet parses the comma-separated host-valued name set the
+// AF_GIT_FORWARDED marker carries.
+func afGitForwardedSet() map[string]bool {
+	set := make(map[string]bool)
+	for _, name := range strings.Split(os.Getenv(afGitForwardedEnvName), ",") {
+		if name != "" {
+			set[name] = true
+		}
+	}
+	return set
+}
+
+// afGitTrustName reports whether name steers af's own git's trust,
+// verification, or config roots: git's TLS env family (the same
+// TrustStripNames set the provisioning preamble unsets), the shared SSL
+// pins, the config-file route names, the env-config injection family, and
+// af's own markers. Inside the lockdown such a name survives only when
+// the operator forwarded it WITH a host value (#7891 N2); names outside
+// the family carry either allowlisted or af-emitted values.
+func afGitTrustName(name string) bool {
+	if sessionenv.TrustStripName(name) {
+		return true
+	}
+	switch name {
+	case "SSL_CERT_FILE", "SSL_CERT_DIR",
+		"GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM", "GIT_CONFIG_NOSYSTEM",
+		"XDG_CONFIG_HOME", "GIT_CONFIG_COUNT", "GIT_CONFIG_PARAMETERS",
+		afGitConfigEnvName, afGitForwardedEnvName:
+		return true
+	}
+	return strings.HasPrefix(name, "GIT_CONFIG_KEY_") || strings.HasPrefix(name, "GIT_CONFIG_VALUE_")
 }

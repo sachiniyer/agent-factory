@@ -1,9 +1,12 @@
 package session
 
 import (
+	"os"
 	"slices"
 	"strings"
 	"testing"
+
+	"github.com/sachiniyer/agent-factory/internal/sessionenv"
 )
 
 // #7889: af's own provisioning execs inherit the container env where
@@ -17,11 +20,7 @@ import (
 // restore the platform default and widen the operator's claimed trust
 // (#7889, Codex 4722476016).
 func TestTrustPathUnpinnedScriptUnsetsPinnedTrustNames(t *testing.T) {
-	p := &dockerProvisioner{credentialEnvPins: []string{
-		"SSL_CERT_FILE", "SSL_CERT_DIR", "NODE_EXTRA_CA_CERTS",
-		"REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE", "CODEX_CA_CERTIFICATE",
-		"HTTP_PROXY",
-	}}
+	p := &dockerProvisioner{credentialMounts: []string{"mount"}}
 	got := p.trustPathUnpinnedScript("git clone https://example.invalid/r.git")
 	if !strings.Contains(got, `[ -n "$SSL_CERT_DIR" ] || unset SSL_CERT_FILE`) {
 		t.Fatalf("SSL_CERT_FILE's unset must be conditioned on the dir slot being empty: %q", got)
@@ -29,7 +28,35 @@ func TestTrustPathUnpinnedScriptUnsetsPinnedTrustNames(t *testing.T) {
 	if !strings.Contains(got, `[ -n "$SSL_CERT_FILE" ] || unset SSL_CERT_DIR`) {
 		t.Fatalf("SSL_CERT_DIR's unset must be conditioned on the file slot being empty: %q", got)
 	}
-	if !strings.HasPrefix(got, "[ -n ") {
+	// Every git trust name is UNSET, never resolved (#7891 R3): a resolved
+	// env CAINFO outranks a config-file CA the operator forwarded, and a
+	// resolved bundle widens a dir-only forward — the image's value must
+	// never survive to af's credentialed git.
+	for _, name := range sessionenv.TrustStripNames() {
+		if !strings.Contains(got, "unset "+name) {
+			t.Fatalf("the preamble must unset %s — no defined or resolved value is safe for it: %q", name, got)
+		}
+	}
+	// And the env-config injection names go too: an image GIT_CONFIG_COUNT
+	// would animate whatever indexed pairs the image ships — including
+	// http.sslVerify=false — for af's credentialed git.
+	for _, name := range []string{"GIT_CONFIG_COUNT", "GIT_CONFIG_PARAMETERS"} {
+		if !strings.Contains(got, "unset "+name) {
+			t.Fatalf("the preamble must unset %s — an image count animates the image's own config pairs: %q", name, got)
+		}
+	}
+	// The config lockdown (#7891 R1): af's own git reads only files af
+	// created — system config off, global pointed at the af-owned file,
+	// both redirect names dropped.
+	for _, clause := range []string{
+		"unset GIT_CONFIG_SYSTEM", "unset XDG_CONFIG_HOME",
+		"export GIT_CONFIG_NOSYSTEM=1", "export GIT_CONFIG_GLOBAL='/root/.af-gitconfig'",
+	} {
+		if !strings.Contains(got, clause) {
+			t.Fatalf("the preamble must own every unclaimed config slot — missing %q: %q", clause, got)
+		}
+	}
+	if !strings.HasPrefix(got, "[ -n ") && !strings.HasPrefix(got, "unset ") {
 		t.Fatalf("the unset clauses must lead the script so every later command sees them: %q", got)
 	}
 	if !strings.HasSuffix(got, "git clone https://example.invalid/r.git") {
@@ -49,28 +76,208 @@ func TestTrustPathUnpinnedScriptUnsetsPinnedTrustNames(t *testing.T) {
 	}
 }
 
-// An operator-forwarded trust name is NOT a pin — credentialEnvPins excludes
-// it — and the clone needs that forwarded CA to reach a private-CA remote.
-// The preamble never unsets a name that is not pinned — it may appear only
-// as the sibling condition guarding the pinned slot's unset.
+// An operator-forwarded trust name is claimed by session_env_passthrough
+// and the clone needs that forwarded CA to reach a private-CA remote —
+// the preamble never unsets a name carrying the operator's forwarded
+// VALUE; it may appear only as the sibling condition guarding a pinned
+// slot's unset (#7891 R6: a passthrough claim the daemon env lacks emits
+// no -e, so exempting the claim would let the image's own ENV through —
+// the exemption keys on forwardedEnvNames, not the raw list).
 func TestTrustPathUnpinnedScriptKeepsForwardedValues(t *testing.T) {
-	p := &dockerProvisioner{credentialEnvPins: []string{"SSL_CERT_DIR", "HTTP_PROXY"}}
+	t.Setenv("SSL_CERT_FILE", "/operator/ca.pem")
+	t.Setenv("GIT_SSL_NO_VERIFY", "1")
+	if v, ok := os.LookupEnv("GIT_SSL_CAPATH"); ok {
+		t.Cleanup(func() { os.Setenv("GIT_SSL_CAPATH", v) })
+	}
+	os.Unsetenv("GIT_SSL_CAPATH")
+	p := &dockerProvisioner{
+		credentialMounts: []string{"mount"},
+		spec: ProvisionSpec{SessionEnvPassthrough: []string{
+			"SSL_CERT_FILE", "GIT_SSL_NO_VERIFY", "GIT_SSL_CAPATH",
+		}},
+	}
 	got := p.trustPathUnpinnedScript("true")
-	if strings.Contains(got, "unset SSL_CERT_FILE") {
-		t.Fatalf("an unpinned (operator-forwarded) trust name must not be unset: %q", got)
+	for _, name := range []string{"SSL_CERT_FILE", "GIT_SSL_NO_VERIFY"} {
+		if strings.Contains(got, "unset "+name) {
+			t.Fatalf("a trust name forwarded WITH a host value must not be unset: %q", got)
+		}
+	}
+	if !strings.Contains(got, "unset GIT_SSL_CAPATH") {
+		t.Fatalf("a claimed-but-hostless passthrough name emits no -e — the image's ENV would survive, so the unset must stand: %q", got)
 	}
 	if !strings.Contains(got, "unset SSL_CERT_DIR") {
-		t.Fatalf("a pinned trust name must be unset: %q", got)
+		t.Fatalf("an unforwarded trust name must be unset: %q", got)
 	}
 }
 
-// Without credential mounts there are no pins at all — the script must be
-// byte-identical so the preamble cannot perturb a session that carries none.
+// A forwarded git-config-route name exempts ONLY its own slot (#7891 N1,
+// the re-review's per-slot rule): forwarding GIT_CONFIG_GLOBAL keeps the
+// operator's file but leaves system config off and the XDG redirect
+// dropped; forwarding GIT_CONFIG_NOSYSTEM keeps the operator's flag while
+// the af-owned global still applies. Only claiming EVERY route name lifts
+// the lockdown whole.
+func TestTrustPathUnpinnedScriptLockdownIsPerSlot(t *testing.T) {
+	newP := func(names ...string) *dockerProvisioner {
+		return &dockerProvisioner{
+			credentialMounts: []string{"mount"},
+			spec:             ProvisionSpec{SessionEnvPassthrough: names},
+		}
+	}
+
+	// Forwarded GIT_CONFIG_GLOBAL: only the global slot is claimed.
+	t.Setenv("GIT_CONFIG_GLOBAL", "/operator/global.gitconfig")
+	got := newP("GIT_CONFIG_GLOBAL").trustPathUnpinnedScript("true")
+	for _, clause := range []string{
+		"export GIT_CONFIG_NOSYSTEM=1", "unset GIT_CONFIG_SYSTEM", "unset XDG_CONFIG_HOME",
+	} {
+		if !strings.Contains(got, clause) {
+			t.Fatalf("forwarding GIT_CONFIG_GLOBAL claims only the global slot — %q must still apply: %q", clause, got)
+		}
+	}
+	if strings.Contains(got, "export GIT_CONFIG_GLOBAL=") {
+		t.Fatalf("the claimed global slot must keep the operator's file — af must not export its own: %q", got)
+	}
+
+	// Forwarded GIT_CONFIG_NOSYSTEM: the flag is the operator's, every file
+	// slot stays af's.
+	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
+	got = newP("GIT_CONFIG_NOSYSTEM").trustPathUnpinnedScript("true")
+	for _, clause := range []string{
+		"export GIT_CONFIG_GLOBAL='/root/.af-gitconfig'",
+		"unset GIT_CONFIG_SYSTEM", "unset XDG_CONFIG_HOME",
+	} {
+		if !strings.Contains(got, clause) {
+			t.Fatalf("forwarding GIT_CONFIG_NOSYSTEM claims only the flag — %q must still apply: %q", clause, got)
+		}
+	}
+	for _, clause := range []string{"export GIT_CONFIG_NOSYSTEM", "unset GIT_CONFIG_NOSYSTEM"} {
+		if strings.Contains(got, clause) {
+			t.Fatalf("the claimed NOSYSTEM slot must keep the operator's value — %q must not appear: %q", clause, got)
+		}
+	}
+
+	// Forwarded GIT_CONFIG_SYSTEM: the claimed file would still lose to an
+	// ambient or pinned NOSYSTEM, so that name is dropped rather than af's
+	// =1 asserted over the operator's claim.
+	t.Setenv("GIT_CONFIG_SYSTEM", "/operator/gitconfig")
+	got = newP("GIT_CONFIG_SYSTEM").trustPathUnpinnedScript("true")
+	if !strings.Contains(got, "export GIT_CONFIG_GLOBAL='/root/.af-gitconfig'") {
+		t.Fatalf("the unclaimed global slot stays af's when SYSTEM is claimed: %q", got)
+	}
+	for _, clause := range []string{
+		"unset GIT_CONFIG_SYSTEM", "export GIT_CONFIG_NOSYSTEM=1",
+	} {
+		if strings.Contains(got, clause) {
+			t.Fatalf("the claimed system slot must survive — %q would defeat it: %q", clause, got)
+		}
+	}
+	if !strings.Contains(got, "unset GIT_CONFIG_NOSYSTEM") {
+		t.Fatalf("an ambient NOSYSTEM must be dropped so the claimed system file is read: %q", got)
+	}
+
+	// Forwarded XDG_CONFIG_HOME with the global slot unclaimed: on
+	// credential-mount the claim is undeliverable (af re-asserts
+	// XDG_CONFIG_HOME to the session home after run_args), so the name is
+	// dropped from the claim set entirely — af's file stays the global and
+	// the redirect would otherwise point at the image-controlled home's
+	// git/config (#7891 F15). On the ACCOUNT path the forward does reach
+	// the container, so the claim holds there: GIT_CONFIG_GLOBAL redirects
+	// at the claimed file — an export replaces the XDG global too, so af's
+	// own file would silently shadow it (Codex on #7891 N1).
+	t.Setenv("XDG_CONFIG_HOME", "/operator/xdg")
+	got = newP("XDG_CONFIG_HOME").trustPathUnpinnedScript("true")
+	for _, clause := range []string{
+		"export GIT_CONFIG_GLOBAL='/root/.af-gitconfig'", "unset XDG_CONFIG_HOME",
+	} {
+		if !strings.Contains(got, clause) {
+			t.Fatalf("an undeliverable XDG claim must not exempt its slot — %q must still apply: %q", clause, got)
+		}
+	}
+	if strings.Contains(got, "${XDG_CONFIG_HOME%/}/git/config") {
+		t.Fatalf("the XDG redirect must never point at the image-controlled home: %q", got)
+	}
+	got = (&dockerProvisioner{
+		spec: ProvisionSpec{
+			Account:               sessionenv.Account{Agent: "gemini", Dir: "/acct"},
+			SessionEnvPassthrough: []string{"XDG_CONFIG_HOME"},
+		},
+	}).trustPathUnpinnedScript("true")
+	if !strings.Contains(got, `export GIT_CONFIG_GLOBAL="${XDG_CONFIG_HOME%/}/git/config"`) {
+		t.Fatalf("an XDG-only claim must redirect af's global at the claimed XDG file where the forward is deliverable: %q", got)
+	}
+	os.Unsetenv("XDG_CONFIG_HOME")
+
+	// Every DELIVERABLE route name claimed on credential-mount: the XDG
+	// slot can never be claimed there (the forward never reaches the
+	// container), so its unset stands while the other slots exempt.
+	t.Setenv("GIT_CONFIG_GLOBAL", "/operator/global.gitconfig")
+	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
+	t.Setenv("XDG_CONFIG_HOME", "/operator/xdg")
+	got = newP("GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM", "GIT_CONFIG_NOSYSTEM", "XDG_CONFIG_HOME").
+		trustPathUnpinnedScript("true")
+	for _, clause := range []string{
+		"export GIT_CONFIG_NOSYSTEM", "export GIT_CONFIG_GLOBAL", "af-gitconfig",
+		"unset GIT_CONFIG_SYSTEM", "unset GIT_CONFIG_NOSYSTEM",
+	} {
+		if strings.Contains(got, clause) {
+			t.Fatalf("claiming the deliverable route names exempts their slots — %q must not appear: %q", clause, got)
+		}
+	}
+	if !strings.Contains(got, "unset XDG_CONFIG_HOME") {
+		t.Fatalf("XDG_CONFIG_HOME cannot be claimed on credential-mount — its unset must stand: %q", got)
+	}
+
+	// On the account path every route name claimed lifts the lockdown
+	// whole — XDG is deliverable there, so the ambient environment IS the
+	// operator's claim.
+	got = (&dockerProvisioner{
+		spec: ProvisionSpec{
+			Account:               sessionenv.Account{Agent: "gemini", Dir: "/acct"},
+			SessionEnvPassthrough: afGitConfigRouteNames,
+		},
+	}).trustPathUnpinnedScript("true")
+	for _, clause := range []string{
+		"export GIT_CONFIG_NOSYSTEM", "export GIT_CONFIG_GLOBAL", "af-gitconfig",
+		"unset GIT_CONFIG_SYSTEM", "unset XDG_CONFIG_HOME", "unset GIT_CONFIG_NOSYSTEM",
+	} {
+		if strings.Contains(got, clause) {
+			t.Fatalf("claiming every route name lifts the lockdown on the account path — %q must not appear: %q", clause, got)
+		}
+	}
+
+	// A claimed route name that emits no -e (hostless) does NOT claim: the
+	// lockdown still applies so af's git cannot read the image's files.
+	for _, name := range []string{"GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM", "GIT_CONFIG_NOSYSTEM", "XDG_CONFIG_HOME"} {
+		os.Unsetenv(name)
+	}
+	got = newP("GIT_CONFIG_GLOBAL").trustPathUnpinnedScript("true")
+	if !strings.Contains(got, "export GIT_CONFIG_GLOBAL='/root/.af-gitconfig'") {
+		t.Fatalf("a hostless config-route claim must not exempt even its own slot: %q", got)
+	}
+}
+
+// Without a credential carried there are no claims to hold off — the
+// script must be byte-identical so the preamble cannot perturb a plain
+// session's image-supplied TLS config (a corporate-CA image is the
+// operator's own choice there).
 func TestTrustPathUnpinnedScriptNoPinsIsIdentity(t *testing.T) {
 	p := &dockerProvisioner{}
 	const script = "chmod +x /opt/af/bin/af"
 	if got := p.trustPathUnpinnedScript(script); got != script {
-		t.Fatalf("a session with no pins must pass its script through verbatim: %q", got)
+		t.Fatalf("a session carrying no credential must pass its script through verbatim: %q", got)
+	}
+}
+
+// Account-scoped sessions share the hole — the clone runs the same
+// execSessionSh children and installs the same credential helper — so the
+// preamble fires there too (#7891 widened to the shared surface).
+func TestTrustPathUnpinnedScriptAppliesOnAccountSessions(t *testing.T) {
+	p := &dockerProvisioner{spec: ProvisionSpec{
+		Account: sessionenv.Account{Agent: "codex", Name: "work", Dir: "/acct"},
+	}}
+	got := p.trustPathUnpinnedScript("git fetch origin")
+	if !strings.Contains(got, "unset GIT_SSL_NO_VERIFY") {
+		t.Fatalf("an account session's provisioning git must not see an image GIT_SSL_NO_VERIFY: %q", got)
 	}
 }
 

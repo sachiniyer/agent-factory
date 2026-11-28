@@ -596,6 +596,9 @@ func (p *dockerProvisioner) provisionSteps() (ProvisionResult, error) {
 	if err := p.prepareContainerUser(); err != nil {
 		return ProvisionResult{}, dockerStepErr(err, dockerOpRootExec)
 	}
+	if err := p.prepareAfGitConfig(); err != nil {
+		return ProvisionResult{}, dockerStepErr(err, dockerOpSessionExec)
+	}
 	if err := p.trustWorkspaceDirectories(); err != nil {
 		return ProvisionResult{}, dockerStepErr(err, dockerOpSessionExec)
 	}
@@ -711,9 +714,7 @@ func (p *dockerProvisioner) runContainer() error {
 	// Defined-and-empty is the same shape the account boundary installs: a
 	// workspace config loader treats it as set and does not supply the repo's
 	// value (#7526). SSL_CERT_FILE/SSL_CERT_DIR keep that shape only here —
-	// `docker run` cannot unset an image ENV — and are unset in af's
-	// provisioning execs and resolved to a platform bundle at the exec shim,
-	// whose readers load the empty value as a path (#7889).
+	// `docker run` cannot unset an image ENV (#7889).
 	for _, name := range p.credentialEnvPins {
 		args = append(args, "-e", name+"=")
 	}
@@ -726,19 +727,17 @@ func (p *dockerProvisioner) runContainer() error {
 	// image's ENV and any repo entry the same last-wins way the pins do.
 	// The pane keeps the real values: the in-container tmux stamps them per
 	// pane over this baseline. A defined-empty TMUX is safe because tmux
-	// itself treats an empty value as unset — measured on tmux 3.4 and
-	// 3.2a — so the blanked baseline cannot trip the nested-session guard
-	// or fake pane identity anywhere af or the agent reads it (#7544).
+	// itself treats empty as unset — measured on tmux 3.4 and 3.2a — so the
+	// blanked baseline cannot trip the nested-session guard or fake pane
+	// identity anywhere af or the agent reads it (#7544).
 	for _, name := range credentialMountPaneBoundaryNamesSorted() {
 		args = append(args, "-e", name+"=")
 	}
-	// The account's env goes LAST, after run_args, and that ordering is the boundary
-	// rather than a preference. docker.run_args is repository-controlled and checked
-	// in; appended after the account it could set `-e CODEX_HOME=/another/home` and
-	// silently move the agent off the account the operator named, which is the
-	// wrong-identity failure this feature exists to prevent. Docker gives the LAST
-	// -e for a name precedence, so putting the account there makes it dominate an
-	// assembly that is otherwise additive by design.
+	// The account's env goes LAST, after run_args, and that ordering is the
+	// boundary rather than a preference: a repo `-e CODEX_HOME=/another/home`
+	// appended later would silently move the agent off the account the
+	// operator named — the wrong-identity failure this feature exists to
+	// prevent. Docker's last-wins -e precedence makes the account dominate.
 	args = append(args, p.accountEnv...)
 	if p.spec.Account.Dir != "" {
 		// docker.run_args may set HOME too. It is not an identity source once the
@@ -779,6 +778,7 @@ func (p *dockerProvisioner) runContainer() error {
 				args = append(args, "-e", "PATH="+imagePATH)
 			}
 		}
+		args = append(args, p.afGitConfigMarkerArgs(forwardedNames)...)
 	} else if len(p.credentialMounts) > 0 {
 		// For credential-mount sessions, credential files are mounted at paths
 		// relative to dockerContainerHome (/root). docker.run_args is repo-controlled
@@ -838,17 +838,18 @@ func (p *dockerProvisioner) runContainer() error {
 		}
 		// GIT_CONFIG_GLOBAL/GIT_CONFIG_SYSTEM relocate git's config files —
 		// a repo-chosen file can set a credential helper, proxy, or trust
-		// root. Defined-empty is not neutral for a path-valued name:
-		// measured on git 2.43, `git config --global` fails writing to an
-		// empty path and /dev/null fails with EACCES, so af re-asserts each
-		// to the location git would consult under the boundary's own roots —
-		// defined (no late loader can claim it) and working (#7531).
+		// root. Defined-empty is not neutral for a path-valued name: `git
+		// config --global` fails writing to an empty path and /dev/null fails
+		// with EACCES (measured on git 2.43), so af re-asserts each to the
+		// location git would consult under the boundary's own roots (#7531).
 		if !slices.Contains(p.spec.SessionEnvPassthrough, "GIT_CONFIG_GLOBAL") {
 			args = append(args, "-e", "GIT_CONFIG_GLOBAL="+home+"/.gitconfig")
 		}
 		if !slices.Contains(p.spec.SessionEnvPassthrough, "GIT_CONFIG_SYSTEM") {
 			args = append(args, "-e", "GIT_CONFIG_SYSTEM=/etc/gitconfig")
 		}
+		// The GIT_CONFIG_* -e's above are the AGENT's own roots, as on master.
+		args = append(args, p.afGitConfigMarkerArgs(forwardedNames)...)
 		// Value re-asserts for the names an empty pin would break: late-loaded
 		// endpoint names whose agent treats defined-empty as a real value
 		// rather than falling back to its default (gemini reads

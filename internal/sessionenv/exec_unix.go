@@ -335,8 +335,6 @@ func reapplyEmptyPins(environ, pins []string) []string {
 	for _, name := range pins {
 		pinned[name] = struct{}{}
 	}
-	_, filePinned := pinned["SSL_CERT_FILE"]
-	_, dirPinned := pinned["SSL_CERT_DIR"]
 	out := make([]string, 0, len(environ)+len(pins))
 	for _, entry := range environ {
 		name, _, _ := strings.Cut(entry, "=")
@@ -345,17 +343,16 @@ func reapplyEmptyPins(environ, pins []string) []string {
 		}
 		out = append(out, entry)
 	}
-	// A sibling counts as claimed only when it is NOT itself a pin — a
-	// pinned sibling re-resolves below, so whatever stale value the environ
-	// holds is being replaced and both slots resolve as one consistent
-	// platform root set.
-	fileClaimed := !filePinned && envNonEmpty(environ, "SSL_CERT_FILE")
-	dirClaimed := !dirPinned && envNonEmpty(environ, "SSL_CERT_DIR")
 	for _, name := range pins {
-		if name == "SSL_CERT_DIR" && fileClaimed ||
-			name == "SSL_CERT_FILE" && dirClaimed {
-			out = append(out, name+"=")
-			continue
+		// A sibling counts as claimed only when it is NOT itself a pin — a
+		// pinned sibling re-resolves below, so whatever stale value the
+		// environ holds is being replaced and both slots resolve as one
+		// consistent platform root set.
+		if sibling, paired := trustPathSiblingPairs[name]; paired {
+			if _, siblingPinned := pinned[sibling]; !siblingPinned && envNonEmpty(environ, sibling) {
+				out = append(out, name+"=")
+				continue
+			}
 		}
 		if entry, ok := resolveTrustPathPin(name); ok {
 			out = append(out, entry)

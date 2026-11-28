@@ -203,8 +203,10 @@ func TestRunContainer_ReassertsFirstPartyEndpointAndPinsLateNames(t *testing.T) 
 // TestRunContainer_ReassertsGitConfigRoots is the argv pin for the
 // path-valued names (#7531 review): GIT_CONFIG_GLOBAL/GIT_CONFIG_SYSTEM are
 // re-asserted to working paths under the boundary's own roots — never
-// defined-empty, which would break `git config --global` — and
-// GIT_CONFIG_NOSYSTEM, a boolean, stays pinned defined-and-empty.
+// defined-empty, which would break `git config --global`. These are the
+// AGENT's roots: af's own git scope instead reads the af-owned file the
+// AF_GIT_CONFIG marker names (#7891 R1/R4 — NOSYSTEM keeps master's
+// defined-empty pin for the agent's env).
 func TestRunContainer_ReassertsGitConfigRoots(t *testing.T) {
 	runCalled, _, runArgv := provisionDockerCredentialGrant(t, tmux.ProgramGemini, nil)
 	require.True(t, runCalled)
@@ -219,7 +221,9 @@ func TestRunContainer_ReassertsGitConfigRoots(t *testing.T) {
 	require.Contains(t, joined, "GIT_CONFIG_SYSTEM=/etc/gitconfig",
 		"the system config root must be re-asserted to git's own default path")
 	require.Contains(t, joined, "-e\x00GIT_CONFIG_NOSYSTEM=\x00",
-		"a boolean name pins defined-and-empty — the default behavior")
+		"GIT_CONFIG_NOSYSTEM keeps master's defined-empty pin for the agent's env (#7891 R4)")
+	require.Contains(t, joined, "-e\x00AF_GIT_CONFIG=/root/.af-gitconfig\x00",
+		"the marker must carry the af-owned global file to the agent-server's own git (#7891 R1)")
 	// The re-asserted path lives under the re-asserted HOME.
 	for i, arg := range runArgv {
 		if strings.HasPrefix(arg, "GIT_CONFIG_GLOBAL=") {
@@ -228,6 +232,42 @@ func TestRunContainer_ReassertsGitConfigRoots(t *testing.T) {
 				"the global config root must point at a writable file under the session home: %s", arg)
 		}
 	}
+}
+
+// The AF_GIT_CONFIG marker keeps carrying the lockdown when the operator
+// forwards ONE git-config-route name with a host value — the per-slot rule
+// (#7891 N1): the claim exempts only its own slot, and AF_GIT_FORWARDED
+// tells the agent-server which names were claimed. On credential-mount the
+// XDG slot is never claimable — af re-asserts XDG_CONFIG_HOME to the
+// session home after run_args, so the forward never reaches the container
+// and the name is dropped from the claim set entirely (#7891 F15/F16).
+func TestRunContainer_AfGitConfigMarkerFollowsTheClaim(t *testing.T) {
+	t.Setenv("GIT_CONFIG_GLOBAL", "/operator/global.gitconfig")
+	runCalled, _, runArgv := provisionDockerCredentialGrantPassthrough(t, tmux.ProgramGemini,
+		nil, []string{"GIT_CONFIG_GLOBAL"})
+	require.True(t, runCalled)
+	joined := strings.Join(runArgv, "\x00")
+	require.Contains(t, joined, "-e\x00AF_GIT_CONFIG=/root/.af-gitconfig\x00",
+		"one claimed slot must not lift the lockdown — the unclaimed slots stay af's")
+	require.Contains(t, joined, "AF_GIT_FORWARDED=",
+		"the marker must carry the host-valued claim set for the agent-server's git")
+
+	// Claiming every DELIVERABLE route name: the other slots exempt, but
+	// the undeliverable XDG forward can never claim its slot — the marker
+	// stays emitted and must not name XDG_CONFIG_HOME.
+	t.Setenv("GIT_CONFIG_SYSTEM", "/operator/gitconfig")
+	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
+	t.Setenv("XDG_CONFIG_HOME", "/operator/xdg")
+	runCalled, _, runArgv = provisionDockerCredentialGrantPassthrough(t, tmux.ProgramGemini,
+		nil, []string{"GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM", "GIT_CONFIG_NOSYSTEM", "XDG_CONFIG_HOME"})
+	require.True(t, runCalled)
+	joined = strings.Join(runArgv, "\x00")
+	require.Contains(t, joined, "-e\x00AF_GIT_CONFIG=/root/.af-gitconfig\x00",
+		"the undeliverable XDG claim must not lift the lockdown — af's git would read the image-controlled home")
+	require.NotContains(t, joined, "AF_GIT_FORWARDED=GIT_CONFIG_GLOBAL,GIT_CONFIG_SYSTEM,GIT_CONFIG_NOSYSTEM,XDG_CONFIG_HOME",
+		"AF_GIT_FORWARDED must not carry XDG_CONFIG_HOME — it is re-asserted away before the container sees it")
+	require.Contains(t, joined, "AF_GIT_FORWARDED=GIT_CONFIG_GLOBAL,GIT_CONFIG_NOSYSTEM,GIT_CONFIG_SYSTEM",
+		"the deliverable claims still reach the agent-server's git")
 }
 
 // TestRunContainer_OperatorForwardKeepsFirstPartyEndpoint is the

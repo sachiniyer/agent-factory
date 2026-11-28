@@ -228,7 +228,7 @@ func (w *sandboxWorkspace) configureGit(timeout time.Duration) error {
 // remote, persists value-free GitHub credentials, and — on a restore — fetches
 // the archived branch as a local ref.
 func (w *sandboxWorkspace) cloneWorkspace(cloneTimeout, shortTimeout time.Duration) error {
-	script := gitCloneCommand(w.spec.CloneURL, w.WorkspacePath())
+	script := gitCloneCommand(w.spec.CloneURL, w.WorkspacePath(), false)
 	out, err := w.shell.Run(cloneTimeout, script, nil, true)
 	if err != nil {
 		return fmt.Errorf("cloning %q on the remote failed (is git installed, and the URL reachable from the remote host?): %s: %w",

@@ -2,6 +2,7 @@ package sessionenv
 
 import (
 	"os"
+	"slices"
 	"sort"
 )
 
@@ -74,6 +75,12 @@ var caBundleDirCandidates = []string{
 //   - DBUS_SESSION_BUS_ADDRESS / proxies / GH_HOST / AF_DAEMON_URL /
 //     AF_DAEMON_TOKEN: not filesystem paths — empty reads as unset for
 //     their readers.
+//   - GIT_SSL_CAINFO/GIT_SSL_CAPATH (and the proxy-connection twins git
+//     actually reads): path-valued like the pair above, but UNSET is the
+//     required treatment for git's own names — an env CAINFO outranks even
+//     a config-file http.sslCAInfo the operator forwarded, and a resolved
+//     platform bundle silently widens a dir-only forward (#7891 review).
+//     They are strip names (trustStripNames), never pinned or resolved.
 //
 // Resolving the falsy-safe names would also be wrong, not merely harmless:
 // a resolved platform bundle OUTRANKS an operator-forwarded sibling in the
@@ -86,6 +93,93 @@ var caBundleDirCandidates = []string{
 var trustPathPinCandidates = map[string][]string{
 	"SSL_CERT_FILE": caBundleFileCandidates,
 	"SSL_CERT_DIR":  caBundleDirCandidates,
+}
+
+// trustPathSiblingPairs maps a path-valued trust name to the sibling whose
+// forwarded claim keeps the pin defined-empty — only where the empty value
+// truly contributes nothing beside its sibling. SSL_CERT_FILE/SSL_CERT_DIR
+// are independent slots every reader loads, so beside a non-empty
+// (forwarded) member the pinned member must keep its defined-empty claim
+// rather than resolving: the resolved slot would silently widen the
+// operator's trust with the image's roots, while defined-empty contributes
+// none (#7889 R5 + mirror). git's CA pair has NO safe direction — an empty
+// CAINFO poisons even a valid CAPATH (measured on git 2.43: "Problem with
+// the SSL CA cert"), which is why the git names are strip names instead.
+var trustPathSiblingPairs = map[string]string{
+	"SSL_CERT_FILE": "SSL_CERT_DIR",
+	"SSL_CERT_DIR":  "SSL_CERT_FILE",
+}
+
+// trustStripNames are the git environment names af unsets at the one
+// af-controlled boundary the env filter does not already clean: the
+// provisioning exec preamble (#7891). The set is what `strings
+// git-remote-https` shows git 2.43 actually reading — not a superset:
+// GIT_PROXY_SSL_CAPATH, GIT_PROXY_SSL_NO_VERIFY and GIT_SSL_CERT_PASSWORD
+// appear in git's docs but are never consulted by the transport.
+//
+// No defined value is inert for these names, and resolving them is wrong:
+//   - GIT_SSL_NO_VERIFY is read by getenv presence — `=` and `=0` BOTH
+//     disable verification (measured on git 2.43).
+//   - GIT_SSL_CAINFO/GIT_SSL_CAPATH are path-valued, but an env CAINFO
+//     outranks even a config-file http.sslCAInfo the operator forwarded
+//     through GIT_CONFIG_COUNT pairs, and a resolved platform bundle
+//     widens a dir-only forward — UNSET at every hop is master's measured
+//     trust (the independent review's R3).
+//   - GIT_SSL_CERT fails eager client-cert loading on `=`; GIT_SSL_KEY
+//     only modulates a set CERT; GIT_SSL_VERSION/GIT_SSL_CIPHER_LIST can
+//     downgrade the TLS floor; the *_TYPE/*_PASSWORD_PROTECTED and
+//     GIT_PROXY_SSL_* twins shape the same handshake;
+//     GIT_HTTP_PROXY_AUTHMETHOD names an auth scheme empty does not;
+//     GIT_TEMPLATE_DIR copies image-authored files (hooks, config) into
+//     every clone and init.
+//
+// Everywhere af controls the environment EXCEPT the preamble these names
+// are already gone: the agent-server wrap and both pane shims build env
+// through FilterForCommand, which admits only allowlisted and
+// operator-forwarded names — none of these are allowlisted. A
+// DockerForwardNames-resolved (host-valued) name stays verbatim.
+var trustStripNames = map[string]struct{}{
+	"GIT_SSL_NO_VERIFY":                     {},
+	"GIT_SSL_CAINFO":                        {},
+	"GIT_SSL_CAPATH":                        {},
+	"GIT_SSL_CERT":                          {},
+	"GIT_SSL_KEY":                           {},
+	"GIT_SSL_VERSION":                       {},
+	"GIT_SSL_CIPHER_LIST":                   {},
+	"GIT_SSL_CERT_TYPE":                     {},
+	"GIT_SSL_KEY_TYPE":                      {},
+	"GIT_SSL_CERT_PASSWORD_PROTECTED":       {},
+	"GIT_PROXY_SSL_CAINFO":                  {},
+	"GIT_PROXY_SSL_CERT":                    {},
+	"GIT_PROXY_SSL_KEY":                     {},
+	"GIT_PROXY_SSL_CERT_PASSWORD_PROTECTED": {},
+	"GIT_HTTP_PROXY_AUTHMETHOD":             {},
+	"GIT_TEMPLATE_DIR":                      {},
+}
+
+// TrustStripNames returns the sorted git env names af unsets in
+// provisioning exec preambles — the names no defined value can render
+// inert and no resolution can honour (#7891).
+func TrustStripNames() []string {
+	out := make([]string, 0, len(trustStripNames))
+	for name := range trustStripNames {
+		out = append(out, name)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// TrustStripName reports whether name is one af unsets rather than pins.
+func TrustStripName(name string) bool {
+	_, ok := trustStripNames[name]
+	return ok
+}
+
+// TrustPathSibling returns the sibling name whose forwarded claim keeps a
+// path pin defined-empty, and whether the pair applies.
+func TrustPathSibling(name string) (string, bool) {
+	sibling, ok := trustPathSiblingPairs[name]
+	return sibling, ok
 }
 
 // TrustPathPinNames returns the sorted trust-path pin names — the names af's
@@ -105,23 +199,18 @@ func TrustPathPinNames() []string {
 var trustPathStat = os.Stat
 
 // resolveTrustPathValue returns the first candidate that exists in the
-// container for a path-valued pin name — a directory for SSL_CERT_DIR, a
-// file for SSL_CERT_FILE — or "" when no candidate exists (or the name is
+// container for a path-valued pin name — a directory for SSL_CERT_DIR,
+// a file for SSL_CERT_FILE — or "" when no candidate exists (or the name is
 // not a path-valued pin).
 func resolveTrustPathValue(name string) string {
 	candidates, isPathPin := trustPathPinCandidates[name]
 	if !isPathPin {
 		return ""
 	}
+	dirWanted := slices.Equal(candidates, caBundleDirCandidates)
 	for _, candidate := range candidates {
 		info, err := trustPathStat(candidate)
-		if err != nil {
-			continue
-		}
-		if name == "SSL_CERT_DIR" && !info.IsDir() {
-			continue
-		}
-		if name != "SSL_CERT_DIR" && info.IsDir() {
+		if err != nil || info.IsDir() != dirWanted {
 			continue
 		}
 		return candidate
@@ -156,22 +245,26 @@ func resolveTrustPathPin(name string) (entry string, ok bool) {
 // children, so unset is the inert form. A name the operator forwarded
 // (non-empty) is never touched.
 //
-// The exception is a claimed sibling: SSL_CERT_FILE and SSL_CERT_DIR are
-// independent slots every reader loads, so beside a non-empty (forwarded)
-// sibling the empty slot contributes NOTHING to the operator's trust — and
-// defined-empty is the only spelling that says so: UNSET would restore the
-// platform default for OpenSSL and openssl-probe alike, and resolved would
-// add the image's roots outright (#7889 R5 + its mirror). The empty slot
-// keeps its defined-empty shape then, deliberately.
+// The exception is a claimed sibling: the names in trustPathSiblingPairs
+// are independent slots every reader loads, so beside a non-empty
+// (forwarded) sibling the empty slot contributes NOTHING to the operator's
+// trust — and defined-empty is the only spelling that says so: UNSET would
+// restore the platform default for OpenSSL and openssl-probe alike, and
+// resolved would add the image's roots outright (#7889 R5 + its mirror).
+// The empty slot keeps its defined-empty shape then, deliberately.
 func NeutralizeTrustPathPins() {
-	fileSet := os.Getenv("SSL_CERT_FILE") != ""
-	dirSet := os.Getenv("SSL_CERT_DIR") != ""
+	// Snapshot sibling claims before the loop — resolving one member would
+	// otherwise read as a claim and guard the other, where the operator's
+	// forwarded (pre-existing non-empty) value is what the guard protects.
+	siblingClaimed := make(map[string]bool, len(trustPathSiblingPairs))
+	for _, sibling := range trustPathSiblingPairs {
+		siblingClaimed[sibling] = os.Getenv(sibling) != ""
+	}
 	for _, name := range TrustPathPinNames() {
 		if value, ok := os.LookupEnv(name); !ok || value != "" {
 			continue
 		}
-		if name == "SSL_CERT_DIR" && fileSet ||
-			name == "SSL_CERT_FILE" && dirSet {
+		if sibling, paired := trustPathSiblingPairs[name]; paired && siblingClaimed[sibling] {
 			continue
 		}
 		if resolved := resolveTrustPathValue(name); resolved != "" {
