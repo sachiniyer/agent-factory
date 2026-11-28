@@ -80,7 +80,9 @@ func TestDockerRunArgsEnvValue_LastWinsAcrossSpellings(t *testing.T) {
 
 	// A bare -e NAME the host leaves unset resolves to "" and must not clobber
 	// a value an earlier spelling set — the resolver records only a present
-	// host value for a bare name.
+	// host value for a bare name. Force the host env to be unset so this case
+	// does not depend on the runner's environment (t.Setenv restores it).
+	t.Setenv("GIT_CONFIG_GLOBAL", "")
 	require.Equal(t, "/runargs.gitconfig",
 		dockerRunArgsEnvValue([]string{"-e", "GIT_CONFIG_GLOBAL=/runargs.gitconfig", "-e", "GIT_CONFIG_GLOBAL"},
 			"GIT_CONFIG_GLOBAL"))
