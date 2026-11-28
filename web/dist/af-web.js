@@ -7068,7 +7068,7 @@ function isMutationOutcomeUncertain(e) {
   return isMutationCommittedError(e) || !(e instanceof ApiError) || !e.daemonRejected;
 }
 var CLIENT_VERSION_HEADER = "X-AF-Client-Version";
-var CLIENT_VERSION = "3c23a2143d8e";
+var CLIENT_VERSION = "bb321631f08a";
 async function af(method, body, token2, signal) {
   const headers = {
     "Content-Type": "application/json",
@@ -21612,7 +21612,7 @@ function tabCenters(bar) {
   });
 }
 function tabButton(tab, index, active, shown, canRename, canClose, actions2, openTab2, closeTab2, liveIdentity, closeTabByIdentity, selectedSessionId) {
-  const cls = `af-tab${active ? " af-tab-active" : ""}${shown && !active ? " af-tab-shown" : ""}`;
+  const cls = `af-tab${active ? " af-tab-active" : ""}${shown && !active ? " af-tab-shown" : ""}${tab.exit != null ? " af-tab-dead" : ""}`;
   const btn = h("button", { type: "button", class: cls, draggable: true });
   btn.setAttribute("role", "tab");
   btn.setAttribute("aria-selected", active ? "true" : "false");
@@ -21620,7 +21620,7 @@ function tabButton(tab, index, active, shown, canRename, canClose, actions2, ope
   btn.append(icon(tabIcon(tab.kind), "af-tab-glyph"), h("span", { class: "af-tab-label" }, tabLabel(tab)));
   btn.addEventListener("click", openTab2);
   const renameable = canRename && isRenameableTab(tab.kind);
-  btn.title = renameable ? `${tabDisplayLabel(tab)} \u2014 double-click to rename` : tabDisplayLabel(tab);
+  btn.title = `${tabDisplayLabel(tab)}${tab.exit != null ? " \u2014 dead" : ""}${renameable ? " \u2014 double-click to rename" : ""}`;
   if (renameable) {
     tabRenameIntents.set(btn, {
       identity: liveIdentity,

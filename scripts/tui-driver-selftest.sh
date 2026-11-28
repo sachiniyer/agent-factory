@@ -1753,7 +1753,9 @@ _expect_dead_shell_tab_renders() {
         af_focus_tree || rc=1
     fi
     if [ "$rc" -eq 0 ]; then
-        _af_jump_preview "$n" shell || rc=1
+        # The pane header shows the tab's DISPLAY label — "Terminal" for the
+        # canonical "shell" name the CLI roster reports.
+        _af_jump_preview "$n" Terminal || rc=1
     fi
     if [ "$rc" -eq 0 ]; then
         af_send s
@@ -1796,9 +1798,12 @@ _expect_dead_shell_tab_renders() {
     fi
     if [ "$rc" -eq 0 ]; then
         # Nav mode must come back on its own: a pane whose PTY is gone cannot
-        # stay interactive. Then the tree row and the header both read dead.
+        # stay interactive. Grow the TUI so the dead tab's row is unfolded —
+        # at 20 rows cycle's tabs collapse into "▼ N more" — then the tree
+        # row and the header both read dead.
+        af_resize "$saved_cols" 40 || rc=1
         deadline=$(( $(_af_now) + AF_DRIVER_TIMEOUT ))
-        while :; do
+        while [ "$rc" -eq 0 ]; do
             if af_capture | grep -qE -- '· dead' \
                 && _af_pane_header_row | grep -qE -- 'dead'; then
                 break
@@ -1814,15 +1819,29 @@ _expect_dead_shell_tab_renders() {
     fi
     if [ "$rc" -eq 0 ]; then
         # Enter must refuse with the hint that names the existing respawn
-        # affordance — no interactive mode swallowing keystrokes into a dead PTY.
-        af_send Enter
-        if ! af_wait_for 'is dead|press w to close' 15 'the dead-tab interactive hint'; then
-            af_capture >&2
-            rc=1
-        fi
-    fi
-    if [ "$rc" -eq 0 ]; then
-        af_send w
+        # affordance — no interactive mode swallowing keystrokes into a dead
+        # PTY. The invariant drops interactive mode a poll or two after the
+        # stamp lands, so Enter is retried: while the mode still holds the
+        # key forwards harmlessly into the dead pane; once nav is back the
+        # guard fires the hint.
+        deadline=$(( $(_af_now) + AF_DRIVER_TIMEOUT ))
+        local next_enter=0
+        while :; do
+            if [ "$(_af_now)" -ge "$next_enter" ]; then
+                af_send Enter
+                next_enter=$(( $(_af_now) + 3 ))
+            fi
+            if af_capture | grep -qE -- 'is dead|press w to close'; then
+                break
+            fi
+            if [ "$(_af_now)" -ge "$deadline" ]; then
+                _af_fail "Enter on the dead shell tab never refused with the respawn hint"
+                af_capture >&2
+                rc=1
+                break
+            fi
+            sleep "$AF_DRIVER_POLL"
+        done
     fi
 
     af_resize "$saved_cols" "$saved_rows" || return 1

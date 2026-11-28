@@ -1384,6 +1384,9 @@ body[data-project-color] [data-af-theme=dark] {
   color: var(--af-ink);
   border-bottom-color: transparent;
 }
+.af-tab-dead {
+  color: var(--af-ink-muted);
+}
 .af-tab {
   cursor: grab;
 }
