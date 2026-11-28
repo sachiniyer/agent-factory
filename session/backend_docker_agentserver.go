@@ -129,8 +129,12 @@ func (p *dockerProvisioner) agentServerCommand() (string, error) {
 	// after tmux's default-shell and anything else that could re-set a name
 	// between docker run's env and the exec (#7529 R1). Most pins re-assert
 	// defined-and-empty; the path-valued trust names resolve to a real
-	// platform bundle there instead, because their readers load the empty
-	// value as a path (#7889). --no-tmux-config closes the same hole on the
+	// platform bundle there instead — SSL_CERT_FILE's readers load the
+	// empty value as a path, and SSL_CERT_DIR is defended beside it (#7889).
+	// The flag list is also the agent-server's own neutralize gate: it
+	// re-resolves exactly these names at startup and nothing else, so a
+	// session emitting no pins leaves its whole env as-is (#7895).
+	// --no-tmux-config closes the same hole on the
 	// file side: the image's /etc/tmux.conf or a ~/.tmux.conf could pick
 	// default-shell itself, or write session environment with
 	// set-environment -g.

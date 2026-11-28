@@ -296,6 +296,28 @@ func (p *dockerProvisioner) cloneTemplateSuppression() bool {
 //     claimed GIT_CONFIG_SYSTEM additionally needs ambient NOSYSTEM
 //     dropped or the pin would defeat the claimed file.
 //
+// The other container `sh -c` execs af issues bypass this preamble on
+// purpose — each is inert by CONTENT, an af-composed probe or bookkeeping
+// script that spawns no TLS-reading child (#7895):
+//   - prepareNonAccountUser's `id` probe and the mkdir+chown step strings
+//     prepareAccountUser/prepareNonAccountUser hand prepareWithMountGuard,
+//     and reportSkippedMount's `test`-builtin writability probe
+//     (backend_docker_account.go, backend_docker_account_chown.go);
+//   - readMountTable/readMountTableFor's mkdir + pwd -P + mountinfo read
+//     (backend_docker_account_chown.go);
+//   - payloadDeliveryConfirmed's `test`/`wc -c` size check and
+//     verifyWriteTargets' cd + pwd -P + mountinfo + `test -L` read
+//     (backend_docker_staging.go);
+//   - probeResolvedDestinations' throwaway `docker run --entrypoint
+//     /bin/sh` probe container — a run, not an exec, on a container af
+//     never provisions (backend_docker_staging.go);
+//   - readBanner's `cat`/`kill -0` poll (backend_docker_agentserver.go).
+//
+// The one bypassing exec that is NOT inert is startAgentServer's detached
+// launch — the child it spawns is the agent-server itself, which runs the
+// startup neutralize gated on its --session-env-empty names before it
+// spawns children of its own (#7889 R1, #7895).
+//
 // Plain sessions keep image TLS config verbatim: with no credential
 // carried the image's own CA setup is the operator's choice.
 func (p *dockerProvisioner) trustPathUnpinnedScript(script string) string {
