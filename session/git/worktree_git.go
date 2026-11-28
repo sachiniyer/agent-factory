@@ -341,17 +341,27 @@ func afGitScopedEnvironment(environ []string) []string {
 	if !forwarded["GIT_CONFIG_NOSYSTEM"] && !forwarded["GIT_CONFIG_SYSTEM"] {
 		out = append(out, "GIT_CONFIG_NOSYSTEM=1")
 	}
-	if forwarded["GIT_CONFIG_GLOBAL"] {
-		return out
+	global := ""
+	if forwarded["XDG_CONFIG_HOME"] {
+		if xdg := afGitEnvValue(environ, "XDG_CONFIG_HOME"); xdg != "" {
+			// GIT_CONFIG_GLOBAL replaces the XDG global too, so an
+			// XDG-only claim delivers nothing under af's own file —
+			// redirect af's git at the claimed file, which also keeps the
+			// image's ~/.gitconfig shadowed (Codex on #7891 N1).
+			global = strings.TrimSuffix(xdg, "/") + "/git/config"
+		}
 	}
-	if xdg := afGitEnvValue(environ, "XDG_CONFIG_HOME"); forwarded["XDG_CONFIG_HOME"] && xdg != "" {
-		// GIT_CONFIG_GLOBAL replaces the XDG global too, so an XDG-only
-		// claim delivers nothing under af's own file — redirect af's git
-		// at the claimed file, which also keeps the image's ~/.gitconfig
-		// shadowed (Codex on #7891 N1).
-		return append(out, "GIT_CONFIG_GLOBAL="+strings.TrimSuffix(xdg, "/")+"/git/config")
+	if !forwarded["GIT_CONFIG_GLOBAL"] {
+		if global == "" {
+			global = file
+		}
+		out = append(out, "GIT_CONFIG_GLOBAL="+global)
 	}
-	return append(out, "GIT_CONFIG_GLOBAL="+file)
+	// A forwarded GIT_CONFIG_COUNT whose required pairs did not all arrive
+	// usable fails every git call it animates — the same inert empty pin
+	// the container boundary already installs (Codex on #7891).
+	out, _ = sessionenv.NeutralizeIncompleteGitConfigCount(out)
+	return out
 }
 
 // afGitEnvValue reads name's value out of a KEY=VALUE environ slice.

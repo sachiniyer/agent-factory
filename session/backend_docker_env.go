@@ -154,7 +154,11 @@ func afGitConfigActive(claimed map[string]bool) bool {
 // hostless passthrough name would otherwise deliver the image's value to
 // af's credentialed git, #7891 N2). Emitted whenever any route slot is
 // unclaimed; the agent-server resolves the per-slot exemptions itself
-// from AF_GIT_FORWARDED (#7891 N1).
+// from AF_GIT_FORWARDED (#7891 N1). The claim list carries BARE env
+// names — containerEnvironmentNames can hold `-e NAME=` blank entries
+// (af-generated empties for hostless pair claims), and a NAME= in the
+// marker would never match its env name, stripping the pair while its
+// GIT_CONFIG_COUNT stayed live (Codex on #7891).
 func (p *dockerProvisioner) afGitConfigMarkerArgs(forwarded []string) []string {
 	if !afGitConfigActive(p.afGitConfigClaims(forwarded)) {
 		return nil
@@ -164,8 +168,23 @@ func (p *dockerProvisioner) afGitConfigMarkerArgs(forwarded []string) []string {
 		// An empty AF_GIT_FORWARDED= would be the defined-empty pin shape
 		// the classification forbids — and the agent-server reads an absent
 		// marker as the empty set anyway (the strictest rule), so the name
-		// is emitted only when it carries a claim.
-		args = append(args, "-e", "AF_GIT_FORWARDED="+strings.Join(forwarded, ","))
+		// is emitted only when it carries a claim. Entries arrive as BARE
+		// names: containerEnvironmentNames can carry `-e NAME=` blank
+		// spellings (af-generated empty values for hostless pair claims),
+		// and a NAME= entry in the marker would never match the env name
+		// — the pair would be stripped while its count stayed live (Codex
+		// on #7891). An af-blanked entry IS the claim to admit: its env
+		// value is empty, never an image value.
+		names := make([]string, 0, len(forwarded))
+		seen := make(map[string]bool, len(forwarded))
+		for _, entry := range forwarded {
+			name, _, _ := strings.Cut(entry, "=")
+			if name != "" && !seen[name] {
+				seen[name] = true
+				names = append(names, name)
+			}
+		}
+		args = append(args, "-e", "AF_GIT_FORWARDED="+strings.Join(names, ","))
 	}
 	return args
 }

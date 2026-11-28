@@ -126,6 +126,44 @@ func TestAfGitScopedEnvironmentHonoursClaimedSlots(t *testing.T) {
 	}
 }
 
+// Codex on #7891: af-blanked `NAME=` entries (the account loader's
+// empty value for a hostless pair claim) reach AF_GIT_FORWARDED as bare
+// names, so a forwarded GIT_CONFIG_COUNT + KEY_0 + af-blanked VALUE_0=
+// stays a complete, legal pair — the empty value is admitted, never an
+// image value. But a count whose required pairs genuinely did not
+// arrive is neutralized after the filter, matching the container
+// boundary's GIT_CONFIG_COUNT= pin.
+func TestAfGitScopedEnvironmentPreservesAfBlankedPairValues(t *testing.T) {
+	in := []string{
+		"GIT_CONFIG_COUNT=1",
+		"GIT_CONFIG_KEY_0=http.sslCAInfo",
+		"GIT_CONFIG_VALUE_0=", // af-blanked empty value for the hostless claim
+	}
+	t.Setenv(afGitConfigEnvName, "/af-home/.af-gitconfig")
+	t.Setenv(afGitForwardedEnvName, "GIT_CONFIG_COUNT,GIT_CONFIG_KEY_0,GIT_CONFIG_VALUE_0")
+	got := afGitScopedEnvironment(in)
+	for _, want := range in {
+		if !slices.Contains(got, want) {
+			t.Fatalf("a complete forwarded config pair must survive — missing %q: %v", want, got)
+		}
+	}
+	for _, name := range got {
+		if name == "GIT_CONFIG_COUNT=" {
+			t.Fatalf("the complete pair must not be neutralized: %v", got)
+		}
+	}
+
+	// A count whose pair never arrived (hostless, no loader blank) is
+	// pinned empty — a live count over a missing pair is a fatal git
+	// error, not a claim.
+	in = []string{"GIT_CONFIG_COUNT=1", "GIT_CONFIG_KEY_0=http.sslVerify"}
+	t.Setenv(afGitForwardedEnvName, "GIT_CONFIG_COUNT,GIT_CONFIG_KEY_0")
+	got = afGitScopedEnvironment(in)
+	if !slices.Contains(got, "GIT_CONFIG_COUNT=") {
+		t.Fatalf("an incomplete forwarded count must be neutralized: %v", got)
+	}
+}
+
 func TestAfGitScopedEnvironmentUnmarkedIsIdentity(t *testing.T) {
 	in := []string{"GIT_CONFIG_GLOBAL=/image/.gitconfig", "XDG_CONFIG_HOME=/x"}
 	if got := afGitScopedEnvironment(in); !slices.Equal(got, in) {

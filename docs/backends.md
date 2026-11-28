@@ -414,11 +414,15 @@ user's real home and mounts it only if it exists, so:
       unflagged argv — only the unclaimed credential boundary suppresses
       templates); an `AF_GIT_CONFIG` marker env carries the same roots
       to the agent-server's own fetch/push/worktree git, plus an
-      `AF_GIT_FORWARDED` marker listing the names the operator forwarded
-      WITH a host value — af's git admits a trust name only through that
-      set, so a claimed-but-hostless passthrough entry cannot deliver the
-      image's own `GIT_SSL_NO_VERIFY` (or `GIT_CONFIG_*` pairs) to the
-      credentialed fetch and push. The route-name exemptions are
+      `AF_GIT_FORWARDED` marker listing the bare names the operator
+      forwarded WITH a host value — af's git admits a trust name only
+      through that set, so a claimed-but-hostless passthrough entry
+      cannot deliver the image's own `GIT_SSL_NO_VERIFY` to the
+      credentialed fetch and push; af-blanked `-e NAME=` entries are
+      admitted by their bare name (the empty value is af's, not the
+      image's), and a `GIT_CONFIG_COUNT` whose required pairs did not
+      all arrive usable is neutralized empty after the filter, the same
+      pin the container boundary installs. The route-name exemptions are
       per-slot: forwarding `GIT_CONFIG_GLOBAL`/`GIT_CONFIG_SYSTEM`/
       `GIT_CONFIG_NOSYSTEM`/`XDG_CONFIG_HOME` with a host value exempts
       only that slot — the other slots stay af's, and only claiming every

@@ -404,6 +404,23 @@ func TestXdgClaimOnCredentialMountKeepsAfGitGlobal(t *testing.T) {
 	require.True(t, p.afGitConfigClaims(forwarded)["XDG_CONFIG_HOME"])
 }
 
+// Codex on #7891: containerEnvironmentNames can carry `-e NAME=` blank
+// spellings — af-generated empty values for hostless pair claims — and
+// AF_GIT_FORWARDED must carry only the bare NAME so the agent-server's
+// filter can match it. A NAME= entry would never match, stripping the
+// pair while its count stayed live.
+func TestAfGitForwardedMarkerCarriesBareNames(t *testing.T) {
+	p := &dockerProvisioner{
+		credentialMounts: []string{"mount"},
+		spec:             ProvisionSpec{Program: "gemini"},
+	}
+	args := p.afGitConfigMarkerArgs([]string{"GIT_CONFIG_COUNT", "GIT_CONFIG_VALUE_0="})
+	require.Contains(t, args, "AF_GIT_FORWARDED=GIT_CONFIG_COUNT,GIT_CONFIG_VALUE_0",
+		"blank `NAME=` entries must reach the marker as bare names")
+	require.NotContains(t, strings.Join(args, "\x00"), "GIT_CONFIG_VALUE_0=",
+		"the `=` spelling never matches an env name — the pair would be stripped")
+}
+
 // M1 (#7891 N4): the clone the provisioning boundary runs must carry
 // --template= — a mutation passing `false` instead of the predicate would
 // leave the image's template route open. This reads the argv itself, not
