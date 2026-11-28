@@ -586,16 +586,22 @@ func (m *Manager) resolveDeleteProjectTarget(req DeleteProjectRequest) (deletePr
 			// resolves again means the stale derived id names nothing it
 			// still is (the selector's own rule, pinned by
 			// TestStaleDerivedIDDoesNotSelectARowWhoseRootResolvesAgain).
-			// Refuse only a checkout that resumed resolving as git: a
-			// present-but-non-git root is the #3530 proven-mismatch release
-			// the #7829 check above already decided, not this reappearance
-			// — in that family the root never resolves as git. Falling
-			// through deregisters the row while the #7854-protected session
-			// stays live — the orphan this scan exists to prevent. The
-			// retry either targets the restored checkout's real identity
-			// (path form) or degrades to the idempotent no-op the selector
-			// pins (id form).
-			if _, gitErr := config.RepoFromPath(belongingRoot); gitErr == nil {
+			// The #7829 present-but-non-git check above ran while this root
+			// was still absent, so it observed the absent path and
+			// established no proven mismatch for a root that reappears here
+			// as a plain directory; releasing either a git OR a non-git
+			// reappearance would deregister the row while the
+			// #7854-protected session stays live — the orphan this scan
+			// exists to prevent. The one thing that lets a reappearing
+			// root release is a successful differing marker read the
+			// snapshot already consumed (recordedRootIdentityDisproven):
+			// the root provably belonged to a different project, so the
+			// row's recorded identity stands and the delete proceeds
+			// exactly as it did on master (#3530's proven-mismatch shape).
+			// The retry either targets the restored checkout's real
+			// identity (path form) or degrades to the idempotent no-op
+			// the selector pins (id form).
+			if !m.recordedRootIdentityDisproven(repoID) {
 				return deleteProjectTarget{repoID: repoID}, fmt.Errorf("delete project %s: its recorded root %s resolved again before af could establish which live sessions it owned — nothing was changed; delete again", repoID, belongingRoot)
 			}
 		}

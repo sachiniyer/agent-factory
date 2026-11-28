@@ -236,8 +236,10 @@ func TestAbsentRootDeleteRefusesWhileASiblingWorktreeSessionKeysUnderTheBareIden
 // through silently — no scan, no refusal, no log — and the delete deregistered
 // the row while the #7854-protected session stayed live. The fix refuses the
 // same way the selector treats a resolving root: the stale derived id names
-// nothing it still is. A present-but-non-git root is the #3530 proven-mismatch
-// release the #7829 check already decided, not this reappearance.
+// nothing it still is. The refusal must hold for either shape the reappearing
+// root takes — a git checkout resumed, or a plain directory the #7829 check
+// (which ran while the root was absent) never got to clear — because neither
+// established which live sessions the row owned.
 func TestAbsentRootDeleteRefusesWhenItsRecordedRootResolvesAgainBeforeTheAbsenceProbe(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	installOptionsRecordingBackend(t)
@@ -267,43 +269,75 @@ func TestAbsentRootDeleteRefusesWhenItsRecordedRootResolvesAgainBeforeTheAbsence
 	// must not let the delete deregister the row while the bare-identity
 	// session stays live.
 	t.Cleanup(func() { deleteProjectPostClaimantHookForTest = nil })
+	// restore reappears the recorded root after the claimant scan and before
+	// the absence probe, in either shape the original three-way switch had to
+	// cover: a git checkout resumed, and a plain non-git directory the #7829
+	// check (run while the root was absent) never got to clear.
+	restore := func(t *testing.T) {
+		if err := exec.Command("git", "init", worktree).Run(); err != nil {
+			t.Fatalf("restore a git checkout mid-delete: %v", err)
+		}
+	}
+	restorePlainDir := func(t *testing.T) {
+		if err := os.MkdirAll(worktree, 0o755); err != nil {
+			t.Fatalf("restore a plain directory mid-delete: %v", err)
+		}
+	}
 	// Both request forms that deregister the row reach the same refusal: by
 	// path, and by the derived identity the row's reconciler invents.
-	for _, req := range []DeleteProjectRequest{
-		{RepoPath: worktree},
-		{RepoID: derived},
+	for _, tc := range []struct {
+		name    string
+		restore func(t *testing.T)
+	}{
+		{"git", restore},
+		{"plain-dir", restorePlainDir},
 	} {
-		// The recorded root must be absent at selection time so the row is
-		// selected as absent-rooted; the hook restores a checkout after the
-		// claimant scan, before the absence probe.
-		if err := os.RemoveAll(worktree); err != nil {
-			t.Fatalf("remove the recorded root before the delete: %v", err)
-		}
-		hookRan := false
-		deleteProjectPostClaimantHookForTest = func() {
-			if hookRan {
-				return
+		for _, req := range []DeleteProjectRequest{
+			{RepoPath: worktree},
+			{RepoID: derived},
+		} {
+			// The recorded root must be absent at selection time so the row is
+			// selected as absent-rooted; the hook restores a checkout after the
+			// claimant scan, before the absence probe.
+			if err := os.RemoveAll(worktree); err != nil {
+				t.Fatalf("remove the recorded root before the delete: %v", err)
 			}
-			hookRan = true
-			if err := exec.Command("git", "init", worktree).Run(); err != nil {
-				t.Fatalf("restore a checkout mid-delete: %v", err)
+			hookRan := false
+			deleteProjectPostClaimantHookForTest = func() {
+				if hookRan {
+					return
+				}
+				hookRan = true
+				tc.restore(t)
 			}
-		}
-		result, delErr := manager.DeleteProject(req)
-		if !hookRan {
-			t.Fatalf("request %+v: the fixture never reached the absence probe, so it pins nothing", req)
-		}
-		if delErr == nil {
-			t.Fatalf("request %+v: the recorded root resolved again before the absence probe — the delete must refuse rather than deregister the row while the bare-identity session stays live", req)
-		}
-		for _, want := range []string{"nothing was changed", "resolved again", "delete again", worktree} {
-			if !strings.Contains(delErr.Error(), want) {
-				t.Fatalf("request %+v: the refusal must name %q: %v", req, want, delErr)
+			result, delErr := manager.DeleteProject(req)
+			if !hookRan {
+				t.Fatalf("request %+v (%s): the fixture never reached the absence probe, so it pins nothing", req, tc.name)
 			}
-		}
-		if len(result.Archived) != 0 || len(result.Killed) != 0 || result.Deregistered {
-			t.Fatalf("request %+v: a refused delete must archive, kill and deregister nothing: archived=%d killed=%d deregistered=%v",
-				req, len(result.Archived), len(result.Killed), result.Deregistered)
+			if delErr == nil {
+				t.Fatalf("request %+v (%s): the recorded root resolved again before the absence probe — the delete must refuse rather than deregister the row while the bare-identity session stays live", req, tc.name)
+			}
+			// A git reappearance reaches the absence probe and is refused by the
+			// !absent case; a plain-directory reappearance is refused earlier by
+			// the #7829 present-but-non-git guard (the hook runs before it). The
+			// finding's narrow window — root absent at that guard, reappears as a
+			// plain dir between it and the probe — is closed by the !absent case
+			// refusing unless recordedRootIdentityDisproven, but no test hook
+			// lands in that window, so the plain-dir variant pins the guard
+			// instead. Either way the delete must refuse and name the root.
+			want := []string{"nothing was changed", worktree}
+			if tc.name == "git" {
+				want = append(want, "resolved again", "delete again")
+			}
+			for _, w := range want {
+				if !strings.Contains(delErr.Error(), w) {
+					t.Fatalf("request %+v (%s): the refusal must name %q: %v", req, tc.name, w, delErr)
+				}
+			}
+			if len(result.Archived) != 0 || len(result.Killed) != 0 || result.Deregistered {
+				t.Fatalf("request %+v (%s): a refused delete must archive, kill and deregister nothing: archived=%d killed=%d deregistered=%v",
+					req, tc.name, len(result.Archived), len(result.Killed), result.Deregistered)
+			}
 		}
 	}
 	assertAbsentRowSurvives(t, manager, project.ID, []string{derived, bareID}, [][2]string{{bareID, "sibling-session"}})
