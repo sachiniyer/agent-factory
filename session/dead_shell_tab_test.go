@@ -135,6 +135,32 @@ func TestShellExitSkipsUnprovenAnswers(t *testing.T) {
 	}
 }
 
+// recordExitsBudget bounds one RecordTabExits pass: a wedged tmux pays its
+// probe's full bounded wait per tab, so the budget check between probes ends
+// the pass after the first stall instead of multiplying the wait by tabs.
+func TestRecordTabExitsBudgetStopsProbing(t *testing.T) {
+	const agentName = "af_dead_shell"
+	shellA := agentName + tmuxTabSeparator + "terminal"
+	shellB := agentName + tmuxTabSeparator + "extra"
+	livenessAnswers(t, map[string][2]bool{shellA: {false, true}, shellB: {false, true}})
+	inst, _ := shellTabFixture(t, map[string]bool{agentName: true, shellA: true, shellB: true})
+	inst.Tabs = append(inst.Tabs, &Tab{ID: "shell-b", Name: "extra", Kind: TabKindShell,
+		tmux: inst.Tabs[1].tmux})
+	probed := 0
+	prev := probeTabLiveness
+	probeTabLiveness = func(ts *tmux.TmuxSession) (bool, bool) {
+		probed++
+		time.Sleep(recordExitsBudget + 500*time.Millisecond)
+		return prev(ts)
+	}
+
+	inst.RecordTabExits()
+
+	assert.Equal(t, 1, probed, "the pass ends after the first over-budget probe")
+	assert.NotNil(t, inst.Tabs[1].Exit)
+	assert.Nil(t, inst.Tabs[2].Exit, "the unprobed tab is never stamped")
+}
+
 // The async kick is once-in-flight: snapshot reads may call it every poll
 // without ever waiting on tmux (R4) or stacking probes.
 func TestKickShellExitProbeOnceInFlight(t *testing.T) {
