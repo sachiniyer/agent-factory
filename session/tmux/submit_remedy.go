@@ -640,13 +640,18 @@ func idleComposerPlaceholderRow(norm string) bool {
 // leading prompt glyph, so the wrapped-tail acceptance must not fire, or a
 // wrong accept would submit the user's own draft together with our prompt.
 //
-// One more column on that tail row is accepted: when the row's rendered
-// content fills the pane exactly, tmux's cursor_x cannot reach the one-past-
-// end column contentEndCol reports, so it parks on the last cell at
-// pane_width-1 (#7901). That column is the park position ONLY when tmux's own
-// #{pane_width} — answered in the same display-message as the cursor — proves
-// the row fills every cell; an unreported or different width, a short row,
-// and a row whose content end is anywhere else all keep the withhold.
+// An exact-fill tail row has two parks, and the branch above already accepts
+// the first: after a natural write that fills the row, tmux leaves cursor_x
+// AT the one-past-end column — cx = sx with wrap pending — which is exactly
+// contentEndCol. The second park is pane_width-1: an agent that positions its
+// composer cursor with an explicit cursor-move is clamped by tmux to the last
+// cell, and that is how the agents this remedy serves draw — codex-rs emits a
+// CUP for the frame's cursor on every draw (its textarea clamps the last
+// row's cursor column to width-1 before the escape ever leaves the process)
+// (#7901). That column is accepted ONLY when tmux's own #{pane_width} —
+// answered in the same display-message as the cursor — proves the row fills
+// every cell; an unreported or different width, a short row, and a row whose
+// content end is anywhere else all keep the withhold.
 //
 // The second return names the condition that failed, so the withheld-remedy
 // warning says WHICH of hidden cursor, foreign composer content, moved
@@ -758,13 +763,15 @@ func stillChipComposer(boundary, pane string, cursor paneCursorState, chipText s
 	if blankTail && cursor.Col == end {
 		return true, ""
 	}
-	// A row whose rendered content fills the pane exactly cannot show the
-	// one-past-end column contentEndCol reports for it: tmux's zero-based
-	// cursor_x parks on the last cell, at pane_width-1 (#7901). Accept that
-	// column only when the width tmux itself answered in the same
-	// display-message proves the fill — a merely-longest row, and an
-	// absent, unparseable or zero width, all keep the withhold: a wrong
-	// accept submits the user's own text.
+	// The second park of an exact-fill row: a cursor-move cannot address the
+	// one-past-end column — tmux's cursormove clamps px to sx-1 — so an agent
+	// that positions its composer cursor explicitly reports pane_width-1 on a
+	// row that fills the pane; a natural write's cursor_x at the one-past-end
+	// column was already accepted above (#7901). Accept the clamped column
+	// only when the width tmux itself answered in the same display-message
+	// proves the fill — a merely-longest row, and an absent, unparseable or
+	// non-positive width, all keep the withhold: a wrong accept submits the
+	// user's own text.
 	if blankTail && cursor.Col == end-1 {
 		if exactFillRow(gRows[cursor.Row], end, cursor.PaneWidth) {
 			return true, ""
@@ -774,16 +781,16 @@ func stillChipComposer(boundary, pane string, cursor paneCursorState, chipText s
 	return false, "the cursor is not where an undisturbed draft leaves it"
 }
 
-// exactFillRow reports whether row is the one shape that can park the cursor
-// one column inside its content end in an undisturbed draft — a row whose
-// rendered content fills the pane exactly (#7901). width is tmux's own
-// #{pane_width}, answered in the same display-message as the cursor; an
-// absent, unparseable or non-positive width is "width unknown" and can never
-// prove the fill. The fill is proven in the cell measure cursor_x counts in
-// — xansi.StringWidth — AND the row's rune-indexed content end must land at
-// the width too: on a row holding a wide rune (CJK, emoji) the two can never
-// coincide, so a cursor one column inside such a row's end is a navigated
-// position, not the park, and keeps the withhold.
+// exactFillRow reports whether row is the one shape that can park a
+// cursor-moved cursor one column inside its content end in an undisturbed
+// draft — a row whose rendered content fills the pane exactly (#7901). width
+// is tmux's own #{pane_width}, answered in the same display-message as the
+// cursor; an absent, unparseable or non-positive width is "width unknown" and
+// can never prove the fill. The fill is proven in the cell measure cursor_x
+// counts in — xansi.StringWidth — AND the row's rune-indexed content end must
+// land at the width too: on a row holding a wide rune (CJK, emoji) the two
+// can never coincide, so a cursor one column inside such a row's end is a
+// navigated position, not the park, and keeps the withhold.
 func exactFillRow(row string, end, width int) bool {
 	return end == width && xansi.StringWidth(row) == width
 }

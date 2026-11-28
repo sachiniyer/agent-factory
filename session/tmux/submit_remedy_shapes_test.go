@@ -885,27 +885,32 @@ func TestChipStartsOnAnchorRowRejectsAnInteriorBlank(t *testing.T) {
 }
 
 // exactFillPane is the grid frame for the #7901 shape: "› [Pasted Content 87
-// chars]" is 27 runes, so a 9-column pane wraps it across three physical rows
-// that each fill the pane — the chip's tail row "87 chars]" renders all 9
-// cells, and tmux parks the cursor on its last cell at cursor_x=8, one column
-// inside the one-past-end column contentEndCol reports.
+// chars]" is 27 runes, so a 9-column pane wraps it across three physical
+// rows. capture-pane delivers each row trimmed — the middle row's trailing
+// space never appears — so the fixture shows it as it arrives: " Content" is
+// 8 cells, and only the tail row "87 chars]" fills all 9. An agent that draws
+// its composer cursor with an explicit cursor-move is clamped by tmux to the
+// last cell of that full row — cursor_x=8, one column inside the one-past-end
+// column contentEndCol reports; a natural write would have left cursor_x=9.
 const exactFillPane = "› [Pasted" + "\n" +
-	" Content " + "\n" +
+	" Content" + "\n" +
 	"87 chars]" + "\n"
 
 const exactFillChip = "[PastedContent87chars]"
 
 // TestStillChipComposerAcceptsExactFillTailRow pins the #7901 remedy: a
-// wrapped chip whose last physical row fills the pane exactly parks the
-// cursor on that row's LAST cell — tmux's zero-based cursor_x cannot reach
-// the one-past-end column contentEndCol reports — so that column is accepted
-// when tmux's own #{pane_width}, answered in the same display-message as the
-// cursor, proves the row fills every cell. Master withholds this frame: the
-// parked column never equals contentEndCol, and no pane width rides the
-// cursor answer.
+// wrapped chip whose last physical row fills the pane exactly has TWO parks —
+// cursor_x at the one-past-end column after a natural write (the existing
+// content-end accept; master already remedies it), and cursor_x at
+// pane_width-1 after an explicit cursor-move (tmux's cursormove clamps px to
+// sx-1; codex-rs emits a CUP for the frame's composer cursor on every draw).
+// The second park is accepted only when tmux's own #{pane_width}, answered in
+// the same display-message as the cursor, proves the row fills every cell.
+// Master withholds this frame: the clamped column never equals contentEndCol,
+// and no pane width rode the cursor answer.
 func TestStillChipComposerAcceptsExactFillTailRow(t *testing.T) {
-	// The tail row "87 chars]" fills a 9-column pane; the cursor rests on its
-	// last cell, at paneWidth-1.
+	// The tail row "87 chars]" fills a 9-column pane; a cursor-move parks on
+	// its last cell, at paneWidth-1.
 	if ok, why := stillChipComposer(exactFillPane, exactFillPane,
 		paneCursorState{Visible: true, Row: 2, Col: 8, PaneWidth: 9}, exactFillChip); !ok {
 		t.Fatalf("exact-fill tail row, cursor at paneWidth-1 with tmux's width: ok=false why=%q, want ok=true (#7901)", why)
@@ -918,15 +923,26 @@ func TestStillChipComposerAcceptsExactFillTailRow(t *testing.T) {
 		paneCursorState{Visible: true, Row: 0, Col: 7, PaneWidth: 8}, "[Paste"); !ok {
 		t.Fatalf("single-row exact-fill anchor, cursor at paneWidth-1: ok=false why=%q, want ok=true", why)
 	}
+
+	// A wide-rune tail row still remedies through master's own accept — the
+	// rune-indexed end IS a reachable cell column there even though the fill
+	// gate can never prove it.
+	widePane := "› [Pa" + "\n" + "t 87" + string(rune(0x4E2D)) + "\n"
+	wideChip := "[Pat87" + string(rune(0x4E2D))
+	if ok, why := stillChipComposer(widePane, widePane,
+		paneCursorState{Visible: true, Row: 1, Col: 5, PaneWidth: 6}, wideChip); !ok {
+		t.Fatalf("wide-rune tail row, cursor at the rune-indexed end: ok=false why=%q, want ok=true (master's content-end accept)", why)
+	}
 }
 
 // TestStillChipComposerWithholdsExactFillWithoutThePaneWidthProof bounds the
 // #7901 widening to the one shape it exists for. The new accept fires ONLY on
-// a row whose rendered width equals the pane width tmux itself reported —
-// every other landing of the same one-column-inside position, and every
-// column around it, keeps master's withhold. The gate-reason cases fail on
-// master for the stated reason: master's cursor answer carried no pane width,
-// and its only withhold reason was the generic one.
+// a row whose rendered width equals the pane width tmux itself reported — the
+// only shape whose cursor-move park lands one column inside the content end —
+// and every other landing of that column, and every column around it, keeps
+// master's withhold. The gate-reason cases fail on master for the stated
+// reason: master's cursor answer carried no pane width, and its only withhold
+// reason was the generic one.
 func TestStillChipComposerWithholdsExactFillWithoutThePaneWidthProof(t *testing.T) {
 	for name, tc := range map[string]struct {
 		pane   string
@@ -936,9 +952,11 @@ func TestStillChipComposerWithholdsExactFillWithoutThePaneWidthProof(t *testing.
 	}{
 		// The same chip tail row one column short of the pane width: the
 		// column is the park position only of a row that fills the pane,
-		// and a 6-cell row on a 7-pane does not.
+		// and a 6-cell row on a 7-pane does not. The interior row "ent 87"
+		// arrives trimmed — capture-pane strips the trailing space a
+		// faithful capture could never contain.
 		"tail row one column short of the pane width": {
-			pane: strings.Join([]string{"› [Past", "ed Cont", "ent 87 ", "chars]"}, "\n") + "\n",
+			pane: strings.Join([]string{"› [Past", "ed Cont", "ent 87", "chars]"}, "\n") + "\n",
 			chip: exactFillChip,
 			// "chars]" is 6 cells of a 7-pane; the cursor sits at
 			// contentEndCol-1, which is the park position only under an
@@ -963,30 +981,27 @@ func TestStillChipComposerWithholdsExactFillWithoutThePaneWidthProof(t *testing.
 			cursor: paneCursorState{Visible: true, Row: 2, Col: 8, PaneWidth: 10},
 			why:    "pane_width does not prove that fill",
 		},
-		// A cursor one column SHORT of the park cell on the exact-fill
-		// row is mid-chip, like any other non-end column — the generic
-		// withhold, which master produces for this frame too.
-		"exact fill, cursor one column short of the park cell": {
+		// A cursor one column SHORT of the cursor-move park cell on the
+		// exact-fill row is mid-chip, like any other non-end column — the
+		// generic withhold, which master produces for this frame too.
+		"exact fill, cursor one column short of the cursor-move park cell": {
 			pane:   exactFillPane,
 			chip:   exactFillChip,
 			cursor: paneCursorState{Visible: true, Row: 2, Col: 7, PaneWidth: 9},
 			why:    "not where an undisturbed draft leaves it",
 		},
-		// A tail row holding a wide rune: the cell-measured fill
-		// (StringWidth 8) and the rune-indexed content end (5) can never
-		// both equal the width, so even the parked cell — cursor_x at
-		// paneWidth-1 — is not an accepted position. Master withholds
+		// A tail row holding a wide rune (U+4E2D): "t 87中" is 5 runes but
+		// fills all 6 cells — a trimmed exact fill. The cell-measured
+		// width (6) matches tmux's pane width while the rune-indexed
+		// content end (5) cannot, so the natural-write column (6) is not
+		// the rune end either: neither accept reaches it. Master withholds
 		// identically; the gate keeps it so.
-		"wide rune, cursor on the parked cell": {
-			// The tail row is 7 runes but 8 cells — the wide rune
-			// (U+4E2D) makes the cell-measured fill exact while the
-			// rune-indexed content end stays 5.
-			pane: strings.Join([]string{"› [Paste", "d Conten",
-				"t 87" + string(rune(0x4E2D)) + "  "}, "\n") + "\n",
-			chip: "[PastedContent87" + string(rune(0x4E2D)),
-			// 7 is paneWidth-1 — where the undisturbed park would sit —
-			// but the rune-indexed end (5) never reaches the width.
-			cursor: paneCursorState{Visible: true, Row: 2, Col: 7, PaneWidth: 8},
+		"wide rune, cursor at the natural-write column": {
+			pane: "› [Pa" + "\n" + "t 87" + string(rune(0x4E2D)) + "\n",
+			chip: "[Pat87" + string(rune(0x4E2D)),
+			// 6 is the column a natural write leaves (cx = sx); it is
+			// neither the rune-indexed end (5) nor one inside it.
+			cursor: paneCursorState{Visible: true, Row: 1, Col: 6, PaneWidth: 6},
 			why:    "not where an undisturbed draft leaves it",
 		},
 		// The same wide-rune row with the cursor one column inside its
@@ -995,10 +1010,9 @@ func TestStillChipComposerWithholdsExactFillWithoutThePaneWidthProof(t *testing.
 		// navigated position, never the park. The rune-indexed end term
 		// keeps it withheld.
 		"wide rune, cursor one column inside the content end": {
-			pane: strings.Join([]string{"› [Paste", "d Conten",
-				"t 87" + string(rune(0x4E2D)) + "  "}, "\n") + "\n",
-			chip:   "[PastedContent87" + string(rune(0x4E2D)),
-			cursor: paneCursorState{Visible: true, Row: 2, Col: 4, PaneWidth: 8},
+			pane:   "› [Pa" + "\n" + "t 87" + string(rune(0x4E2D)) + "\n",
+			chip:   "[Pat87" + string(rune(0x4E2D)),
+			cursor: paneCursorState{Visible: true, Row: 1, Col: 4, PaneWidth: 6},
 			why:    "pane_width does not prove that fill",
 		},
 	} {

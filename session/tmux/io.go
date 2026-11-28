@@ -634,17 +634,23 @@ const paneCursorStateFormat = "#{cursor_y} #{cursor_x} #{?cursor_flag,1,0} #{pan
 // parsePaneCursorState parses one cursor-state answer line. The first three
 // fields must all parse or the answer is unreadable; the fourth — the pane
 // width #7901 added — is optional: an older producer's 3-field answer still
-// parses with PaneWidth 0 ("width unknown"). An unparseable fourth field also
-// leaves the width unknown rather than failing the read, since the only
-// consumer of the width — the exact-fill remedy check — withholds on unknown.
+// parses with PaneWidth 0 ("width unknown"). A fourth field that is not a
+// positive decimal integer — garbage, a partial number, zero or negative —
+// also leaves the width unknown rather than failing the read or trusting it,
+// since the only consumer of the width — the exact-fill remedy check —
+// withholds on unknown.
 func parsePaneCursorState(line string) (paneCursorState, error) {
 	var state paneCursorState
 	var visible int
-	n, _ := fmt.Sscanf(line, "%d %d %d %d", &state.Row, &state.Col, &visible, &state.PaneWidth)
-	if n < 3 {
-		return paneCursorState{}, fmt.Errorf("want at least 3 fields in %q, parsed %d", line, n)
+	if _, err := fmt.Sscanf(line, "%d %d %d", &state.Row, &state.Col, &visible); err != nil {
+		return paneCursorState{}, fmt.Errorf("want at least 3 fields in %q: %v", line, err)
 	}
 	state.Visible = visible != 0
+	if fields := strings.Fields(line); len(fields) >= 4 {
+		if w, err := strconv.Atoi(fields[3]); err == nil && w > 0 {
+			state.PaneWidth = w
+		}
+	}
 	return state, nil
 }
 

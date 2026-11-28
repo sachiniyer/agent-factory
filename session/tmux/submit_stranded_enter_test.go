@@ -797,11 +797,14 @@ func TestWrappedChipTailCursorNoNewlineSwallowStillRemedies(t *testing.T) {
 
 // TestExactFillWrappedChipTailStillRemedies is the #7901 shape end-to-end: the
 // chip's last wrapped row fills the pane exactly ("› [Pasted Content 89
-// chars]" is 27 runes — three full 9-cell rows at pane width 9), so tmux parks
-// the cursor on that row's LAST cell at paneWidth-1, one column inside the
-// one-past-end column contentEndCol reports. The cursor-state wire carries
-// tmux's own #{pane_width}, which proves the fill, so the strand gets its one
-// remedy Enter. Master withholds this frame: the parked column never equalled
+// chars]" is 27 runes — at pane width 9 its tail row "89 chars]" renders all
+// 9 cells), and the agent draws its composer cursor with an explicit
+// cursor-move — codex-rs emits a CUP for the frame's cursor on every draw —
+// which tmux clamps to the last cell at paneWidth-1, one column inside the
+// one-past-end column a natural write leaves (that column is master's own
+// content-end accept). The cursor-state wire carries tmux's own
+// #{pane_width}, which proves the fill, so the strand gets its one remedy
+// Enter. Master withholds this frame: the clamped column never equalled
 // contentEndCol, and no pane width rode the cursor answer.
 func TestExactFillWrappedChipTailStillRemedies(t *testing.T) {
 	chipRow := "› " + codexChipRender(redeliverPrompt)[0]
@@ -821,10 +824,11 @@ func TestExactFillWrappedChipTailStillRemedies(t *testing.T) {
 
 // TestExactFillWrappedChipTailWidthGateWithholds bounds the #7901 widening
 // end-to-end: the cursor sitting one column inside the tail row's content end
-// is accepted ONLY when tmux's reported pane width proves that row fills the
-// pane. A short tail row, an unreported width (the older 3-field answer), and
-// a mismatched width each keep master's withhold — the park position of an
-// exact fill is the only shape the new accept exists for.
+// — the cursor-move park of an exact fill — is accepted ONLY when tmux's
+// reported pane width proves that row fills the pane. A short tail row, an
+// unreported width (the older 3-field answer), and a mismatched width each
+// keep master's withhold — that one park is the only shape the new accept
+// exists for.
 func TestExactFillWrappedChipTailWidthGateWithholds(t *testing.T) {
 	chipRow := "› " + codexChipRender(redeliverPrompt)[0]
 	for name, m := range map[string]*stagedDraftPane{
