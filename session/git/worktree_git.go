@@ -232,7 +232,25 @@ func (g *GitWorktree) runGitCommandContextWithEnvironment(
 	// Fail fast instead of blocking on a credential/passphrase prompt when a
 	// remote needs auth and no terminal is attached. Force stable diagnostics so
 	// repository classification is fail-closed and locale-independent.
-	cmd.Env = repositoryPathEnvironment(environment)
+	//
+	// repositoryPathEnvironment strips Git's repository-local selectors —
+	// including GIT_CONFIG_COUNT / GIT_CONFIG_PARAMETERS / GIT_CONFIG_KEY_* /
+	// GIT_CONFIG_VALUE_* — to block AMBIENT repo-local selection (#4202).
+	// afGitScopedEnvironment preserves those same count entries when the
+	// operator forwarded them WITH a host value through AF_GIT_FORWARDED
+	// (#7903), so the unconditional strip leaves the operator's forwarded
+	// config route (http.sslCAInfo and friends) silently inert for af's
+	// credentialed git. reinsertForwardedGitConfigCount re-applies the count
+	// entries the operator claimed after the strip: a count entry present in
+	// environment AND claimed in the forwarded set is a complete operator
+	// forward — afGitScopedEnvironment already dropped unforwarded count
+	// entries and NeutralizeIncompleteGitConfigCount pinned incomplete sets —
+	// so it must deliver, while an ambient count (AF_GIT_FORWARDED unset, e.g.
+	// the host daemon) has no matching claim and stays stripped, preserving
+	// #4202's protection. Non-count forwarded routes (GIT_CONFIG_GLOBAL,
+	// GIT_CONFIG_SYSTEM, XDG_CONFIG_HOME, the TLS env names) are not in
+	// repositoryPathEnvironment's strip list and need no re-insertion.
+	cmd.Env = reinsertForwardedGitConfigCount(environment, repositoryPathEnvironment(environment))
 	// Own process group so the deadline kills git AND its transport child
 	// together. exec.CommandContext's default Cancel SIGKILLs only the git
 	// process, leaving ssh / git-remote-https orphaned and still holding the
@@ -402,6 +420,62 @@ func afGitTrustName(name string) bool {
 		"GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM", "GIT_CONFIG_NOSYSTEM",
 		"XDG_CONFIG_HOME", "GIT_CONFIG_COUNT", "GIT_CONFIG_PARAMETERS",
 		afGitConfigEnvName, afGitForwardedEnvName:
+		return true
+	}
+	return strings.HasPrefix(name, "GIT_CONFIG_KEY_") || strings.HasPrefix(name, "GIT_CONFIG_VALUE_")
+}
+
+// reinsertForwardedGitConfigCount restores operator-forwarded GIT_CONFIG_COUNT
+// config routes that repositoryPathEnvironment stripped from environment. It is
+// the claim-aware counterpart to repositoryPathEnvironment's unconditional
+// count strip: repositoryPathEnvironment (added in #4202 to block AMBIENT
+// repo-local selection) predates the AF_GIT_FORWARDED claim system (#7903) and
+// strips every GIT_CONFIG_COUNT / GIT_CONFIG_PARAMETERS / GIT_CONFIG_KEY_* /
+// GIT_CONFIG_VALUE_* entry with no notion of an operator claim — stripping the
+// very count entries afGitScopedEnvironment deliberately preserved and leaving
+// the operator's forwarded config route (http.sslCAInfo and friends) dead-on-
+// arrival for af's credentialed git.
+//
+// environment is the pre-strip slice (afGitScopedEnvironment's output for af's
+// own git); stripped is repositoryPathEnvironment(environment). A count entry
+// present in environment AND claimed in the AF_GIT_FORWARDED set is a complete
+// operator forward — afGitScopedEnvironment already dropped unforwarded count
+// entries and NeutralizeIncompleteGitConfigCount pinned incomplete sets — so
+// re-appending it after the strip delivers the operator's config. An ambient
+// count (AF_GIT_FORWARDED unset, e.g. the host daemon) has no matching claim and
+// stays stripped, preserving #4202's protection. repositoryPathEnvironment
+// strips count-family entries by name, so stripped never holds one and the
+// append never duplicates. Non-count forwarded routes (GIT_CONFIG_GLOBAL,
+// GIT_CONFIG_SYSTEM, XDG_CONFIG_HOME, the TLS env names) are not in the strip
+// list and need no re-insertion.
+func reinsertForwardedGitConfigCount(environment, stripped []string) []string {
+	forwarded := afGitForwardedSet()
+	if len(forwarded) == 0 {
+		return stripped
+	}
+	out := stripped
+	for _, entry := range environment {
+		name, _, _ := strings.Cut(entry, "=")
+		if afGitForwardedConfigCountName(name, forwarded) {
+			out = append(out, entry)
+		}
+	}
+	return out
+}
+
+// afGitForwardedConfigCountName reports whether name is a GIT_CONFIG_COUNT,
+// GIT_CONFIG_PARAMETERS, or indexed GIT_CONFIG_KEY_i / GIT_CONFIG_VALUE_i
+// entry the operator forwarded WITH a host value through AF_GIT_FORWARDED —
+// the count family afGitScopedEnvironment preserves (#7903) and
+// repositoryPathEnvironment strips unconditionally (#4202). Only a name in the
+// forwarded set qualifies, so an ambient count entry (no claim) is not
+// re-injected even if it reached environment.
+func afGitForwardedConfigCountName(name string, forwarded map[string]bool) bool {
+	if !forwarded[name] {
+		return false
+	}
+	switch name {
+	case "GIT_CONFIG_COUNT", "GIT_CONFIG_PARAMETERS":
 		return true
 	}
 	return strings.HasPrefix(name, "GIT_CONFIG_KEY_") || strings.HasPrefix(name, "GIT_CONFIG_VALUE_")
