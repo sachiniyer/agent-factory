@@ -75,9 +75,13 @@ func TestReadPaneCursorStateCarriesVisibilityWithoutChangingTerminalModes(t *tes
 		name    string
 		wire    string
 		visible bool
+		width   int
 	}{
 		{name: "visible", wire: "7 11 1", visible: true},
 		{name: "hidden", wire: "7 11 0", visible: false},
+		// The current format's #{pane_width} tail parses when present; an
+		// older 3-field answer above parses as width unknown (zero).
+		{name: "visible with pane width", wire: "7 11 1 80", visible: true, width: 80},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			var requestedFormat string
@@ -91,7 +95,7 @@ func TestReadPaneCursorStateCarriesVisibilityWithoutChangingTerminalModes(t *tes
 
 			state, err := session.readPaneCursorState()
 			require.NoError(t, err)
-			require.Equal(t, paneCursorState{Row: 7, Col: 11, Visible: tt.visible}, state)
+			require.Equal(t, paneCursorState{Row: 7, Col: 11, Visible: tt.visible, PaneWidth: tt.width}, state)
 			require.Equal(t, paneCursorStateFormat, requestedFormat,
 				"cursor visibility diagnostics must ride their own focused query (paneCursorStateFormat), not be re-routed through terminalStateFormat")
 		})
