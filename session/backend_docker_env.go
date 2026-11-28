@@ -226,20 +226,17 @@ func (p *dockerProvisioner) agentGitConfigFile() string {
 // spelling assigns name, or "" — mirroring how docker resolves repeated
 // -e entries (last wins). A bare `-e NAME` resolves against the daemon
 // environment, which is what the container actually receives.
+//
+// Shares the validators' pflag walk (dockerRunArgsEnvEntries) so every
+// spelling the validators accept — separate, =value, attached, -e=, and
+// combined short clusters (-te NAME=v, -teNAME=v) — resolves here too, and
+// the resolver cannot drift from the validators. The resolver is the sole
+// decider of where agentGitConfigFile writes safe.directory, so a spelling
+// the validators pass but this walk misses leaves the mark in the wrong
+// gitconfig while the agent's git reads another (#7891 R4).
 func dockerRunArgsEnvValue(args []string, name string) string {
 	value := ""
-	for i, arg := range args {
-		var entry string
-		switch {
-		case arg == "-e" || arg == "--env":
-			if i+1 < len(args) {
-				entry = args[i+1]
-			}
-		case strings.HasPrefix(arg, "--env="):
-			entry = strings.TrimPrefix(arg, "--env=")
-		case strings.HasPrefix(arg, "-e"):
-			entry = strings.TrimPrefix(arg, "-e")
-		}
+	dockerRunArgsEnvEntries(args, func(entry string) {
 		if n, v, ok := strings.Cut(entry, "="); ok && n == name {
 			value = v
 		} else if entry == name {
@@ -247,7 +244,7 @@ func dockerRunArgsEnvValue(args []string, name string) string {
 				value = v
 			}
 		}
-	}
+	})
 	return value
 }
 
