@@ -666,9 +666,39 @@ func (g *GitWorktree) cleanup(allowUnregisteredRemoval bool) (CleanupState, erro
 	// the ordinary worktree and branch; on any refusal or failure, keep the session
 	// record so a retry still has the exact path + identity rather than orphaning a
 	// full duplicate after an explicit kill.
-	if err := g.cleanupRetainedArchiveTrees(); err != nil {
+	//
+	// The cleanup performs raw, unbounded filesystem syscalls (open/statx/unlinkat)
+	// against the retained tree's parent, which may sit on a different, stallable
+	// filesystem than the agent-factory home (#3171): a cross-device archive records
+	// the retained tree beside the ORIGINAL worktree source, not inside af's home.
+	// Bound them with the same deadline the repo-gone twin of this call already uses
+	// (worktree_repo_gone_cleanup.go): on a stall the kill returns unknown, keeps the
+	// record as the retry handle, and releases the kills-in-flight guard and op lock
+	// instead of wedging forever — the rule daemon/killbound.go codifies for every
+	// kill step. The worker may be stuck in an uninterruptible syscall and cannot be
+	// safely killed; it may finish in the background, the same reasoning already
+	// written down for the repo-gone deadline arm.
+	cleanupRetained := repoGoneCleanupRetainedTrees // read at spawn: the deadline may abandon this worker
+	deleteDone := make(chan error, 1)
+	go func() { deleteDone <- cleanupRetained(g) }()
+	deadline, stopDeadline := repoGoneCleanupDeadline()
+	defer stopDeadline()
+	select {
+	case err := <-deleteDone:
+		if err != nil {
+			r.unknown = true
+			r.errs = append(r.errs, err)
+			return r.state(), errors.Join(r.errs...)
+		}
+	case <-deadline:
+		// Same stall contract as the repo-gone twin: a bounded wait that returns
+		// unknown, keeps the session record, and releases the kill's guards. The
+		// abandoned worker may finish in the background; its opened handles identify
+		// only the retained tree, so it cannot destroy unrelated data.
 		r.unknown = true
-		r.errs = append(r.errs, err)
+		r.errs = append(r.errs, fmt.Errorf(
+			"retained-tree cleanup did not finish within %s: %w",
+			repoGoneCleanupTimeout, context.DeadlineExceeded))
 		return r.state(), errors.Join(r.errs...)
 	}
 
