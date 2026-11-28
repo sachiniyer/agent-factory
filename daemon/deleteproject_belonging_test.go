@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -196,7 +197,7 @@ func TestAbsentRootDeleteRefusesWhileASiblingWorktreeSessionKeysUnderTheBareIden
 	if recorded := onlyIdentityFor(t, project.ID); recorded != "" {
 		t.Fatalf("fixture must keep the row unreconciled, got %q", recorded)
 	}
-	liveSessionUnderIdentity(t, manager, bareID, "sibling-session", sibling)
+	inst := liveSessionUnderIdentity(t, manager, bareID, "sibling-session", sibling)
 
 	// Both request forms that deregister the row reach the same refusal: by
 	// path, and by the derived identity the row's reconciler invents.
@@ -208,10 +209,17 @@ func TestAbsentRootDeleteRefusesWhileASiblingWorktreeSessionKeysUnderTheBareIden
 		if delErr == nil {
 			t.Fatalf("request %+v: the delete deregistered the row while a sibling-worktree session stayed live — the reported bug", req)
 		}
-		for _, want := range []string{"nothing was changed", "sibling-session", bare, "checkout marker", "af sessions archive"} {
+		for _, want := range []string{"nothing was changed", "sibling-session", bare, "checkout marker", "cannot be archived", "stopped or removed by the user", inst.ID, sibling} {
 			if !strings.Contains(delErr.Error(), want) {
 				t.Fatalf("request %+v: the refusal must name %q: %v", req, want, delErr)
 			}
+		}
+		// The suspect here is an in-place session — archive.go refuses to
+		// relocate an external worktree — so the refusal must print NO
+		// archive command at all: a bare `af sessions archive <title>`
+		// resolves by cwd and could land on a same-titled session elsewhere.
+		if strings.Contains(delErr.Error(), "af sessions archive") {
+			t.Fatalf("request %+v: an unarchivable suspect must get no archive command: %v", req, delErr)
 		}
 		if len(result.Archived) != 0 || len(result.Killed) != 0 || result.Deregistered {
 			t.Fatalf("request %+v: a refused delete must archive, kill and deregister nothing: archived=%d killed=%d deregistered=%v",
@@ -319,10 +327,17 @@ func TestAbsentRootDeleteRefusesWhileAPre3358SessionKeysUnderTheClonesParent(t *
 	if delErr == nil {
 		t.Fatalf("a session keyed under the clone's parent is as suspect as one keyed under the clone — the marker lives one level down")
 	}
-	for _, want := range []string{"nothing was changed", "legacy-sibling", "checkout marker", bare, "af sessions archive"} {
+	for _, want := range []string{"nothing was changed", "legacy-sibling", "checkout marker", bare, "af sessions archive --repo"} {
 		if !strings.Contains(delErr.Error(), want) {
 			t.Fatalf("the refusal must name %q: %v", want, delErr)
 		}
+	}
+	// The parent is a repository in its own right whose path provably hashes
+	// to this session's key, so --repo may be printed — but the bare-title
+	// form, which resolves by cwd onto a possibly different session, must
+	// not appear anywhere.
+	if strings.Contains(delErr.Error(), "af sessions archive -- ") {
+		t.Fatalf("the refusal must never print a bare-title command: %v", delErr)
 	}
 	if len(result.Archived) != 0 || len(result.Killed) != 0 || result.Deregistered {
 		t.Fatalf("a refused delete must archive, kill and deregister nothing: archived=%d killed=%d deregistered=%v",
@@ -425,10 +440,16 @@ func TestAbsentRootDeleteRefusesWhileASessionCannotNameItsRepository(t *testing.
 	if delErr == nil {
 		t.Fatalf("a session whose repository af cannot describe must stop the delete, not be cleared by silence")
 	}
-	for _, want := range []string{"nothing was changed", "unattributed-session", "cannot describe", "af sessions archive"} {
+	for _, want := range []string{"nothing was changed", "unattributed-session", "cannot describe", "TUI or web UI"} {
 		if !strings.Contains(delErr.Error(), want) {
 			t.Fatalf("the refusal must name %q: %v", want, delErr)
 		}
+	}
+	// A root af cannot describe yields no provable --repo: the refusal names
+	// the session for the UI surfaces instead of printing a command that
+	// could reach a different session.
+	if strings.Contains(delErr.Error(), "af sessions archive") {
+		t.Fatalf("a root af cannot describe must get no archive command: %v", delErr)
 	}
 	if len(result.Archived) != 0 || len(result.Killed) != 0 || result.Deregistered {
 		t.Fatalf("a refused delete must archive, kill and deregister nothing: archived=%d killed=%d deregistered=%v",
@@ -478,10 +499,15 @@ func TestAbsentRootDeleteReportsSessionsThatMaterializedDuringItsDeregister(t *t
 	if !result.Deregistered {
 		t.Fatalf("the row still comes off — the report is over what survived it")
 	}
-	for _, want := range []string{"late-sibling", "af sessions archive"} {
+	for _, want := range []string{"late-sibling", "cannot be archived", "stopped or removed by the user"} {
 		if !strings.Contains(delErr.Error(), want) {
 			t.Fatalf("the report must name %q: %v", want, delErr)
 		}
+	}
+	// The late suspect is in-place here — unarchivable — so the report must
+	// name it without printing an archive command that would be refused.
+	if strings.Contains(delErr.Error(), "af sessions archive") {
+		t.Fatalf("an unarchivable escaped session must get no archive command: %v", delErr)
 	}
 	manager.mu.Lock()
 	inst := manager.instances[daemonInstanceKey(bareID, "late-sibling")]
@@ -769,10 +795,16 @@ func TestAbsentRootDeleteRefusesWhileASessionsGitfilePointsUnderAWorktreesName(t
 	if delErr == nil {
 		t.Fatalf("a gitdir under a worktrees-named directory must resolve via commondir — the real common dir holds this record's marker")
 	}
-	for _, want := range []string{"nothing was changed", "sepgit-session", "checkout marker", metadata, "af sessions archive"} {
+	for _, want := range []string{"nothing was changed", "sepgit-session", "checkout marker", metadata, "TUI or web UI"} {
 		if !strings.Contains(delErr.Error(), want) {
 			t.Fatalf("the refusal must name %q: %v", want, delErr)
 		}
+	}
+	// A gitfile root resolves to a DIFFERENT repository's identity, so --repo
+	// could name the wrong project — the refusal names the session for the
+	// UI surfaces instead of printing a command.
+	if strings.Contains(delErr.Error(), "af sessions archive") {
+		t.Fatalf("a gitfile-rooted suspect must get no archive command: %v", delErr)
 	}
 	if len(result.Archived) != 0 || len(result.Killed) != 0 || result.Deregistered {
 		t.Fatalf("a refused delete must archive, kill and deregister nothing: archived=%d killed=%d deregistered=%v",
@@ -818,10 +850,13 @@ func TestAbsentRootDeleteRefusesWhileAGitdirNameEndsInWhitespace(t *testing.T) {
 	if delErr == nil {
 		t.Fatalf("a whitespace-suffixed gitdir must be preserved — the real common dir holds this record's marker")
 	}
-	for _, want := range []string{"nothing was changed", "spaced-gitdir-session", "checkout marker", "meta ", "af sessions archive"} {
+	for _, want := range []string{"nothing was changed", "spaced-gitdir-session", "checkout marker", "meta ", "TUI or web UI"} {
 		if !strings.Contains(delErr.Error(), want) {
 			t.Fatalf("the refusal must name %q: %v", want, delErr)
 		}
+	}
+	if strings.Contains(delErr.Error(), "af sessions archive") {
+		t.Fatalf("a gitfile-rooted suspect must get no archive command: %v", delErr)
 	}
 	if len(result.Archived) != 0 || len(result.Killed) != 0 || result.Deregistered {
 		t.Fatalf("a refused delete must archive, kill and deregister nothing: archived=%d killed=%d deregistered=%v",
@@ -866,10 +901,13 @@ func TestAbsentRootDeleteRefusesWhileASessionsGitfileDangles(t *testing.T) {
 	if delErr == nil {
 		t.Fatalf("a gitfile that resolves nowhere git-shaped is unproven, not cleared — the delete must refuse")
 	}
-	for _, want := range []string{"nothing was changed", "dangling-gitfile-session", "cannot describe", "af sessions archive"} {
+	for _, want := range []string{"nothing was changed", "dangling-gitfile-session", "cannot describe", "TUI or web UI"} {
 		if !strings.Contains(delErr.Error(), want) {
 			t.Fatalf("the refusal must name %q: %v", want, delErr)
 		}
+	}
+	if strings.Contains(delErr.Error(), "af sessions archive") {
+		t.Fatalf("a root af cannot describe must get no archive command: %v", delErr)
 	}
 	if len(result.Archived) != 0 || len(result.Killed) != 0 || result.Deregistered {
 		t.Fatalf("a refused delete must archive, kill and deregister nothing: archived=%d killed=%d deregistered=%v",
@@ -938,4 +976,186 @@ func TestAbsentRootDeleteClearsAPlainParentWithCleanChildren(t *testing.T) {
 	if inst == nil || inst.GetStatus() != session.Running {
 		t.Fatalf("the cleared session must stay live through the delete")
 	}
+}
+
+// managedSessionUnderIdentity injects a live AF-MANAGED worktree session —
+// externalWorktree false, so archive CAN act on it — keyed under repoID with
+// identityRoot as the root af recorded for it. liveSessionUnderIdentity
+// builds in-place sessions instead, which archive refuses outright.
+func managedSessionUnderIdentity(t *testing.T, m *Manager, repoID, title, identityRoot, worktreePath string) *session.Instance {
+	t.Helper()
+	gw, err := git.NewGitWorktreeFromStorage(identityRoot, worktreePath, title, "master", "", false, true)
+	if err != nil {
+		t.Fatalf("NewGitWorktreeFromStorage: %v", err)
+	}
+	inst := runningInstance(t, title, worktreePath, identityRoot)
+	inst.SetGitWorktreeForTest(gw)
+	m.mu.Lock()
+	m.instances[daemonInstanceKey(repoID, title)] = inst
+	m.mu.Unlock()
+	return inst
+}
+
+// clearRecordedCheckoutID strips the durable checkout id off a registered
+// row, producing the record shape that predates #1814's discrimination
+// values — the input classUnattributed exists for.
+func clearRecordedCheckoutID(t *testing.T, projectID string) {
+	t.Helper()
+	dir, err := config.ProjectRegistryDir()
+	if err != nil {
+		t.Fatalf("ProjectRegistryDir: %v", err)
+	}
+	path := filepath.Join(dir, projectID, "project.json")
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read record: %v", err)
+	}
+	var record map[string]any
+	if err := json.Unmarshal(raw, &record); err != nil {
+		t.Fatalf("parse record: %v", err)
+	}
+	delete(record, "checkout_id")
+	out, err := json.MarshalIndent(record, "", "  ")
+	if err != nil {
+		t.Fatalf("marshal record: %v", err)
+	}
+	if err := os.WriteFile(path, out, 0o644); err != nil {
+		t.Fatalf("write record: %v", err)
+	}
+}
+
+// TestAbsentRootRefusalPrintsTheProvableRepoCommandForAnArchivableSuspect
+// pins the one archive command a refusal may print: `af sessions archive
+// --repo <root> <title>` where <root> provably resolves to the session's own
+// key — an af-managed session whose identity root IS its repo's root. The
+// bare-title form, which resolves by cwd onto a possibly different
+// same-titled session, must never appear.
+func TestAbsentRootRefusalPrintsTheProvableRepoCommandForAnArchivableSuspect(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	installOptionsRecordingBackend(t)
+	parent := testguard.CanonicalTempDir(t)
+	bare, worktree, sibling := bareWorktreeFixture(t, parent)
+	project := registerTestProject(t, worktree)
+	bareID := repoID(t, bare)
+	derived := config.DerivedRepoIDForUnresolvedRoot(filepath.Clean(worktree))
+	clearRecordedRepoID(t, project.ID)
+	if err := os.RemoveAll(worktree); err != nil {
+		t.Fatalf("remove the recorded root: %v", err)
+	}
+	manager, err := NewManager(config.DefaultConfig())
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	inst := managedSessionUnderIdentity(t, manager, bareID, "managed-sibling", bare, sibling)
+
+	result, delErr := manager.DeleteProject(DeleteProjectRequest{RepoPath: worktree})
+	if delErr == nil {
+		t.Fatalf("an af-managed session under the owning clone must still stop the delete")
+	}
+	for _, want := range []string{"nothing was changed", "managed-sibling", "checkout marker", inst.ID, sibling, "TUI or web UI"} {
+		if !strings.Contains(delErr.Error(), want) {
+			t.Fatalf("the refusal must name %q: %v", want, delErr)
+		}
+	}
+	// --repo <bare> provably hashes to this session's key: the bare
+	// directory IS RepoFromPath's identity for a bare repository, and the
+	// session is keyed under exactly its hash.
+	if !strings.Contains(delErr.Error(), "af sessions archive --repo "+bare) {
+		t.Fatalf("the provable --repo command must be printed: %v", delErr)
+	}
+	if strings.Contains(delErr.Error(), "af sessions archive -- ") {
+		t.Fatalf("the refusal must never print a bare-title command: %v", delErr)
+	}
+	if len(result.Archived) != 0 || len(result.Killed) != 0 || result.Deregistered {
+		t.Fatalf("a refused delete must archive, kill and deregister nothing: archived=%d killed=%d deregistered=%v",
+			len(result.Archived), len(result.Killed), result.Deregistered)
+	}
+	assertAbsentRowSurvives(t, manager, project.ID, []string{derived, bareID}, [][2]string{{bareID, "managed-sibling"}})
+}
+
+// TestAbsentRootRefusalPrintsNoCommandWhenTheRootCannotProveTheKey pins the
+// counterpart: an owning session whose recorded root does NOT hash to the
+// key it is keyed under — a storage identity af cannot map back — gets no
+// --repo command at all, since --repo <root> could resolve to a different
+// project. The refusal names the session for the UI surfaces instead.
+func TestAbsentRootRefusalPrintsNoCommandWhenTheRootCannotProveTheKey(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	installOptionsRecordingBackend(t)
+	parent := testguard.CanonicalTempDir(t)
+	bare, worktree, sibling := bareWorktreeFixture(t, parent)
+	project := registerTestProject(t, worktree)
+	derived := config.DerivedRepoIDForUnresolvedRoot(filepath.Clean(worktree))
+	clearRecordedRepoID(t, project.ID)
+	if err := os.RemoveAll(worktree); err != nil {
+		t.Fatalf("remove the recorded root: %v", err)
+	}
+	manager, err := NewManager(config.DefaultConfig())
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	// Keyed under a DIFFERENT repository's id than its recorded root's hash
+	// — the marker still proves ownership of the ROOT, but --repo <root>
+	// would name another project.
+	foreignID := repoID(t, filepath.Join(parent, "seed"))
+	inst := managedSessionUnderIdentity(t, manager, foreignID, "foreign-keyed", bare, sibling)
+
+	result, delErr := manager.DeleteProject(DeleteProjectRequest{RepoPath: worktree})
+	if delErr == nil {
+		t.Fatalf("an owning session must stop the delete whatever key it rides under")
+	}
+	for _, want := range []string{"nothing was changed", "foreign-keyed", "checkout marker", inst.ID, "TUI or web UI"} {
+		if !strings.Contains(delErr.Error(), want) {
+			t.Fatalf("the refusal must name %q: %v", want, delErr)
+		}
+	}
+	if strings.Contains(delErr.Error(), "af sessions archive") {
+		t.Fatalf("a suspect whose root cannot prove its key must get no archive command: %v", delErr)
+	}
+	if len(result.Archived) != 0 || len(result.Killed) != 0 || result.Deregistered {
+		t.Fatalf("a refused delete must archive, kill and deregister nothing: archived=%d killed=%d deregistered=%v",
+			len(result.Archived), len(result.Killed), result.Deregistered)
+	}
+	assertAbsentRowSurvives(t, manager, project.ID, []string{derived, foreignID}, [][2]string{{foreignID, "foreign-keyed"}})
+}
+
+// TestAbsentRootRefusalNamesUnattributedSuspectsForTheUI covers the row that
+// predates checkout ids: every live identity stays suspect, and because no
+// probe ran, no --repo verdict exists — so the refusal names each session
+// for the TUI or web UI and prints no command.
+func TestAbsentRootRefusalNamesUnattributedSuspectsForTheUI(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	installOptionsRecordingBackend(t)
+	parent := testguard.CanonicalTempDir(t)
+	bare, worktree, sibling := bareWorktreeFixture(t, parent)
+	project := registerTestProject(t, worktree)
+	bareID := repoID(t, bare)
+	derived := config.DerivedRepoIDForUnresolvedRoot(filepath.Clean(worktree))
+	clearRecordedRepoID(t, project.ID)
+	clearRecordedCheckoutID(t, project.ID)
+	if err := os.RemoveAll(worktree); err != nil {
+		t.Fatalf("remove the recorded root: %v", err)
+	}
+	manager, err := NewManager(config.DefaultConfig())
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	inst := managedSessionUnderIdentity(t, manager, bareID, "unattributable-sibling", bare, sibling)
+
+	result, delErr := manager.DeleteProject(DeleteProjectRequest{RepoPath: worktree})
+	if delErr == nil {
+		t.Fatalf("a row that predates checkout ids clears nothing — the session stays suspect")
+	}
+	for _, want := range []string{"nothing was changed", "unattributable-sibling", "predates checkout ids", inst.ID, "TUI or web UI"} {
+		if !strings.Contains(delErr.Error(), want) {
+			t.Fatalf("the refusal must name %q: %v", want, delErr)
+		}
+	}
+	if strings.Contains(delErr.Error(), "af sessions archive") {
+		t.Fatalf("an unprobed suspect must get no archive command: %v", delErr)
+	}
+	if len(result.Archived) != 0 || len(result.Killed) != 0 || result.Deregistered {
+		t.Fatalf("a refused delete must archive, kill and deregister nothing: archived=%d killed=%d deregistered=%v",
+			len(result.Archived), len(result.Killed), result.Deregistered)
+	}
+	assertAbsentRowSurvives(t, manager, project.ID, []string{derived, bareID}, [][2]string{{bareID, "unattributable-sibling"}})
 }

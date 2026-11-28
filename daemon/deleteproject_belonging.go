@@ -39,14 +39,26 @@ import (
 const absentBelongingProbeTimeout = 3 * time.Second
 
 // liveRepoIdentity buckets the live sessions keyed under one repository
-// identity: their titles and, when any source can supply it, the canonical
-// identity root on disk — the bare common directory for a session of a bare
-// repository (#3358), the main root otherwise, and the bare clone's PARENT
-// directory for a session keyed under the pre-#3358 identity.
+// identity: their per-session detail and, when any source can supply it, the
+// canonical identity root on disk — the bare common directory for a session
+// of a bare repository (#3358), the main root otherwise, and the bare
+// clone's PARENT directory for a session keyed under the pre-#3358 identity.
 type liveRepoIdentity struct {
-	titles       map[string]struct{}
+	sessions     map[string]suspectSession
 	identityRoot string
 	rootKnown    bool
+}
+
+// suspectSession is the per-session detail a refusal names so the human can
+// find the session without a command: its worktree path, its stable session
+// id (#1195), and whether archive can even act on it — an in-place session,
+// a root agent, or a remote session has no worktree archive can relocate, so
+// archive.go refuses them outright and the refusal must not print that
+// command.
+type suspectSession struct {
+	worktreePath string
+	sessionID    string
+	unarchivable bool
 }
 
 // liveRepoIdentitiesLocked snapshots every live repository identity and the
@@ -58,16 +70,27 @@ type liveRepoIdentity struct {
 // invisible to a scan of only the row's ids (#7854). The caller holds m.mu.
 func (m *Manager) liveRepoIdentitiesLocked() map[string]*liveRepoIdentity {
 	sets := make(map[string]*liveRepoIdentity)
-	add := func(repoID, title, identityRoot string) {
+	add := func(repoID, title, identityRoot string, detail suspectSession) {
 		if repoID == "" || title == "" {
 			return
 		}
 		set := sets[repoID]
 		if set == nil {
-			set = &liveRepoIdentity{titles: make(map[string]struct{})}
+			set = &liveRepoIdentity{sessions: make(map[string]suspectSession)}
 			sets[repoID] = set
 		}
-		set.titles[title] = struct{}{}
+		// A title can surface in several sources at once as a create runs —
+		// reserved, pending, materialized — so merge detail field-wise: the
+		// later, richer source fills what the earlier one could not know.
+		cur := set.sessions[title]
+		if detail.worktreePath != "" {
+			cur.worktreePath = detail.worktreePath
+		}
+		if detail.sessionID != "" {
+			cur.sessionID = detail.sessionID
+		}
+		cur.unarchivable = cur.unarchivable || detail.unarchivable
+		set.sessions[title] = cur
 		if identityRoot != "" {
 			set.identityRoot = identityRoot
 			set.rootKnown = true
@@ -75,22 +98,30 @@ func (m *Manager) liveRepoIdentitiesLocked() map[string]*liveRepoIdentity {
 	}
 	for key := range m.reservedTitles {
 		repoID, title := splitDaemonInstanceKey(key)
-		add(repoID, title, "")
+		add(repoID, title, "", suspectSession{})
 	}
 	for key, pending := range m.pendingCreates {
 		repoID, title := splitDaemonInstanceKey(key)
-		add(repoID, title, pending.Worktree.RepoPath)
+		add(repoID, title, pending.Worktree.RepoPath, suspectSession{
+			worktreePath: pending.Worktree.WorktreePath,
+			sessionID:    pending.ID,
+			unarchivable: pending.Worktree.ExternalWorktree,
+		})
 	}
 	for key := range m.restoresInFlight {
 		repoID, title := splitDaemonInstanceKey(key)
-		add(repoID, title, "")
+		add(repoID, title, "", suspectSession{})
 	}
 	for key, inst := range m.instances {
 		repoID, title := splitDaemonInstanceKey(key)
 		if inst == nil || inst.GetLiveness() == session.LiveArchived {
 			continue
 		}
-		add(repoID, title, inst.GetRepoIdentityPath())
+		add(repoID, title, inst.GetRepoIdentityPath(), suspectSession{
+			worktreePath: inst.GetWorktreePath(),
+			sessionID:    inst.ID,
+			unarchivable: inst.IsExternalWorktree() || !inst.Capabilities().Archive,
+		})
 	}
 	return sets
 }
@@ -125,12 +156,21 @@ const (
 )
 
 // absentRootSuspect is one live session the delete could not clear of
-// belonging to the absent-rooted row it would deregister.
+// belonging to the absent-rooted row it would deregister. It carries the
+// detail the refusal prints — the session's key, its worktree path and
+// stable session id — and repoFlagOK, the one verdict a printed `af sessions
+// archive --repo <root>` command needs: that <root> provably hashes to this
+// session's own key, so the command can only ever resolve to it.
 type absentRootSuspect struct {
-	title  string
-	root   string
-	class  absentRootClass
-	reason string
+	title        string
+	repoID       string
+	root         string
+	worktreePath string
+	sessionID    string
+	unarchivable bool
+	repoFlagOK   bool
+	class        absentRootClass
+	reason       string
 }
 
 // absentRootBelonging is the verdict of the absent-branch ownership scan:
@@ -177,27 +217,40 @@ func (b *absentRootBelonging) vetIdentities(sets map[string]*liveRepoIdentity) [
 // its bound is unproven rather than "clear".
 func classifyRepoIdentities(sets map[string]*liveRepoIdentity, checkoutID string) (cleared map[string]struct{}, suspects []absentRootSuspect) {
 	cleared = make(map[string]struct{})
-	suspect := func(set *liveRepoIdentity, class absentRootClass, reason string) {
-		for title := range set.titles {
-			suspects = append(suspects, absentRootSuspect{title: title, root: set.identityRoot, class: class, reason: reason})
+	suspect := func(repoID string, set *liveRepoIdentity, class absentRootClass, reason string, repoFlagRoot bool) {
+		// `--repo <root>` provably reaches THIS session only when the probe
+		// established that RepoFromPath resolves <root> to <root> itself AND
+		// <root> hashes to the session's own key. Anything weaker — a root
+		// af cannot describe, a gitfile that resolves elsewhere, a root
+		// whose hash is not the session's key — means the printed command
+		// could land on a different project, so none is printed.
+		flagOK := repoFlagRoot && set.identityRoot != "" &&
+			config.RepoIDFromRoot(filepath.Clean(set.identityRoot)) == repoID
+		for title, sess := range set.sessions {
+			suspects = append(suspects, absentRootSuspect{
+				title: title, repoID: repoID, root: set.identityRoot,
+				worktreePath: sess.worktreePath, sessionID: sess.sessionID,
+				unarchivable: sess.unarchivable, repoFlagOK: flagOK,
+				class: class, reason: reason,
+			})
 		}
 	}
 	for _, repoID := range sortedRepoIdentitySets(sets) {
 		set := sets[repoID]
 		switch {
 		case checkoutID == "":
-			suspect(set, classUnattributed, "")
+			suspect(repoID, set, classUnattributed, "", false)
 		case !set.rootKnown:
-			suspect(set, classTransient, "it has not named its repository yet")
+			suspect(repoID, set, classTransient, "it has not named its repository yet", false)
 		default:
 			verdict := awaitRootBelonging(set.identityRoot, checkoutID)
 			switch {
 			case verdict.owner:
-				suspect(set, classOwner, verdict.evidence)
+				suspect(repoID, set, classOwner, verdict.evidence, verdict.repoFlagRoot)
 			case verdict.transient:
-				suspect(set, classTransient, "af could not finish describing its repository within "+absentBelongingProbeTimeout.String())
+				suspect(repoID, set, classTransient, "af could not finish describing its repository within "+absentBelongingProbeTimeout.String(), false)
 			case verdict.unproven:
-				suspect(set, classPersistent, verdict.reason)
+				suspect(repoID, set, classPersistent, verdict.reason, false)
 			default:
 				cleared[repoID] = struct{}{}
 			}
@@ -239,6 +292,13 @@ type rootBelongingVerdict struct {
 	transient bool
 	evidence  string
 	reason    string
+	// repoFlagRoot is set when the probe established that RepoFromPath
+	// resolves the root to the root itself — a `.git` directory or a
+	// bare-shaped directory — so `af sessions archive --repo <root>` can
+	// only ever name this session's own key. A gitfile root resolves to a
+	// DIFFERENT repository's identity, and anything unproven resolves
+	// nowhere provable, so neither earns the flag.
+	repoFlagRoot bool
 }
 
 // absentBelongingProbeFlights bounds an unresponsive identity-root probe to
@@ -340,6 +400,14 @@ func probeRootBelonging(root, checkoutID string) rootBelongingVerdict {
 	if shape == shapeUnproven {
 		return rootBelongingVerdict{unproven: true, reason: shapeReason}
 	}
+	// `af sessions archive --repo <root>` provably reaches the session keyed
+	// under this root only when RepoFromPath resolves <root> to <root>
+	// itself — a `.git` directory (git-dir == common-dir, so the toplevel is
+	// the identity) or a bare-shaped directory (the direct bare probe names
+	// the git dir itself). A gitfile resolves to a different repository's
+	// identity, so its --repo could name the wrong project.
+	repoFlagRoot := shape == shapeCommonDir &&
+		(commonDir == root || commonDir == filepath.Join(root, ".git"))
 
 	// The marker sweep runs over every agent-factory directory this root
 	// could own: its established common directory, the root itself when it
@@ -393,14 +461,14 @@ func probeRootBelonging(root, checkoutID string) rootBelongingVerdict {
 		}
 		for _, id := range ids {
 			if id == checkoutID {
-				return rootBelongingVerdict{owner: true, evidence: dir}
+				return rootBelongingVerdict{owner: true, evidence: dir, repoFlagRoot: repoFlagRoot}
 			}
 		}
 	}
 	if unproven != "" {
 		return rootBelongingVerdict{unproven: true, reason: unproven}
 	}
-	return rootBelongingVerdict{cleared: true}
+	return rootBelongingVerdict{cleared: true, repoFlagRoot: repoFlagRoot}
 }
 
 // childPlainDir reports whether a directory is DETERMINATELY not a
@@ -589,18 +657,50 @@ func (m *Manager) absentRootBelongingScan(checkoutID string) *absentRootBelongin
 	return &absentRootBelonging{checkoutID: checkoutID, cleared: cleared, suspects: suspects}
 }
 
-// archiveSuggestion renders the one command that resolves a suspect whose
-// resolution is archiving the session. It is deliberately the bare-title
-// form: --repo <root> would run RepoFromPath on a root af already could not
-// describe (a gone or unreadable root, a pre-#3358 parent that is not itself
-// a repository) and can even hash to a DIFFERENT repo id than the session is
-// keyed under (#7914 review). The bare form resolves across every project
-// and picks the named session; the #1814 ambiguity guard refuses to pick
-// between same-titled namesakes rather than archive the wrong one — which is
-// the one honest answer left when the CLI offers no stable session id to
-// name it by.
-func archiveSuggestion(s absentRootSuspect) string {
-	return shellsuggest.PositionalCommand("af", []string{"sessions", "archive"}, s.title)
+// suspectRef names one suspect for a human to find without a command: its
+// title, its stable session id (#1195), and its worktree path — falling back
+// to the identity root af recorded when no materialized row can say where
+// its workspace lives.
+func suspectRef(s absentRootSuspect) string {
+	path := s.worktreePath
+	if path == "" {
+		path = s.root
+	}
+	if s.sessionID != "" {
+		return fmt.Sprintf("%q (session id %s, worktree %s)", s.title, s.sessionID, path)
+	}
+	return fmt.Sprintf("%q (worktree %s)", s.title, path)
+}
+
+// suspectRemedy is the per-suspect half of the refusal: what resolves THIS
+// session, without ever printing a command that could land on a different
+// one. The bare `af sessions archive <title>` resolves by cwd, and a
+// same-titled session in another project is exactly the ambiguity it cannot
+// see — so the only archive command printed is `--repo <root>`, and only
+// when <root> provably hashes to this session's own key (repoFlagOK).
+// Otherwise the remedy names the session — title, stable session id and
+// worktree path — and points at the TUI or web UI, where it is listed. A
+// session archive cannot act on at all (an in-place session, a root agent,
+// or a remote session has no worktree to relocate — archive.go refuses
+// them) gets no command: it must be stopped or removed by the user.
+func suspectRemedy(s absentRootSuspect) string {
+	if s.unarchivable {
+		return fmt.Sprintf("%s cannot be archived — in-place, root-agent and remote sessions have no worktree archive can relocate — so it must be stopped or removed by the user", suspectRef(s))
+	}
+	if s.repoFlagOK {
+		return fmt.Sprintf("archive %s from the TUI or web UI, where it is listed — or run %s",
+			suspectRef(s), shellsuggest.PositionalCommand("af", []string{"sessions", "archive", "--repo", s.root}, s.title))
+	}
+	return fmt.Sprintf("archive %s from the TUI or web UI, where it is listed", suspectRef(s))
+}
+
+// suspectRemedies joins the per-suspect remedies a clause names.
+func suspectRemedies(ss []absentRootSuspect) string {
+	out := make([]string, 0, len(ss))
+	for _, s := range ss {
+		out = append(out, suspectRemedy(s))
+	}
+	return strings.Join(out, "; ")
 }
 
 // absentRootBelongingRefusal renders the delete refusal for live sessions the
@@ -635,13 +735,6 @@ func absentRootBelongingRefusal(repoID, repoPath string, suspects []absentRootSu
 		}
 		return session.DedupeSorted(out)
 	}
-	cmds := func(ss []absentRootSuspect) string {
-		out := make([]string, 0, len(ss))
-		for _, s := range ss {
-			out = append(out, archiveSuggestion(s))
-		}
-		return strings.Join(out, "; ")
-	}
 	if len(owners) > 0 {
 		roots := session.DedupeSorted(func() []string {
 			out := make([]string, 0, len(owners))
@@ -658,8 +751,8 @@ func absentRootBelongingRefusal(repoID, repoPath string, suspects []absentRootSu
 			return out
 		}())
 		clauses = append(clauses, fmt.Sprintf(
-			"session(s) %v are live under %s — inside it af found this record's own checkout marker (%s), so a sibling worktree of that clone could be their workspace; archive them: %s",
-			names(owners), strings.Join(roots, " and "), strings.Join(evidences, " and "), cmds(owners)))
+			"session(s) %v are live under %s — inside it af found this record's own checkout marker (%s), so a sibling worktree of that clone could be their workspace: %s",
+			names(owners), strings.Join(roots, " and "), strings.Join(evidences, " and "), suspectRemedies(owners)))
 	}
 	if len(transients) > 0 {
 		reasons := make(map[string]struct{})
@@ -677,13 +770,13 @@ func absentRootBelongingRefusal(repoID, repoPath string, suspects []absentRootSu
 		}
 		sort.Strings(parts)
 		clauses = append(clauses, fmt.Sprintf(
-			"session(s) %v are live under a repository af cannot describe (%s) — archive the ones that are this project's: %s; for the rest, making the repository readable again (restoring it, fixing permissions, or removing the unreadable entry) also clears them",
-			names(persistents), strings.Join(parts, "; "), cmds(persistents)))
+			"session(s) %v are live under a repository af cannot describe (%s) — for the ones that are this project's: %s; for the rest, making the repository readable again (restoring it, fixing permissions, or removing the unreadable entry) also clears them",
+			names(persistents), strings.Join(parts, "; "), suspectRemedies(persistents)))
 	}
 	if len(unattributed) > 0 {
 		clauses = append(clauses, fmt.Sprintf(
-			"session(s) %v are live and this record predates checkout ids, so nothing af wrote can clear them — archive the ones that are this project's: %s",
-			names(unattributed), cmds(unattributed)))
+			"session(s) %v are live and this record predates checkout ids, so nothing af wrote can clear them — for the ones that are this project's: %s",
+			names(unattributed), suspectRemedies(unattributed)))
 	}
 	return fmt.Errorf(
 		"delete project %s: its recorded root %s is absent and the record predates af's repository identities, so af cannot establish which live sessions it owned — and it could not clear session(s) %v; nothing was changed. %s",
@@ -714,22 +807,15 @@ func absentRootEscapedReports(suspects []absentRootSuspect) string {
 		}
 		return session.DedupeSorted(out)
 	}
-	cmdsOf := func(ss []absentRootSuspect) string {
-		out := make([]string, 0, len(ss))
-		for _, s := range ss {
-			out = append(out, archiveSuggestion(s))
-		}
-		return strings.Join(out, "; ")
-	}
 	if len(owners) > 0 {
 		parts = append(parts, fmt.Sprintf(
-			"session(s) %v are live under the clone that held the removed record's own checkout marker — they are this project's; archive them: %s",
-			titlesOf(owners), cmdsOf(owners)))
+			"session(s) %v are live under the clone that held the removed record's own checkout marker — they are this project's: %s",
+			titlesOf(owners), suspectRemedies(owners)))
 	}
 	if len(other) > 0 {
 		parts = append(parts, fmt.Sprintf(
-			"session(s) %v could not be vetted against the removed record — archive the ones that are this project's: %s",
-			titlesOf(other), cmdsOf(other)))
+			"session(s) %v could not be vetted against the removed record — for the ones that are this project's: %s",
+			titlesOf(other), suspectRemedies(other)))
 	}
 	return strings.Join(parts, "; ")
 }
