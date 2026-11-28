@@ -419,6 +419,70 @@ func dockerRunOptionConsumesNext(arg string) bool {
 	return err == nil && consume
 }
 
+// dockerRunArgsEnvEntries walks docker.run_args the way pflag does and calls
+// visit for each env entry a -e/--env spelling carries. The entry is either
+// NAME=value (every =-valued spelling: separate, --env=, -e=, attached, and
+// the trailing -e of a combined short cluster) or the bare NAME a separate
+// `-e NAME` passes docker, which resolves against the CLI environment.
+//
+// The walk mirrors the validators' pflag model exactly so the warning's name
+// extractor (dockerRunArgsEnvNames) and the gitconfig resolver
+// (dockerRunArgsEnvValue) share ONE spelling surface and cannot drift: it
+// recognizes every spelling the account/credential validators accept, stops at
+// the first non-option argument and at the -- terminator (docker run parses
+// non-interspersed, so no later token is a flag — every validator refuses
+// `--` before this walk runs, but the contract mirrors pflag), skips a
+// value-taking option's swallowed next argv element (#7726), and walks
+// combined short-option clusters the way dockerCheckShorthandCluster does —
+// reaching -e whether it stands alone, attaches inline (-teNAME=v), or takes
+// the next argument (-te NAME=v).
+func dockerRunArgsEnvEntries(args []string, visit func(entry string)) {
+	for index := 0; index < len(args); index++ {
+		arg := args[index]
+		switch {
+		case arg == "-e" || arg == "--env":
+			if index+1 < len(args) {
+				index++
+				visit(args[index])
+			}
+		case strings.HasPrefix(arg, "--env="):
+			visit(strings.TrimPrefix(arg, "--env="))
+		case strings.HasPrefix(arg, "-e="):
+			visit(strings.TrimPrefix(arg, "-e="))
+		case strings.HasPrefix(arg, "-e") && len(arg) > 2:
+			visit(strings.TrimPrefix(arg, "-e"))
+		case arg == "--":
+			// pflag's option terminator: every token after it is positional,
+			// so no later token is a flag either.
+			return
+		case strings.HasPrefix(arg, "--") || (len(arg) == 2 && arg[0] == '-'):
+			// A bare value-taking option (--label, -l, or a mount option
+			// neither consumer tracks) swallows the NEXT argv element as its
+			// value, so a following -e is that value and never a flag af sees
+			// (#7726). Skip the swallowed token exactly as Docker would.
+			if dockerRunOptionConsumesNext(arg) && index+1 < len(args) {
+				index++
+			}
+		case len(arg) > 2 && arg[0] == '-' && arg[1] != '-':
+			// A combined short option whose trailing -e Docker honors exactly
+			// as if it had been written on its own. The cluster walk visits the
+			// env entry (the inline remainder or the next argument); the
+			// consumption helper then skips the swallowed next argument so it
+			// is not re-walked as a fresh flag.
+			_ = dockerCheckShorthandCluster(arg, args, index, "e",
+				func(_ byte, value string) error { visit(value); return nil },
+				"", "")
+			if dockerClusterConsumesNextArg(arg) && index+1 < len(args) {
+				index++
+			}
+		default:
+			// A non-option argument ends docker's option parsing, so no later
+			// token is a flag.
+			return
+		}
+	}
+}
+
 // validateDockerRunArgsShape is the option-shape half of the run_args
 // guards, run for EVERY docker session: the account and credential-mount
 // validators run it plus their env/mount checks, so this is the guard for the

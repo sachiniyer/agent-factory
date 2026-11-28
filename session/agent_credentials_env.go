@@ -659,60 +659,16 @@ func credentialMountOverriddenWarning(imageEnv, runArgs []string, overridden []s
 // dockerRunArgsEnvNames returns the variable names docker.run_args assigns via
 // -e/--env entries (in every spelling: separate value, =value, and combined
 // short clusters). --env-file is not walked — the validator refuses it on this
-// path before the warning runs. Names only; values are never read.
+// path before the warning runs. Names only; values are never read. Shares the
+// validators' pflag walk (dockerRunArgsEnvEntries) with the gitconfig resolver
+// (dockerRunArgsEnvValue) so the two cannot drift.
 func dockerRunArgsEnvNames(args []string) []string {
 	var names []string
-	checkEnv := func(value string) {
-		name, _, _ := strings.Cut(value, "=")
-		if name != "" {
+	dockerRunArgsEnvEntries(args, func(entry string) {
+		if name, _, _ := strings.Cut(entry, "="); name != "" {
 			names = append(names, name)
 		}
-	}
-	for index := 0; index < len(args); index++ {
-		arg := args[index]
-		switch {
-		case arg == "-e" || arg == "--env":
-			if index+1 < len(args) {
-				index++
-				checkEnv(args[index])
-			}
-		case strings.HasPrefix(arg, "--env="):
-			checkEnv(strings.TrimPrefix(arg, "--env="))
-		case strings.HasPrefix(arg, "-e="):
-			checkEnv(strings.TrimPrefix(arg, "-e="))
-		case strings.HasPrefix(arg, "-e") && len(arg) > 2:
-			checkEnv(strings.TrimPrefix(arg, "-e"))
-		case strings.HasPrefix(arg, "--") || (len(arg) == 2 && arg[0] == '-'):
-			// The extractor shares the consumption half of the pflag model —
-			// a bare value-taking option (--label, -l, or a mount option this
-			// path does not track) swallows the NEXT argv element whatever
-			// its shape, so a following -e is its value and never a flag af
-			// sees (#7726). Without consuming, the walk re-reads the
-			// swallowed -e as a fresh env flag and reports the phantom name
-			// strings.Cut leaves on its "value" — the real --env=NAME=...
-			// behind it. The refusal half is the validators' and runs before
-			// this warning layer ever sees the list.
-			if dockerRunOptionConsumesNext(arg) && index+1 < len(args) {
-				index++
-			}
-		case len(arg) > 2 && arg[0] == '-' && arg[1] != '-':
-			_ = dockerCheckShorthandCluster(arg, args, index, "e",
-				func(_ byte, value string) error { checkEnv(value); return nil },
-				"", "")
-			// pflag: a cluster ending in a value-taking option consumes the
-			// NEXT argv element as that option's value; skip the swallowed
-			// token so it is not re-walked as a fresh env flag and the
-			// extractor reports the name the real flag behind it carries.
-			if dockerClusterConsumesNextArg(arg) && index+1 < len(args) {
-				index++
-			}
-		default:
-			// A non-option argument: `docker run` parses non-interspersed,
-			// so option parsing ends here and nothing after this token is a
-			// flag — including any -e that follows it (#7733 R1).
-			return names
-		}
-	}
+	})
 	return names
 }
 

@@ -192,8 +192,13 @@ func (p *dockerProvisioner) afGitConfigMarkerArgs(forwarded []string) []string {
 // agentGitConfigFile resolves the global gitconfig the AGENT's own git
 // reads on this session — the file trustWorkspaceDirectories appends
 // safe.directory to so the pane's git keeps working in the bind-mounted
-// workspace exactly as on master (#7891 R4). On the credential-mount path
-// af re-asserts GIT_CONFIG_GLOBAL to the session home's .gitconfig UNLESS
+// workspace exactly as on master (#7891 R4). It reports ("", false) when
+// the container's GIT_CONFIG_GLOBAL is defined-empty: git then reads NO
+// global file at all — `git config --get-all` ignores $HOME/.gitconfig and
+// `--global` fails writing to the empty path (measured on 2.43) — so no
+// global target exists and reporting a path would name a file the agent
+// never reads (#7949 review R2). On the credential-mount path af
+// re-asserts GIT_CONFIG_GLOBAL to the session home's .gitconfig UNLESS
 // the operator passthrough-claimed it — and under the per-slot rule the
 // lockdown can stay active while exactly that claim stands, so the claim
 // must resolve here too (Codex on #7891 N1): a run_args -e is last-wins
@@ -201,54 +206,120 @@ func (p *dockerProvisioner) afGitConfigMarkerArgs(forwarded []string) []string {
 // ambient resolution master's `git config --global` write followed. On
 // the account path the ambient name survives, so the same run_args →
 // image ENV chain applies without the claim check.
-func (p *dockerProvisioner) agentGitConfigFile() string {
+func (p *dockerProvisioner) agentGitConfigFile() (string, bool) {
 	def := p.sessionHome() + "/.gitconfig"
 	if p.spec.Account.Dir == "" &&
 		!slices.Contains(p.spec.SessionEnvPassthrough, "GIT_CONFIG_GLOBAL") {
-		return def
+		return def, true
 	}
-	if value := dockerRunArgsEnvValue(p.runArgs, "GIT_CONFIG_GLOBAL"); value != "" {
-		return value
+	// The run_args layer resolves exactly as docker's env merge does: a
+	// bare -e the CLI environment cannot fill changes no earlier value —
+	// moby's ReplaceOrAppendEnvValues removes a bare key only from the
+	// built-in defaults (PATH, HOSTNAME, TERM, link env), and runc keeps
+	// the last valued entry — but it still NAMES the variable for the
+	// daemon's merge, so the image ENV fallback is suppressed whether or
+	// not a valued entry set the name (#7949 review R1). A name-only
+	// presence therefore resolves to unset; a defined-empty result names
+	// no global file git reads at all.
+	switch value, state := dockerRunArgsEnvValue(p.runArgs, "GIT_CONFIG_GLOBAL", p.dockerEnvironment()); state {
+	case dockerRunArgsEnvSet:
+		if value == "" {
+			return "", false
+		}
+		return value, true
+	case dockerRunArgsEnvUnset:
+		return def, true
 	}
-	if value := os.Getenv("GIT_CONFIG_GLOBAL"); value != "" &&
-		slices.Contains(p.forwardedEnvNames(), "GIT_CONFIG_GLOBAL") {
-		return value
+	// The bare -e forward af emits for a host-valued claim resolves in the
+	// same CLI environment, so a forwarded-but-host-empty claim pins the
+	// name defined-empty rather than falling to the image ENV — the same
+	// no-target collapse as a defined-empty run_args value.
+	if slices.Contains(p.forwardedEnvNames(), "GIT_CONFIG_GLOBAL") {
+		if value := os.Getenv("GIT_CONFIG_GLOBAL"); value != "" {
+			return value, true
+		}
+		return "", false
 	}
 	for _, entry := range p.dockerImageEnv() {
-		if value, ok := strings.CutPrefix(entry, "GIT_CONFIG_GLOBAL="); ok && value != "" {
-			return value
+		if value, ok := strings.CutPrefix(entry, "GIT_CONFIG_GLOBAL="); ok {
+			if value == "" {
+				return "", false
+			}
+			return value, true
 		}
 	}
-	return def
+	return def, true
 }
 
-// dockerRunArgsEnvValue returns the LAST value a docker.run_args env
-// spelling assigns name, or "" — mirroring how docker resolves repeated
-// -e entries (last wins). A bare `-e NAME` resolves against the daemon
-// environment, which is what the container actually receives.
-func dockerRunArgsEnvValue(args []string, name string) string {
-	value := ""
-	for i, arg := range args {
-		var entry string
-		switch {
-		case arg == "-e" || arg == "--env":
-			if i+1 < len(args) {
-				entry = args[i+1]
-			}
-		case strings.HasPrefix(arg, "--env="):
-			entry = strings.TrimPrefix(arg, "--env=")
-		case strings.HasPrefix(arg, "-e"):
-			entry = strings.TrimPrefix(arg, "-e")
-		}
-		if n, v, ok := strings.Cut(entry, "="); ok && n == name {
-			value = v
-		} else if entry == name {
-			if v := os.Getenv(name); v != "" {
-				value = v
-			}
+// dockerRunArgsEnvState is the container state docker's env merge leaves a
+// name in once docker.run_args has applied: SET to the last value a
+// NAME=value spelling assigns (a defined-empty value counts, and a bare
+// -e NAME the CLI env fills substitutes its value), UNSET when run_args
+// named it only through bare -e NAME spellings the CLI env cannot fill —
+// the daemon's merge drops the image ENV for any name the user env
+// mentions, but no entry assigns it a value — or ABSENT, meaning
+// run_args never named it.
+type dockerRunArgsEnvState int
+
+const (
+	dockerRunArgsEnvAbsent dockerRunArgsEnvState = iota
+	dockerRunArgsEnvSet
+	dockerRunArgsEnvUnset
+)
+
+// dockerRunArgsEnvValue resolves the LAST state a docker.run_args env
+// spelling leaves name in, mirroring the docker engine's resolution:
+// NAME=value entries assign value and last wins across every spelling the
+// validators accept, while a bare `-e NAME`/`--env NAME` resolves against
+// cliEnv — the environment af hands the docker CLI (dockerEnvironment), not
+// the daemon's raw os.Environ — the way docker/cli's ValidateEnv reads the
+// CLI's own environment: a name present there substitutes its value (a
+// defined-empty CLI value resolves to ""), and a name absent there keeps
+// the entry bare.
+//
+// A bare entry the CLI env cannot fill changes no value an earlier entry
+// set (#7949 review R1 — the earlier "unset clears earlier values" reading
+// was wrong): moby's ReplaceOrAppendEnvValues removes a bare key only from
+// the built-in defaults (PATH, HOSTNAME, TERM, link env) — appended user
+// entries are never in its removal cache — and runc keeps the LAST valued
+// entry, so `-e NAME=/x -e NAME` still delivers /x. The bare mention's
+// only effect is suppressing the image ENV fallback: the daemon's merge
+// drops an image ENV entry whenever the user env names the key at all, so
+// a name with no valued entry at all is unset in the container.
+//
+// Shares the validators' pflag walk (dockerRunArgsEnvEntries) so every
+// spelling the validators accept — separate, =value, attached, -e=, and
+// combined short clusters (-te NAME=v, -teNAME=v) — resolves here too, and
+// the resolver cannot drift from the validators. The resolver is the sole
+// decider of where agentGitConfigFile writes safe.directory, so a spelling
+// the validators pass but this walk misses leaves the mark in the wrong
+// gitconfig while the agent's git reads another (#7891 R4).
+func dockerRunArgsEnvValue(args []string, name string, cliEnv []string) (string, dockerRunArgsEnvState) {
+	cli := make(map[string]string, len(cliEnv))
+	for _, entry := range cliEnv {
+		if n, v, ok := strings.Cut(entry, "="); ok {
+			cli[n] = v
 		}
 	}
-	return value
+	value := ""
+	state := dockerRunArgsEnvAbsent
+	dockerRunArgsEnvEntries(args, func(entry string) {
+		if n, v, ok := strings.Cut(entry, "="); ok {
+			if n == name {
+				value, state = v, dockerRunArgsEnvSet
+			}
+			return
+		}
+		if entry != name {
+			return
+		}
+		if v, ok := cli[name]; ok {
+			value, state = v, dockerRunArgsEnvSet
+		} else if state == dockerRunArgsEnvAbsent {
+			state = dockerRunArgsEnvUnset
+		}
+	})
+	return value, state
 }
 
 // cloneTemplateSuppression reports whether af's clone argv suppresses
